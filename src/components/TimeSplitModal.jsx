@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { Clock, CheckCircle, AlertTriangle } from 'lucide-react';
 
 const fmt = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -19,13 +19,25 @@ export default function TimeSplitModal({ primaryName, companionName, totalSecs, 
   const [mode, setMode] = useState('sequential'); // 'sequential' | 'simultaneous'
   const [primaryMins, setPrimaryMins] = useState(Math.ceil(totalMins / 2));
   const [companionMins, setCompanionMins] = useState(Math.floor(totalMins / 2));
+  const [fallbackStart] = useState(() => Date.now() - totalSecs * 1000);
+
+  const handleModeChange = (newMode) => {
+    setMode(newMode);
+    if (newMode === 'simultaneous') {
+      setPrimaryMins(totalMins);
+      setCompanionMins(totalMins);
+    } else {
+      setPrimaryMins(Math.ceil(totalMins / 2));
+      setCompanionMins(Math.floor(totalMins / 2));
+    }
+  };
 
   const pm = Math.max(1, Number(primaryMins) || 1);
   const cm = Math.max(1, Number(companionMins) || 1);
 
   // Live time preview calculation
   const times = useMemo(() => {
-    const start = jobStart ?? (Date.now() - totalSecs * 1000);
+    const start = jobStart ?? fallbackStart;
     if (mode === 'sequential') {
       const primaryEnd = start + pm * 60000;
       return {
@@ -69,7 +81,7 @@ export default function TimeSplitModal({ primaryName, companionName, totalSecs, 
           {['sequential', 'simultaneous'].map(m => (
             <button
               key={m}
-              onClick={() => setMode(m)}
+              onClick={() => handleModeChange(m)}
               style={{
                 flex: 1, padding: '0.5rem', border: 'none', borderRadius: 'var(--radius-sm)',
                 cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600, transition: 'all 0.15s',

@@ -1,9 +1,13 @@
 import { useState, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/db';
-import { GoogleMap, DirectionsService, DirectionsRenderer } from '@react-google-maps/api';
-import { Plus, Save, Trash2, ChevronDown, ChevronUp, BookMarked, FolderOpen, GripVertical, Shuffle } from 'lucide-react';
+import { GoogleMap, Polyline } from '@react-google-maps/api';
+import { useMapStatus } from '../components/MapProvider';
+import { Plus, Save, Trash2, ChevronDown, ChevronUp, BookMarked, FolderOpen, GripVertical, Shuffle, Map as MapIcon, Calendar, Route as RouteIcon } from 'lucide-react';
 import AppDialog from '../components/AppDialog';
+import { trackApiCall } from '../utils/apiTracker';
+import WeeklyScheduler from '../components/WeeklyScheduler';
+import { calculateTieredMatrix } from '../utils/matrix';
 
 const mapContainerStyle = { width: '100%', height: '300px', borderRadius: 'var(--radius-md)', marginTop: '1rem' };
 
@@ -18,15 +22,39 @@ const getDist = (a, b) => {
 export default function RouteBuilder() {
   const customers   = useLiveQuery(() => db.customers.toArray(), []);
   const templates   = useLiveQuery(() => db.routes.where({ isTemplate: 1 }).toArray(), []);
+  const allVisits   = useLiveQuery(() => db.visits.toArray(), []);
+  const settings    = useLiveQuery(() => db.settings.get('config'), []) || {};
+
+  const tieredMatrixData = useMemo(() => calculateTieredMatrix(allVisits, customers), [allVisits, customers]);
+
+  const [activeTab,     setActiveTab]     = useState('daily');
+  const [customerTab,   setCustomerTab]   = useState('mowing');
 
   const [selectedStops, setSelectedStops] = useState([]);
-  const [directions,    setDirections]    = useState(null);
+  const [showMap,       setShowMap]       = useState(false);
   const [routeName,     setRouteName]     = useState('');
   const [dialog,        setDialog]        = useState(null);
   const [dragIndex,     setDragIndex]     = useState(null);
   const [dragOverIndex, setDragOverIndex] = useState(null);
+  const [searchQuery,   setSearchQuery]   = useState('');
+  const [showTemplates, setShowTemplates] = useState(false);
   const touchDragIndex  = useRef(null);
   const stopItemRefs    = useRef([]);
+  const { isLoaded, loadError } = useMapStatus();
+
+  const routePath = useMemo(() => {
+    if (selectedStops.length < 2) return [];
+    return selectedStops.map(stop => {
+      const geo = stop.customer.geofence;
+      if (geo && geo.length > 0) {
+        return { 
+          lat: geo.reduce((s, p) => s + p.lat, 0) / geo.length, 
+          lng: geo.reduce((s, p) => s + p.lng, 0) / geo.length 
+        };
+      }
+      return null;
+    }).filter(Boolean);
+  }, [selectedStops]);
 
   const availableCustomers = useMemo(() => {
     if (!customers) return [];
@@ -93,9 +121,9 @@ export default function RouteBuilder() {
   };
   const handleTouchEnd = () => { touchDragIndex.current = null; setDragOverIndex(null); };
 
-  // ── Optimize route order (nearest-neighbor) ───────────────────────────────
+  // ── Optimize route order (Google Maps Directions API) ───────────────────────────────
   const handleOptimizeRoute = () => {
-    if (selectedStops.length < 3) return;
+    if (selectedStops.length < 2) return;
     const getCenter = (stop) => {
       const geo = stop.customer.geofence;
       if (!geo || geo.length === 0) return null;
@@ -105,20 +133,64 @@ export default function RouteBuilder() {
       setDialog({ type: 'info', title: 'Cannot Optimize', message: 'Some stops are missing geofence data. Set a geofence on each customer to enable route optimization.' });
       return;
     }
-    const remaining = [...selectedStops];
-    const optimized = [remaining.splice(0, 1)[0]];
-    while (remaining.length > 0) {
-      const lastCoords = getCenter(optimized[optimized.length - 1]);
-      let nearestIdx = 0, nearestDist = Infinity;
-      remaining.forEach((stop, i) => {
-        const d = getDist(lastCoords, getCenter(stop));
-        if (d < nearestDist) { nearestDist = d; nearestIdx = i; }
-      });
-      optimized.push(remaining.splice(nearestIdx, 1)[0]);
+    
+    if (!isLoaded || loadError || !window.google || !window.google.maps) {
+       setDialog({ type: 'danger', title: 'Offline Mode', message: 'You cannot optimize routes without an internet connection to Google Maps.' });
+       return;
     }
-    setSelectedStops(optimized);
-    setDirections(null);
-    setDialog({ type: 'success', title: 'Route Optimized!', message: `${optimized.length} stops sorted by nearest-neighbor proximity.` });
+
+    setDialog({ type: 'info', title: 'Optimizing...', message: 'Asking Google Maps for the fastest driving route. Please wait...' });
+
+    const directionsService = new window.google.maps.DirectionsService();
+    
+    const origin = getCenter(selectedStops[0]);
+    const destination = getCenter(selectedStops[selectedStops.length - 1]);
+    
+    const waypoints = selectedStops.slice(1, selectedStops.length - 1).map(stop => ({
+      location: getCenter(stop),
+      stopover: true
+    }));
+
+    directionsService.route({
+      origin,
+      destination,
+      waypoints,
+      optimizeWaypoints: true,
+      travelMode: window.google.maps.TravelMode.DRIVING
+    }, (response, status) => {
+      if (status === 'OK') {
+        const route = response.routes[0];
+        const optimizedOrder = route.waypoint_order;
+        
+        const newStops = [selectedStops[0]]; // Start is fixed
+        optimizedOrder.forEach(idx => {
+          newStops.push(selectedStops[idx + 1]);
+        });
+        newStops.push(selectedStops[selectedStops.length - 1]); // End is fixed
+        
+        // Map exact driving times and distances (duration.value and distance.value are in seconds/meters)
+        newStops[0].plannedDriveTimeSecs = 0;
+        newStops[0].plannedDriveDistanceMeters = 0;
+        for (let i = 0; i < route.legs.length; i++) {
+           if (newStops[i + 1]) {
+             newStops[i + 1].plannedDriveTimeSecs = route.legs[i].duration.value;
+             newStops[i + 1].plannedDriveDistanceMeters = route.legs[i].distance.value;
+           }
+        }
+        
+        setSelectedStops(newStops);
+        
+        const totalDriveSecs = route.legs.reduce((acc, leg) => acc + leg.duration.value, 0);
+        const totalDriveMeters = route.legs.reduce((acc, leg) => acc + leg.distance.value, 0);
+        const totalMins = Math.round(totalDriveSecs / 60);
+        const totalMiles = (totalDriveMeters * 0.000621371).toFixed(1);
+        
+        setDialog({ type: 'success', title: 'Route Optimized!', message: `Google Maps optimized ${newStops.length} stops. Estimated driving: ${totalMins} minutes (${totalMiles} miles).` });
+        
+      } else {
+        setDialog({ type: 'danger', title: 'Optimization Failed', message: `Google Maps could not optimize this route. Error: ${status}` });
+      }
+    });
   };
 
   const toggleExpanded = (index) =>
@@ -134,28 +206,35 @@ export default function RouteBuilder() {
     }));
   };
 
-  // ── Directions ───────────────────────────────────────────────────────────────
-  const directionsCallback = (response) => {
-    if (response !== null && response.status === 'OK') setDirections(response);
-  };
-
-  // ── Save active route ────────────────────────────────────────────────────────
+  // ── Save route ────────────────────────────────────────────────────────
   const handleSaveRoute = async () => {
     if (selectedStops.length === 0) return;
+    // Deactivate any existing active or pending routes first
+    const existingActive = await db.routes.where('status').anyOf('active', 'pending').toArray();
+    for (const r of existingActive) {
+      await db.routes.update(r.id, { status: 'completed' });
+    }
+    const totalMeters = selectedStops.reduce((sum, s) => sum + (s.plannedDriveDistanceMeters || 0), 0);
+    const plannedDistanceMiles = totalMeters > 0 ? parseFloat((totalMeters * 0.000621371).toFixed(1)) : null;
+
+    const autoName = routeName.trim() || `${new Date().toLocaleDateString('en-US', { weekday: 'long' })} Route`;
     await db.routes.add({
-      name: routeName.trim() || null,
+      name: autoName,
       date: new Date().toISOString(),
-      status: 'active',
+      status: 'pending',
       isTemplate: 0,
+      plannedDistanceMiles,
       stops: selectedStops.map(s => ({
         customerId: s.customer.id,
-        plannedServiceIds: s.plannedServiceIds
+        plannedServiceIds: s.plannedServiceIds,
+        plannedDriveTimeSecs: s.plannedDriveTimeSecs || null,
+        plannedDriveDistanceMeters: s.plannedDriveDistanceMeters || null
       }))
     });
     setDialog({ type: 'success', title: 'Route Saved!', message: `${selectedStops.length} stop${selectedStops.length > 1 ? 's' : ''} saved to your active route.` });
     setSelectedStops([]);
     setRouteName('');
-    setDirections(null);
+    setShowMap(false);
   };
 
   // ── Save as template ─────────────────────────────────────────────────────────
@@ -186,7 +265,7 @@ export default function RouteBuilder() {
     }
     setSelectedStops(stops);
     setRouteName(template.name || '');
-    setDirections(null);
+    setShowMap(false);
     setDialog({ type: 'info', title: 'Template Loaded', message: `"${template.name}" — ${stops.length} stop${stops.length !== 1 ? 's' : ''} ready. Edit if needed, then save your active route.` });
   };
 
@@ -197,220 +276,362 @@ export default function RouteBuilder() {
       title: `Delete "${template.name}"?`,
       message: 'This template will be permanently removed.',
       confirmLabel: 'Delete',
-      onConfirm: () => db.routes.delete(template.id)
+      onConfirm: async () => {
+        await db.routes.delete(template.id);
+        setDialog(null);
+      }
     });
   };
 
+  const handleLoadDayRoute = (day) => {
+    if (!customers) return;
+    const now = Date.now();
+    const dayCusts = customers.filter(c => 
+      c.status !== 'inactive' && 
+      c.preferredDay === day && 
+      (!c.snoozedUntil || c.snoozedUntil < now)
+    );
+    const stops = dayCusts.map(customer => {
+      const defaultIds = customer.services
+        ? customer.services.filter(s => s.active).slice(0, 1).map(s => s.id)
+        : [];
+      return { customer, plannedServiceIds: defaultIds, expanded: false };
+    });
+    setSelectedStops(stops);
+    setRouteName(`${day} Route`);
+    setActiveTab('daily');
+    setDialog({ type: 'info', title: `${day} Route Loaded`, message: `${stops.length} stop${stops.length !== 1 ? 's' : ''} added. (Snoozed customers were ignored).` });
+  };
+
   return (
-    <div className="animate-fade-in" style={{ paddingBottom: '2rem' }}>
+    <div className="animate-fade-in" style={{ maxWidth: '1200px', margin: '0 auto', paddingBottom: '2rem' }}>
       <AppDialog dialog={dialog} onClose={() => setDialog(null)} />
       <h1 className="page-title">Route Builder</h1>
+
+      {/* TABS */}
+      <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem' }}>
+        <button 
+          className={`btn ${activeTab === 'daily' ? 'btn-primary' : 'btn-secondary'}`}
+          onClick={() => setActiveTab('daily')}
+          style={{ flex: 1, display: 'flex', justifyContent: 'center', gap: '0.5rem' }}
+        >
+          <RouteIcon size={18} /> Daily Route
+        </button>
+        <button 
+          className={`btn ${activeTab === 'weekly' ? 'btn-primary' : 'btn-secondary'}`}
+          onClick={() => setActiveTab('weekly')}
+          style={{ flex: 1, display: 'flex', justifyContent: 'center', gap: '0.5rem' }}
+        >
+          <Calendar size={18} /> Weekly Scheduler
+        </button>
+      </div>
+
+      {activeTab === 'weekly' && (
+        <WeeklyScheduler 
+          customers={customers} 
+          tieredMatrixData={tieredMatrixData} 
+          settings={settings} 
+          onLoadDayRoute={handleLoadDayRoute}
+          allVisits={allVisits}
+        />
+      )}
+
+      {activeTab === 'daily' && (
+        <>
 
       {/* ── Templates ── */}
       {templates && templates.length > 0 && (
         <div className="glass-card" style={{ marginBottom: '1.5rem' }}>
-          <h3 style={{ margin: '0 0 1rem 0', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <BookMarked size={18} color="var(--color-primary)" /> Saved Templates
-          </h3>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-            {templates.map(t => (
-              <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', padding: '0.6rem 0.8rem', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{t.name}</div>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>
-                    {t.stops?.length ?? 0} stop{t.stops?.length !== 1 ? 's' : ''}
-                  </div>
-                </div>
-                <button
-                  className="btn btn-secondary"
-                  style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}
-                  onClick={() => handleLoadTemplate(t)}
-                >
-                  <FolderOpen size={14} /> Load
-                </button>
-                <button
-                  className="btn-icon"
-                  style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: '4px' }}
-                  onClick={() => handleDeleteTemplate(t)}
-                >
-                  <Trash2 size={15} />
-                </button>
-              </div>
-            ))}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }} onClick={() => setShowTemplates(!showTemplates)}>
+            <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <BookMarked size={18} color="var(--color-primary)" /> Saved Templates ({templates.length})
+            </h3>
+            {showTemplates ? <ChevronUp size={20} color="var(--color-text-muted)" /> : <ChevronDown size={20} color="var(--color-text-muted)" />}
           </div>
+          
+          {showTemplates && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '1rem', borderTop: '1px solid var(--color-border)', paddingTop: '1rem' }}>
+              {templates.map(t => (
+                <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', padding: '0.6rem 0.8rem', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{t.name}</div>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>
+                      {t.stops?.length ?? 0} stop{t.stops?.length !== 1 ? 's' : ''}
+                    </div>
+                  </div>
+                  <button
+                    className="btn btn-secondary"
+                    style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}
+                    onClick={(e) => { e.stopPropagation(); handleLoadTemplate(t); }}
+                  >
+                    <FolderOpen size={14} /> Load
+                  </button>
+                  <button
+                    className="btn-icon"
+                    style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: '4px' }}
+                    onClick={(e) => { e.stopPropagation(); handleDeleteTemplate(t); }}
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
-      {/* ── Route Name ── */}
-      <div className="glass-card" style={{ marginBottom: '1.5rem' }}>
-        <label className="input-label" style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600 }}>
-          Route Name <span style={{ fontWeight: 400, color: 'var(--color-text-muted' }}>(optional)</span>
-        </label>
-        <input
-          type="text"
-          className="input-field"
-          placeholder="e.g. Monday Westside, Friday Neighborhood Loop"
-          value={routeName}
-          onChange={e => setRouteName(e.target.value)}
-          style={{ width: '100%' }}
-        />
-      </div>
+      {/* Two-Column Layout */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(350px, 1fr))', gap: '1.5rem', alignItems: 'start' }}>
+        
+        {/* ── LEFT COLUMN ── */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+          
+          {/* ── Route Name ── */}
+          <div className="glass-card">
+            <label className="input-label" style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600 }}>
+              Route Name <span style={{ fontWeight: 400, color: 'var(--color-text-muted)' }}>(optional)</span>
+            </label>
+            <input
+              type="text"
+              className="input-field"
+              placeholder="e.g. Monday Westside, Friday Loop"
+              value={routeName}
+              onChange={e => setRouteName(e.target.value)}
+              style={{ width: '100%' }}
+            />
+          </div>
 
-      {/* ── Available Customers ── */}
-      <div className="glass-card" style={{ marginBottom: '1.5rem' }}>
-        <h3 style={{ margin: '0 0 1rem 0' }}>Add Clients</h3>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '200px', overflowY: 'auto' }}>
-          {availableCustomers.length === 0 && <p style={{ color: 'var(--color-text-muted)' }}>All clients added or none available.</p>}
-          {availableCustomers.map(c => (
-            <div key={c.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.5rem', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)' }}>
-              <div>
-                <strong>{c.name}</strong> <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>{c.address}</span>
+          {/* ── Available Customers ── */}
+          <div className="glass-card" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem' }}>
+              <h3 style={{ margin: 0 }}>Add Clients</h3>
+              <div style={{ display: 'flex', gap: '0.5rem', background: 'var(--color-bg-main)', padding: '0.2rem', borderRadius: 'var(--radius-md)' }}>
+                <button 
+                  onClick={() => setCustomerTab('mowing')}
+                  style={{ 
+                    background: customerTab === 'mowing' ? 'var(--color-primary)' : 'transparent', 
+                    color: customerTab === 'mowing' ? 'white' : 'var(--color-text-muted)',
+                    border: 'none', borderRadius: 'var(--radius-sm)', padding: '0.3rem 0.6rem', fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer'
+                  }}
+                >
+                  🌾 Mowing
+                </button>
+                <button 
+                  onClick={() => setCustomerTab('fertilizer')}
+                  style={{ 
+                    background: customerTab === 'fertilizer' ? 'var(--color-primary)' : 'transparent', 
+                    color: customerTab === 'fertilizer' ? 'white' : 'var(--color-text-muted)',
+                    border: 'none', borderRadius: 'var(--radius-sm)', padding: '0.3rem 0.6rem', fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer'
+                  }}
+                >
+                  🧪 Fertilizer
+                </button>
               </div>
-              <button className="btn-icon" style={{ background: 'var(--color-primary-light)', color: 'var(--color-primary)', border: 'none', cursor: 'pointer' }} onClick={() => addStop(c)}>
-                <Plus size={16} />
-              </button>
             </div>
-          ))}
+            
+            <input
+              type="text"
+              className="input-field"
+              placeholder="🔍 Search by name or address..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              style={{ width: '100%', marginBottom: '0.8rem' }}
+            />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '500px', overflowY: 'auto', paddingRight: '0.2rem' }}>
+              {(() => {
+                const q = searchQuery.toLowerCase().trim();
+                
+                // Filter by selected tab
+                const tabFiltered = availableCustomers.filter(c => {
+                  if (customerTab === 'mowing') return !c.services || c.services.find(s => s.id === 's1')?.active;
+                  if (customerTab === 'fertilizer') return c.services && c.services.find(s => s.id === 's3')?.active;
+                  return true;
+                });
+                
+                const filtered = q
+                  ? tabFiltered.filter(c => c.name.toLowerCase().includes(q) || (c.address || '').toLowerCase().includes(q))
+                  : tabFiltered;
+                  
+                if (filtered.length === 0) return <p style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>{q ? 'No matching clients.' : 'All clients added or none available.'}</p>;
+                return filtered.map(c => (
+                  <div key={c.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.6rem 0.8rem', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', background: 'var(--color-bg-main)' }}>
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{c.name}</div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>{c.address}</div>
+                    </div>
+                    <button className="btn-icon" style={{ background: 'var(--color-primary-light)', color: 'var(--color-primary)', border: 'none', cursor: 'pointer' }} onClick={() => { addStop(c); setSearchQuery(''); }}>
+                      <Plus size={18} />
+                    </button>
+                  </div>
+                ));
+              })()}
+            </div>
+          </div>
         </div>
-      </div>
 
-      {/* ── Route Stops ── */}
-      <div className="glass-card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-          <h3 style={{ margin: 0 }}>
-            {routeName.trim() ? `"${routeName.trim()}"` : "Today's Route"}
-          </h3>
-          {selectedStops.length >= 3 && (
+        {/* ── RIGHT COLUMN: Route Stops ── */}
+        <div className="glass-card" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.2rem' }}>
+            <h3 style={{ margin: 0, fontSize: '1.2rem' }}>
+              {routeName.trim() ? `"${routeName.trim()}"` : "Today's Route"}
+            </h3>
+            {selectedStops.length >= 3 && (
+              <button
+                className="btn btn-secondary"
+                style={{ fontSize: '0.8rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 600 }}
+                onClick={handleOptimizeRoute}
+              >
+                <Shuffle size={14} /> Optimize Order
+              </button>
+            )}
+          </div>
+          
+          <div
+            style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', flex: 1, minHeight: '300px', overflowY: 'auto', maxHeight: '60vh', paddingRight: '0.4rem' }}
+            onTouchMove={handleTouchMove}
+            onTouchEnd={handleTouchEnd}
+          >
+            {selectedStops.length === 0 && (
+              <div style={{ textAlign: 'center', color: 'var(--color-text-muted)', marginTop: '2rem', padding: '2rem' }}>
+                <p>No stops added yet.</p>
+                <p style={{ fontSize: '0.85rem' }}>Add clients from the left panel to build your route.</p>
+              </div>
+            )}
+
+            {selectedStops.map((stop, index) => {
+              const activeServices = stop.customer.services?.filter(s => s.active) || [];
+              const plannedTotal = activeServices
+                .filter(s => stop.plannedServiceIds.includes(s.id))
+                .reduce((sum, s) => sum + s.price, 0);
+
+              return (
+                <div
+                  key={stop.customer.id}
+                  ref={el => stopItemRefs.current[index] = el}
+                  draggable
+                  onDragStart={e => handleDragStart(e, index)}
+                  onDragOver={e  => handleDragOver(e, index)}
+                  onDrop={e      => handleDrop(e, index)}
+                  onDragEnd={handleDragEnd}
+                  onTouchStart={e => handleTouchStart(e, index)}
+                  style={{
+                    background: 'var(--color-bg-card)',
+                    borderRadius: 'var(--radius-md)',
+                    border: `1px solid ${dragOverIndex === index ? 'var(--color-primary)' : 'var(--color-border)'}`,
+                    boxShadow: 'var(--shadow-sm)',
+                    overflow: 'hidden',
+                    opacity: dragIndex === index ? 0.5 : 1,
+                    transition: 'border-color 0.15s, opacity 0.15s',
+                    cursor: 'grab'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.8rem 1rem' }}>
+                    {/* Grip Handle */}
+                    <div style={{ color: 'var(--color-text-muted)', cursor: 'grab', padding: '0 4px', touchAction: 'none' }}>
+                      <GripVertical size={18} />
+                    </div>
+                    <div style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--color-text-muted)', minWidth: '22px' }}>{index + 1}</div>
+                    <div style={{ flex: 1, cursor: 'pointer' }} onClick={() => toggleExpanded(index)}>
+                      <strong style={{ fontSize: '1.05rem', color: 'var(--color-text-main)' }}>{stop.customer.name}</strong>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', marginTop: '0.2rem' }}>
+                        {stop.plannedServiceIds.length > 0
+                          ? <span style={{ color: 'var(--color-primary)', fontWeight: 600 }}>${plannedTotal.toFixed(2)}</span>
+                          : 'No services selected'}
+                        {stop.plannedServiceIds.length > 0 && ` — ${stop.plannedServiceIds.length} service${stop.plannedServiceIds.length > 1 ? 's' : ''}`}
+                      </div>
+                    </div>
+
+                    <button className="btn-icon" onClick={() => toggleExpanded(index)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)' }}>
+                      {stop.expanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+                    </button>
+                    <button className="btn-icon" onClick={() => removeStop(index)} style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer' }}>
+                      <Trash2 size={18} />
+                    </button>
+                  </div>
+
+                  {stop.expanded && (
+                    <div style={{ padding: '1rem', borderTop: '1px solid var(--color-border)', background: 'var(--color-bg-main)', display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                      <div style={{ fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase', color: 'var(--color-text-muted)', marginBottom: '0.3rem', letterSpacing: '0.5px' }}>
+                        Services for today's visit:
+                      </div>
+                      {activeServices.length === 0 && (
+                        <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>No active services on this client's profile.</span>
+                      )}
+                      {activeServices.map(svc => (
+                        <label key={svc.id} style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', cursor: 'pointer', fontSize: '0.95rem' }}>
+                          <input
+                            type="checkbox"
+                            checked={stop.plannedServiceIds.includes(svc.id)}
+                            onChange={() => toggleService(index, svc.id)}
+                            style={{ width: '20px', height: '20px', cursor: 'pointer' }}
+                          />
+                          <span style={{ fontWeight: 500 }}>{svc.name}</span>
+                          <span style={{ marginLeft: 'auto', color: 'var(--color-primary)', fontWeight: 700 }}>${svc.price.toFixed(2)}</span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Route Preview Map */}
+          {selectedStops.length > 1 && (
+            <div style={{ marginTop: '1.5rem', borderTop: '1px solid var(--color-border)', paddingTop: '1.5rem' }}>
+              <button 
+                className="btn btn-secondary" 
+                style={{ width: '100%', marginBottom: showMap ? '1rem' : '0', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', fontWeight: 600 }}
+                onClick={() => setShowMap(!showMap)}
+              >
+                <MapIcon size={18} /> {showMap ? 'Hide Route Map' : 'Preview Route on Map'}
+              </button>
+              {showMap && routePath.length > 1 && (
+                isLoaded && !loadError ? (
+                  <GoogleMap 
+                    mapContainerStyle={mapContainerStyle} 
+                    center={routePath[0]} 
+                    zoom={12}
+                    onLoad={() => trackApiCall('mapLoad')}
+                  >
+                    <Polyline
+                      path={routePath}
+                      options={{ strokeColor: '#3b82f6', strokeOpacity: 0.8, strokeWeight: 4 }}
+                    />
+                  </GoogleMap>
+                ) : (
+                  <div style={{ ...mapContainerStyle, background: '#e5e7eb', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--color-text-muted)' }}>
+                    <MapIcon size={40} style={{ opacity: 0.5, marginBottom: '0.8rem' }} />
+                    <div style={{ fontSize: '1rem', fontWeight: 600 }}>Map Preview Unavailable Offline</div>
+                  </div>
+                )
+              )}
+            </div>
+          )}
+
+          {/* Action Buttons */}
+          <div style={{ display: 'flex', gap: '0.8rem', marginTop: '1.5rem', paddingTop: '1.5rem', borderTop: '1px solid var(--color-border)' }}>
             <button
               className="btn btn-secondary"
-              style={{ fontSize: '0.8rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}
-              onClick={handleOptimizeRoute}
+              style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem', fontSize: '0.95rem', fontWeight: 700 }}
+              onClick={handleSaveTemplate}
+              disabled={selectedStops.length === 0}
             >
-              <Shuffle size={14} /> Optimize Order
+              <BookMarked size={18} /> Save Template
             </button>
-          )}
-        </div>
-        <div
-          style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}
-          onTouchMove={handleTouchMove}
-          onTouchEnd={handleTouchEnd}
-        >
-          {selectedStops.length === 0 && <p style={{ color: 'var(--color-text-muted)' }}>No stops added yet.</p>}
-
-          {selectedStops.map((stop, index) => {
-            const activeServices = stop.customer.services?.filter(s => s.active) || [];
-            const plannedTotal = activeServices
-              .filter(s => stop.plannedServiceIds.includes(s.id))
-              .reduce((sum, s) => sum + s.price, 0);
-
-            return (
-              <div
-                key={stop.customer.id}
-                ref={el => stopItemRefs.current[index] = el}
-                draggable
-                onDragStart={e => handleDragStart(e, index)}
-                onDragOver={e  => handleDragOver(e, index)}
-                onDrop={e      => handleDrop(e, index)}
-                onDragEnd={handleDragEnd}
-                onTouchStart={e => handleTouchStart(e, index)}
-                style={{
-                  background: 'var(--color-bg-main)',
-                  borderRadius: 'var(--radius-sm)',
-                  border: `1px solid ${dragOverIndex === index ? 'var(--color-primary)' : 'var(--color-border)'}`,
-                  overflow: 'hidden',
-                  opacity: dragIndex === index ? 0.5 : 1,
-                  transition: 'border-color 0.15s, opacity 0.15s',
-                  cursor: 'grab'
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.6rem 0.8rem' }}>
-                  {/* Grip Handle */}
-                  <div style={{ color: 'var(--color-text-muted)', cursor: 'grab', padding: '0 4px', touchAction: 'none' }}>
-                    <GripVertical size={18} />
-                  </div>
-                  <div style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--color-text-muted)', minWidth: '18px' }}>{index + 1}</div>
-                  <div style={{ flex: 1, cursor: 'pointer' }} onClick={() => toggleExpanded(index)}>
-                    <strong style={{ fontSize: '0.95rem' }}>{index + 1}. {stop.customer.name}</strong>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>
-                      {stop.plannedServiceIds.length > 0
-                        ? `${stop.plannedServiceIds.length} service${stop.plannedServiceIds.length > 1 ? 's' : ''} — $${plannedTotal}`
-                        : 'No services selected'}
-                    </div>
-                  </div>
-
-                  <button onClick={() => toggleExpanded(index)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)' }}>
-                    {stop.expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                  </button>
-                  <button className="btn-icon" onClick={() => removeStop(index)} style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer' }}>
-                    <Trash2 size={16} />
-                  </button>
-                </div>
-
-                {stop.expanded && (
-                  <div style={{ padding: '0.8rem', borderTop: '1px solid var(--color-border)', background: 'var(--color-bg-card)', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                    <div style={{ fontSize: '0.75rem', fontWeight: 600, textTransform: 'uppercase', color: 'var(--color-text-muted)', marginBottom: '0.3rem' }}>
-                      Services for today's visit:
-                    </div>
-                    {activeServices.length === 0 && (
-                      <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>No active services on this client's profile.</span>
-                    )}
-                    {activeServices.map(svc => (
-                      <label key={svc.id} style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', cursor: 'pointer', fontSize: '0.9rem' }}>
-                        <input
-                          type="checkbox"
-                          checked={stop.plannedServiceIds.includes(svc.id)}
-                          onChange={() => toggleService(index, svc.id)}
-                          style={{ width: '18px', height: '18px', cursor: 'pointer' }}
-                        />
-                        <span>{svc.name}</span>
-                        <span style={{ marginLeft: 'auto', color: 'var(--color-primary)', fontWeight: 600 }}>${svc.price}</span>
-                      </label>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Route Preview Map */}
-        {selectedStops.length > 1 && (
-          <div style={{ marginTop: '1rem' }}>
-            <GoogleMap mapContainerStyle={mapContainerStyle} center={{ lat: 39.8283, lng: -98.5795 }} zoom={4}>
-              <DirectionsService
-                options={{
-                  origin: selectedStops[0].customer.address,
-                  destination: selectedStops[selectedStops.length - 1].customer.address,
-                  waypoints: selectedStops.slice(1, -1).map(s => ({ location: s.customer.address, stopover: true })),
-                  travelMode: 'DRIVING'
-                }}
-                callback={directionsCallback}
-              />
-              {directions && <DirectionsRenderer options={{ directions }} />}
-            </GoogleMap>
+            <button
+              className="btn btn-primary"
+              style={{ flex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem', fontSize: '1.05rem' }}
+              onClick={handleSaveRoute}
+              disabled={selectedStops.length === 0}
+            >
+              <Save size={20} /> Save Active Route
+            </button>
           </div>
-        )}
-
-        {/* Action Buttons */}
-        <div style={{ display: 'flex', gap: '0.8rem', marginTop: '1.5rem' }}>
-          <button
-            className="btn btn-secondary"
-            style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem' }}
-            onClick={handleSaveTemplate}
-            disabled={selectedStops.length === 0}
-          >
-            <BookMarked size={16} /> Save as Template
-          </button>
-          <button
-            className="btn btn-primary"
-            style={{ flex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem' }}
-            onClick={handleSaveRoute}
-            disabled={selectedStops.length === 0}
-          >
-            <Save size={18} /> Save Active Route
-          </button>
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 }

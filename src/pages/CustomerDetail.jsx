@@ -1,11 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { db } from '../db/db';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { MapPin, Save, ArrowLeft, Trash2 } from 'lucide-react';
+import { MapPin, Save, ArrowLeft, Trash2, BarChart3, Clock, DollarSign, Calendar, Hash } from 'lucide-react';
 import GeofenceEditor from '../components/GeofenceEditor';
 import { Autocomplete } from '@react-google-maps/api';
 import AppDialog from '../components/AppDialog';
+import { getSettings } from '../db/settings';
+import { trackApiCall } from '../utils/apiTracker';
+import { getDaysSince } from '../utils/dateUtils';
 
 export default function CustomerDetail() {
   const { id } = useParams();
@@ -16,6 +19,19 @@ export default function CustomerDetail() {
     isNew ? null : db.customers.get(Number(id))
   , [id]);
 
+  const customerVisits = useLiveQuery(() => 
+    isNew ? [] : db.visits.where({ customerId: Number(id) }).toArray()
+  , [id]) || [];
+
+  const completedFertilizerVisits = useMemo(() => {
+    const currentYear = new Date().getFullYear();
+    return customerVisits.filter(v => 
+      v.status === 'completed' &&
+      v.appliedServices && v.appliedServices.includes('s3') &&
+      new Date(v.exitTime).getFullYear() === currentYear
+    ).sort((a, b) => b.exitTime - a.exitTime);
+  }, [customerVisits]);
+
   const defaultServices = [
     { id: 's1', name: 'Mowing', price: 50, active: true },
     { id: 's2', name: 'Edging/Trimming', price: 15, active: false },
@@ -23,40 +39,105 @@ export default function CustomerDetail() {
     { id: 's4', name: 'Fall Clean-up', price: 150, active: false }
   ];
 
-  const [formData, setFormData] = useState({ name: '', address: '', phone: '', email: '', lawnSize: '', propertyNotes: '' });
+  const [formData, setFormData] = useState({ name: '', address: '', phone: '', email: '', lawnSize: '', obstacleCount: '', terrain: 'flat', fencedBackyard: false, propertyNotes: '', serviceInterval: 7, mowingInterval: 7, fertilizerInterval: 30, fertilizerRounds: 6, specialApplications: '' });
   const [geofence, setGeofence] = useState(null);
   const [services, setServices] = useState(defaultServices);
   const [autocomplete, setAutocomplete] = useState(null);
   const [activeTab, setActiveTab] = useState('details');
   const [dialog, setDialog] = useState(null);
+  const [settings, setSettings] = useState(null);
+  const [isDirty, setIsDirty] = useState(false);
+  const initialDataRef = useRef(null);
+
+  useEffect(() => {
+    setSettings(getSettings());
+  }, []);
 
   useEffect(() => {
     if (customer) {
-      setFormData({ 
+      const fd = { 
         name: customer.name || '', 
         address: customer.address || '',
         phone: customer.phone || '',
         email: customer.email || '',
         lawnSize: customer.lawnSize || '',
-        propertyNotes: customer.propertyNotes || ''
-      });
+        obstacleCount: customer.obstacleCount ?? '',
+        terrain: customer.terrain || 'flat',
+        fencedBackyard: customer.fencedBackyard || false,
+        propertyNotes: customer.propertyNotes || '',
+        serviceInterval: customer.serviceInterval || 7,
+        mowingInterval: customer.mowingInterval || customer.serviceInterval || 7,
+        fertilizerInterval: customer.fertilizerInterval || 30,
+        fertilizerRounds: customer.fertilizerRounds || 6,
+        specialApplications: customer.specialApplications || ''
+      };
+      setFormData(fd);
+      initialDataRef.current = JSON.stringify(fd);
       setGeofence(customer.geofence || null);
       
+      const globalDefaults = getSettings().defaultServices || defaultServices;
+      let mergedServices = [];
+
       if (customer.services && customer.services.length > 0) {
-        setServices(customer.services);
+        // Start with global defaults to ensure new services show up, overriding with customer's saved data
+        mergedServices = globalDefaults.map(def => {
+          const saved = customer.services.find(s => s.id === def.id);
+          return saved ? { ...def, ...saved } : def;
+        });
+        
+        // Append any purely custom services the customer has
+        customer.services.forEach(saved => {
+          if (!mergedServices.find(s => s.id === saved.id)) {
+            mergedServices.push(saved);
+          }
+        });
       } else if (customer.price) {
         // Migrate legacy price field
-        setServices([
-           { id: 's1', name: 'Mowing', price: customer.price, active: true },
-           { id: 's2', name: 'Edging/Trimming', price: 15, active: false },
-           { id: 's3', name: 'Fertilizer', price: 75, active: false },
-           { id: 's4', name: 'Fall Clean-up', price: 150, active: false }
-        ]);
+        mergedServices = globalDefaults.map(def => 
+          def.id === 's1' ? { ...def, price: customer.price, active: true } : def
+        );
       } else {
-        setServices(defaultServices);
+        mergedServices = globalDefaults;
       }
+      
+      setServices(mergedServices);
+      setIsDirty(false);
     }
   }, [customer]);
+
+  // Track dirty state
+  useEffect(() => {
+    if (initialDataRef.current && !isNew) {
+      const changed = JSON.stringify(formData) !== initialDataRef.current;
+      setIsDirty(changed);
+    } else if (isNew) {
+      setIsDirty(formData.name.trim().length > 0);
+    }
+  }, [formData, isNew]);
+
+  // Warn on browser close/refresh with unsaved changes
+  useEffect(() => {
+    const handler = (e) => {
+      if (isDirty) { e.preventDefault(); e.returnValue = ''; }
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [isDirty]);
+
+  // Wrap navigate to warn about unsaved changes
+  const safeNavigate = useCallback((path) => {
+    if (isDirty) {
+      setDialog({
+        type: 'warning',
+        title: 'Unsaved Changes',
+        message: 'You have unsaved changes. Leave without saving?',
+        confirmLabel: 'Leave',
+        onConfirm: () => navigate(path)
+      });
+    } else {
+      navigate(path);
+    }
+  }, [isDirty, navigate]);
 
   const onAutocompleteLoad = (autoC) => {
     setAutocomplete(autoC);
@@ -64,6 +145,7 @@ export default function CustomerDetail() {
 
   const onPlaceChanged = () => {
     if (autocomplete !== null) {
+      trackApiCall('autocomplete');
       const place = autocomplete.getPlace();
       if (place && place.formatted_address) {
         setFormData(prev => ({ ...prev, address: place.formatted_address }));
@@ -88,19 +170,50 @@ export default function CustomerDetail() {
           { lat: lat - latOffset, lng: lng - lngOffset }, // SW
         ];
 
-        // Only auto-set if no custom fence has been drawn yet
-        setGeofence(prev => prev && prev.length > 0 ? prev : defaultFence);
+        // Always auto-set geofence to the new location when address is updated
+        setGeofence(defaultFence);
       }
     }
   };
 
   const handleSave = async () => {
+    let finalGeofence = geofence;
+    
+    const initialData = initialDataRef.current ? JSON.parse(initialDataRef.current) : {};
+    if (formData.address && formData.address !== initialData.address) {
+      if (window.google && window.google.maps) {
+        const geocoder = new window.google.maps.Geocoder();
+        try {
+          const results = await new Promise(resolve => {
+            geocoder.geocode({ address: formData.address }, (res, status) => {
+              resolve(status === 'OK' ? res : null);
+            });
+          });
+          if (results && results[0]?.geometry?.location) {
+            const lat = results[0].geometry.location.lat();
+            const lng = results[0].geometry.location.lng();
+            const latOffset = 0.00018;
+            const lngOffset = 0.00028;
+            finalGeofence = [
+              { lat: lat + latOffset, lng: lng - lngOffset },
+              { lat: lat + latOffset, lng: lng + lngOffset },
+              { lat: lat - latOffset, lng: lng + lngOffset },
+              { lat: lat - latOffset, lng: lng - lngOffset },
+            ];
+          }
+        } catch (e) {
+          console.error("Geocoding failed during save", e);
+        }
+      }
+    }
+
     const dataToSave = { 
       ...formData, 
-      geofence,
+      geofence: finalGeofence,
       services 
     };
     if (isNew) {
+      dataToSave.createdAt = Date.now();
       await db.customers.add(dataToSave);
     } else {
       await db.customers.update(Number(id), dataToSave);
@@ -135,7 +248,7 @@ export default function CustomerDetail() {
     <div className="animate-fade-in">
       <AppDialog dialog={dialog} onClose={() => setDialog(null)} />
       <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1.5rem' }}>
-        <button className="btn-icon" onClick={() => navigate('/customers')} style={{ border: 'none', background: 'transparent', cursor: 'pointer' }}>
+        <button className="btn-icon" onClick={() => safeNavigate('/customers')} style={{ border: 'none', background: 'transparent', cursor: 'pointer' }}>
           <ArrowLeft size={24} color="var(--color-text-main)" />
         </button>
         <h1 className="page-title" style={{ marginBottom: 0, flex: 1 }}>{isNew ? 'New Client' : 'Edit Client'}</h1>
@@ -152,22 +265,28 @@ export default function CustomerDetail() {
       <div className="tab-bar">
         <button className={`tab-button ${activeTab === 'details' ? 'active' : ''}`} onClick={() => setActiveTab('details')}>Details</button>
         <button className={`tab-button ${activeTab === 'services' ? 'active' : ''}`} onClick={() => setActiveTab('services')}>Services</button>
+        {!isNew && <button className={`tab-button ${activeTab === 'stats' ? 'active' : ''}`} onClick={() => setActiveTab('stats')}>Stats</button>}
         <button className={`tab-button ${activeTab === 'location' ? 'active' : ''}`} onClick={() => setActiveTab('location')}>Location</button>
+        {services.find(s => s.id === 's3')?.active && (
+          <button className={`tab-button ${activeTab === 'fertilizer' ? 'active' : ''}`} onClick={() => setActiveTab('fertilizer')}>🧪 Fertilizer</button>
+        )}
       </div>
 
-      <div className="glass-card" style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '2rem' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', marginBottom: '2rem' }}>
         {activeTab === 'details' && (
-          <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            <div className="input-group">
-              <label className="input-label">Client Name</label>
-              <input 
-                type="text" 
-                className="input-field" 
-                value={formData.name} 
-                onChange={e => setFormData({ ...formData, name: e.target.value })} 
-                placeholder="John Doe"
-              />
-            </div>
+          <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+            <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1.1rem', color: 'var(--color-text-main)', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.5rem' }}>👤 Client Profile</h3>
+              <div className="input-group">
+                <label className="input-label">Client Name</label>
+                <input 
+                  type="text" 
+                  className="input-field" 
+                  value={formData.name} 
+                  onChange={e => setFormData({ ...formData, name: e.target.value })} 
+                  placeholder="John Doe"
+                />
+              </div>
             
             <div className="input-group">
               <label className="input-label">Property Address</label>
@@ -182,9 +301,12 @@ export default function CustomerDetail() {
                 />
               </Autocomplete>
             </div>
+            </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-              <div className="input-group">
+            <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1.1rem', color: 'var(--color-text-main)', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.5rem' }}>📞 Contact Info</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                <div className="input-group">
                 <label className="input-label">Phone Number</label>
                 <input 
                   type="tel" 
@@ -205,16 +327,98 @@ export default function CustomerDetail() {
                 />
               </div>
             </div>
+            </div>
+
+            <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1.1rem', color: 'var(--color-text-main)', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.5rem' }}>🗓️ Service Schedule</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                <div className="input-group">
+                <label className="input-label">Mowing Interval</label>
+                <select 
+                  className="input-field" 
+                  value={formData.mowingInterval} 
+                  onChange={e => setFormData({ ...formData, mowingInterval: Number(e.target.value) })}
+                  style={{ width: '100%', padding: '0.55rem' }}
+                >
+                  <option value={7}>Weekly (7 days)</option>
+                  <option value={10}>Every 10 days</option>
+                  <option value={14}>Bi-Weekly (14 days)</option>
+                  <option value={21}>Every 3 weeks</option>
+                  <option value={28}>Monthly</option>
+                </select>
+              </div>
+
+              <div className="input-group">
+                <label className="input-label">Fertilizer Interval</label>
+                <select 
+                  className="input-field" 
+                  value={formData.fertilizerInterval} 
+                  onChange={e => setFormData({ ...formData, fertilizerInterval: Number(e.target.value) })}
+                  style={{ width: '100%', padding: '0.55rem' }}
+                >
+                  <option value={21}>Every 3 weeks</option>
+                  <option value={28}>Every 4 weeks</option>
+                  <option value={35}>Every 5 weeks</option>
+                  <option value={42}>Every 6 weeks</option>
+                  <option value={60}>Every 2 months</option>
+                </select>
+              </div>
+
+              <div className="input-group">
+                <label className="input-label">Lawn Size</label>
+                <input 
+                  type="text" 
+                  className="input-field" 
+                  value={formData.lawnSize} 
+                  onChange={e => setFormData({ ...formData, lawnSize: e.target.value })} 
+                  placeholder="e.g. 5000 sq ft or 0.25 acres"
+                />
+              </div>
+            </div>
+            </div>
+
+            <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1.1rem', color: 'var(--color-text-main)', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.5rem' }}>🏡 Property Details</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                <div className="input-group">
+                <label className="input-label">🌳 Trimming Obstacles</label>
+                <input 
+                  type="number" 
+                  className="input-field" 
+                  value={formData.obstacleCount} 
+                  onChange={e => setFormData({ ...formData, obstacleCount: e.target.value === '' ? '' : Number(e.target.value) })} 
+                  placeholder="e.g. 8"
+                />
+                <div style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', marginTop: '0.2rem' }}>
+                  Trees, beds, posts, etc.
+                </div>
+              </div>
+
+              <div className="input-group">
+                <label className="input-label">⛰️ Terrain</label>
+                <select 
+                  className="input-field" 
+                  value={formData.terrain} 
+                  onChange={e => setFormData({ ...formData, terrain: e.target.value })}
+                  style={{ width: '100%', padding: '0.55rem' }}
+                >
+                  <option value="flat">Flat</option>
+                  <option value="moderate">Moderate Hills</option>
+                  <option value="hilly">Hilly / Steep</option>
+                </select>
+              </div>
+            </div>
 
             <div className="input-group">
-              <label className="input-label">Lawn Size</label>
-              <input 
-                type="text" 
-                className="input-field" 
-                value={formData.lawnSize} 
-                onChange={e => setFormData({ ...formData, lawnSize: e.target.value })} 
-                placeholder="e.g. 5,000 sq ft or 0.25 acres"
-              />
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                <input 
+                  type="checkbox" 
+                  checked={formData.fencedBackyard} 
+                  onChange={e => setFormData({ ...formData, fencedBackyard: e.target.checked })}
+                  style={{ width: '18px', height: '18px' }}
+                />
+                <span className="input-label" style={{ margin: 0 }}>🚧 Fenced Backyard (gate access needed)</span>
+              </label>
             </div>
 
             <div className="input-group">
@@ -231,93 +435,358 @@ export default function CustomerDetail() {
                 Shown on every job completion as a reminder while you're still on-site.
               </div>
             </div>
+            </div>
           </div>
         )}
 
         {activeTab === 'services' && (
-          <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-              <h4 style={{ margin: 0, color: 'var(--color-text-main)' }}>Services & Pricing</h4>
-            </div>
-            
-            {services.map((svc, i) => (
-              <div key={svc.id} style={{ display: 'flex', alignItems: 'center', gap: '1rem', background: 'var(--color-bg-card)', padding: '0.8rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
-                <input 
-                  type="checkbox" 
-                  checked={svc.active} 
-                  onChange={(e) => {
-                    const newSvc = [...services];
-                    newSvc[i].active = e.target.checked;
-                    setServices(newSvc);
-                  }}
-                  style={{ width: '20px', height: '20px', cursor: 'pointer' }}
-                />
-                
-                <input 
-                  type="text" 
-                  className="input-field" 
-                  value={svc.name}
-                  onChange={(e) => {
-                    const newSvc = [...services];
-                    newSvc[i].name = e.target.value;
-                    setServices(newSvc);
-                  }}
-                  style={{ flex: 1, padding: '0.5rem' }}
-                />
-                
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
-                  <span style={{ color: 'var(--color-text-muted)' }}>$</span>
-                  <input 
-                    type="number" 
-                    className="input-field" 
-                    value={svc.price}
-                    onChange={(e) => {
-                      const newSvc = [...services];
-                      newSvc[i].price = Number(e.target.value);
-                      setServices(newSvc);
-                    }}
-                    style={{ width: '80px', padding: '0.5rem' }}
-                  />
+          <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+            {['Mowing', 'Fertilizer', 'Other'].map(cat => {
+              const catServices = services.filter(s => (s.category || 'Other') === cat);
+              if (catServices.length === 0) return null;
+              
+              return (
+                <div key={cat} className="card" style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
+                  <h4 style={{ margin: 0, color: 'var(--color-text-main)', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.5rem' }}>
+                    {cat === 'Mowing' ? '🌾 Mowing & Maintenance' : cat === 'Fertilizer' ? '🧪 Chemical & Fertilizer' : '🔧 Other Services'}
+                  </h4>
+                  
+                  <div style={{ display: 'grid', gap: '0.6rem' }}>
+                    {catServices.map(svc => (
+                      <div key={svc.id} style={{ 
+                        display: 'flex', alignItems: 'center', gap: '1rem', 
+                        background: svc.active ? 'rgba(16,185,129,0.05)' : 'var(--color-bg-card)', 
+                        padding: '0.8rem', borderRadius: 'var(--radius-sm)', 
+                        border: svc.active ? '1px solid rgba(16,185,129,0.3)' : '1px solid var(--color-border)',
+                        transition: 'all 0.2s ease'
+                      }}>
+                        <input 
+                          type="checkbox" 
+                          checked={svc.active} 
+                          onChange={(e) => {
+                            setServices(prev => prev.map(s => s.id === svc.id ? { ...s, active: e.target.checked } : s));
+                          }}
+                          style={{ width: '20px', height: '20px', cursor: 'pointer', accentColor: 'var(--color-primary)' }}
+                        />
+                        
+                        <div style={{ flex: 1, padding: '0.2rem', fontWeight: 600, color: svc.active ? 'var(--color-text-main)' : 'var(--color-text-muted)' }}>
+                          {svc.name}
+                        </div>
+                        
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
+                          <span style={{ color: 'var(--color-text-muted)', fontWeight: 500 }}>$</span>
+                          <input 
+                            type="number" 
+                            className="input-field" 
+                            value={svc.price}
+                            onChange={(e) => {
+                              setServices(prev => prev.map(s => s.id === svc.id ? { ...s, price: Number(e.target.value) } : s));
+                            }}
+                            style={{ width: '70px', padding: '0.5rem', background: svc.active ? 'var(--color-bg-main)' : 'var(--color-bg-card)' }}
+                          />
+                        </div>
+                        
+                        {(!settings?.defaultServices?.some(d => d.id === svc.id)) && (
+                          <button 
+                            onClick={() => setServices(prev => prev.filter(s => s.id !== svc.id))}
+                            style={{ background: 'transparent', border: 'none', color: '#ef4444', padding: '0.4rem', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                            title="Delete old custom service"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            ))}
-            
-            <button 
-              className="btn btn-secondary" 
-              onClick={() => {
-                setServices([...services, { id: Date.now().toString(), name: 'New Service', price: 0, active: true }]);
-              }} 
-              style={{ marginTop: '0.5rem', width: '100%' }}
-            >
-              + Add Custom Service
-            </button>
+              );
+            })}
           </div>
         )}
 
+        {activeTab === 'stats' && (() => {
+          const completed = customerVisits.filter(v => v.status === 'completed' && v.durationSecs);
+          const visitCount = completed.length;
+          const totalRevenue = customerVisits.reduce((s, v) => s + (v.priceEarned || 0), 0);
+          
+          // Last mowed
+          const sortedByDate = [...completed].sort((a, b) => b.exitTime - a.exitTime);
+          const lastVisit = sortedByDate[0];
+          const lastMowedDate = lastVisit ? new Date(lastVisit.exitTime) : null;
+          const daysSince = lastMowedDate ? getDaysSince(lastMowedDate.getTime()) : null;
+
+          // Avg $/hr
+          const totalSecs = completed.reduce((s, v) => s + (v.durationSecs || 0) + (v.driveTimeSecs || 0), 0);
+          const avgPerHr = totalSecs > 0 ? (totalRevenue / (totalSecs / 3600)) : 0;
+
+          // Per-service average times
+          const serviceTimeMap = {};
+          completed.forEach(v => {
+            if (!v.appliedServices?.length) return;
+            v.appliedServices.forEach(sid => {
+              if (!serviceTimeMap[sid]) serviceTimeMap[sid] = { totalSecs: 0, count: 0 };
+              // Distribute blade time evenly across applied services for that visit
+              serviceTimeMap[sid].totalSecs += (v.durationSecs || 0) / v.appliedServices.length;
+              serviceTimeMap[sid].count += 1;
+            });
+          });
+
+          const serviceAvgs = Object.entries(serviceTimeMap).map(([sid, data]) => {
+            const svc = services.find(s => s.id === sid);
+            return {
+              name: svc?.name || sid,
+              avgMins: Math.round((data.totalSecs / data.count) / 60),
+              count: data.count
+            };
+          });
+
+          // Overall avg blade & drive time
+          const avgBladeSecs = visitCount > 0 ? completed.reduce((s, v) => s + v.durationSecs, 0) / visitCount : 0;
+          const avgDriveSecs = visitCount > 0 ? completed.reduce((s, v) => s + (v.driveTimeSecs || 0), 0) / visitCount : 0;
+
+          let ehrColor = 'var(--color-primary)';
+          if (settings && avgPerHr > 0) {
+            if (avgPerHr < settings.rateUnderpaidThreshold) ehrColor = '#ef4444';
+            else if (avgPerHr < settings.targetHourlyRate) ehrColor = '#f59e0b';
+          }
+
+          return (
+            <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              {visitCount === 0 ? (
+                <div className="card" style={{ textAlign: 'center', padding: '2rem 1rem', color: 'var(--color-text-muted)' }}>
+                  <div style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>📊</div>
+                  <div style={{ fontWeight: 600 }}>No completed visits yet</div>
+                  <div style={{ fontSize: '0.85rem', marginTop: '0.3rem' }}>Stats will appear after you complete a job for this customer.</div>
+                </div>
+              ) : (
+                <>
+                  {/* Summary Cards */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.8rem' }}>
+                    <div style={{ background: 'var(--color-bg-main)', padding: '0.8rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', color: 'var(--color-text-muted)', fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '0.3rem' }}>
+                        <Hash size={11} /> Visits
+                      </div>
+                      <div style={{ fontSize: '1.4rem', fontWeight: 700 }}>{visitCount}</div>
+                    </div>
+
+                    <div style={{ background: 'var(--color-bg-main)', padding: '0.8rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', color: 'var(--color-text-muted)', fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '0.3rem' }}>
+                        <DollarSign size={11} /> Total Revenue
+                      </div>
+                      <div style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--color-primary)' }}>${totalRevenue.toFixed(2)}</div>
+                    </div>
+
+                    <div style={{ background: 'var(--color-bg-main)', padding: '0.8rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', color: 'var(--color-text-muted)', fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '0.4rem' }}>
+                        <Clock size={11} /> Avg Times
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.3rem' }}>
+                        <div style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--color-text-main)' }}>{Math.round(avgBladeSecs / 60)}m</div>
+                        <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>cut</div>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.3rem', marginTop: '2px' }}>
+                        <div style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--color-text-main)' }}>{Math.round(avgDriveSecs / 60)}m</div>
+                        <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>drive</div>
+                      </div>
+                    </div>
+
+                    <div style={{ background: 'var(--color-bg-main)', padding: '0.8rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', color: 'var(--color-text-muted)', fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '0.3rem' }}>
+                        <DollarSign size={11} /> Avg $/hr
+                      </div>
+                      <div style={{ fontSize: '1.4rem', fontWeight: 700, color: ehrColor }}>${avgPerHr.toFixed(2)}</div>
+                    </div>
+                  </div>
+
+                  {/* Last Mowed */}
+                  <div style={{ background: 'var(--color-bg-main)', padding: '0.8rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                      <Calendar size={15} color="var(--color-text-muted)" />
+                      <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>Last Mowed</span>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>
+                        {lastMowedDate.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
+                      </div>
+                      <div style={{ fontSize: '0.75rem', color: daysSince <= 7 ? 'var(--color-primary)' : daysSince <= 14 ? '#f59e0b' : '#ef4444', fontWeight: 600 }}>
+                        {daysSince === 0 ? 'Today' : daysSince === 1 ? 'Yesterday' : `${daysSince} days ago`}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Per-Service Avg Times */}
+                  {serviceAvgs.length > 0 && (
+                    <div className="card">
+                      <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '0.5rem' }}>
+                        <BarChart3 size={13} style={{ verticalAlign: 'middle', marginRight: '0.3rem' }} />
+                        Avg Time Per Service
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                        {serviceAvgs.map(sa => (
+                          <div key={sa.name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--color-bg-main)', padding: '0.6rem 0.8rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
+                            <span style={{ fontSize: '0.9rem', fontWeight: 600 }}>{sa.name}</span>
+                            <div style={{ textAlign: 'right' }}>
+                              <span style={{ fontWeight: 700, color: 'var(--color-primary)' }}>{sa.avgMins} min</span>
+                              <span style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', marginLeft: '0.5rem' }}>({sa.count} visits)</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {/* Visit History Timeline */}
+                  <div className="card">
+                    <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '0.5rem' }}>
+                      <Clock size={13} style={{ verticalAlign: 'middle', marginRight: '0.3rem' }} />
+                      Recent Visits
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem', maxHeight: '250px', overflowY: 'auto' }}>
+                      {sortedByDate.slice(0, 15).map(v => {
+                        const svcNames = (v.appliedServices || []).map(sid => services.find(s => s.id === sid)?.name).filter(Boolean);
+                        return (
+                          <div key={v.id} style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', padding: '0.5rem 0.7rem', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)', fontSize: '0.8rem' }}>
+                            <div style={{ width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0, background: v.status === 'completed' ? 'var(--color-primary)' : v.status === 'skipped' ? '#ef4444' : '#f59e0b' }} />
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontWeight: 600, color: 'var(--color-text-main)', display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+                                <span>{new Date(v.exitTime).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
+                                <div style={{ display: 'flex', gap: '0.4rem' }}>
+                                  <span style={{ 
+                                    display: 'inline-flex', alignItems: 'center', gap: '0.3rem', 
+                                    background: 'var(--color-bg-card)', color: 'var(--color-text-muted)', 
+                                    border: '1px solid var(--color-border)',
+                                    padding: '0.15rem 0.4rem', borderRadius: 'var(--radius-sm)', fontSize: '0.7rem', fontWeight: 600 
+                                  }} title="Drive Time">
+                                    <span style={{ fontSize: '0.6rem', textTransform: 'uppercase', letterSpacing: '0.5px', opacity: 0.8 }}>Drive</span>
+                                    <span style={{ color: 'var(--color-text-main)', fontWeight: 700 }}>{Math.round((v.driveTimeSecs || 0) / 60)}m</span>
+                                  </span>
+                                  <span style={{ 
+                                    display: 'inline-flex', alignItems: 'center', gap: '0.3rem', 
+                                    background: 'var(--color-bg-card)', color: 'var(--color-text-muted)', 
+                                    border: '1px solid var(--color-border)',
+                                    padding: '0.15rem 0.4rem', borderRadius: 'var(--radius-sm)', fontSize: '0.7rem', fontWeight: 600 
+                                  }} title="Job Time">
+                                    <span style={{ fontSize: '0.6rem', textTransform: 'uppercase', letterSpacing: '0.5px', opacity: 0.8 }}>Job</span>
+                                    <span style={{ color: 'var(--color-text-main)', fontWeight: 700 }}>{Math.round((v.durationSecs || 0) / 60)}m</span>
+                                  </span>
+                                </div>
+                              </div>
+                              {svcNames.length > 0 && (
+                                <div style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                  {svcNames.join(', ')}
+                                </div>
+                              )}
+                            </div>
+                            <div style={{ fontWeight: 700, color: 'var(--color-primary)', flexShrink: 0 }}>
+                              ${(v.priceEarned || 0).toFixed(0)}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          );
+        })()}
+
         {activeTab === 'location' && (
-          <div className="animate-fade-in">
-            <h4 style={{ margin: '0 0 0.5rem 0', color: 'var(--color-text-main)' }}>Geofence Boundary</h4>
-            {geofence && geofence.length > 0 ? (
-              <p style={{ fontSize: '0.8rem', color: 'var(--color-primary)', marginBottom: '1rem', background: 'rgba(16, 185, 129, 0.1)', padding: '0.5rem 0.8rem', borderRadius: 'var(--radius-sm)', border: '1px solid rgba(16,185,129,0.3)' }}>
-                ✅ A default boundary was auto-generated from the address. Drag the corners to fine-tune it.
-              </p>
-            ) : (
-              <p style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', marginBottom: '1rem' }}>
-                Draw the property boundary. The auto-timer will start when you enter this area.
-              </p>
+          <div className="card animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h2 style={{ margin: 0, fontSize: '1.1rem' }}>Property Boundary</h2>
+              <button 
+                className="btn btn-secondary" 
+                style={{ fontSize: '0.8rem', padding: '0.4rem 0.8rem' }}
+                onClick={() => setGeofence([])}
+              >
+                Clear Fence
+              </button>
+            </div>
+            <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', margin: 0 }}>
+              Draw the property line to track exactly how long you spend on site automatically.
+            </p>
+            <div style={{ height: '400px', width: '100%', borderRadius: 'var(--radius-md)', overflow: 'hidden', border: '1px solid var(--color-border)' }}>
+              <GeofenceEditor 
+                initialPolygon={geofence} 
+                onSave={(poly) => setGeofence(poly)} 
+                address={formData.address}
+              />
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'fertilizer' && (
+          <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+            
+            {/* Settings */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              <div className="input-group">
+                <label className="input-label">Target Yearly Rounds</label>
+                <input 
+                  type="number" 
+                  className="input-field" 
+                  value={formData.fertilizerRounds} 
+                  onChange={e => setFormData({ ...formData, fertilizerRounds: Number(e.target.value) })}
+                  style={{ width: '150px' }}
+                />
+              </div>
+
+              <div className="input-group">
+                <label className="input-label">Special Applications / Chemical Notes</label>
+                <textarea 
+                  className="input-field" 
+                  rows={3}
+                  value={formData.specialApplications}
+                  onChange={e => setFormData({ ...formData, specialApplications: e.target.value })}
+                  placeholder="e.g. Grub control in June, Pet-safe only in backyard"
+                />
+              </div>
+            </div>
+
+            {/* Progress Bar */}
+            {!isNew && (
+              <div style={{ borderTop: '1px solid var(--color-border)', paddingTop: '1.5rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem' }}>
+                  <h3 style={{ margin: 0, fontSize: '1.05rem', color: 'var(--color-text-main)' }}>Current Year Progress</h3>
+                  <div style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--color-primary)' }}>
+                    {completedFertilizerVisits.length} / {formData.fertilizerRounds} Completed
+                  </div>
+                </div>
+
+                <div style={{ width: '100%', height: '12px', background: 'var(--color-bg-main)', borderRadius: '6px', overflow: 'hidden', border: '1px solid var(--color-border)' }}>
+                  <div style={{ 
+                    width: `${Math.min(100, (completedFertilizerVisits.length / formData.fertilizerRounds) * 100)}%`, 
+                    height: '100%', 
+                    background: 'var(--color-primary)',
+                    transition: 'width 0.3s ease'
+                  }} />
+                </div>
+
+                {completedFertilizerVisits.length > 0 ? (
+                  <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                    {completedFertilizerVisits.map((v, idx) => (
+                      <div key={v.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', padding: '0.6rem', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)' }}>
+                        <span style={{ fontWeight: 600 }}>Round {completedFertilizerVisits.length - idx}</span>
+                        <span style={{ color: 'var(--color-text-muted)' }}>{new Date(v.exitTime).toLocaleDateString()}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ marginTop: '1rem', padding: '1rem', textAlign: 'center', fontSize: '0.85rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)' }}>
+                    No fertilizer applications recorded yet this year.
+                  </div>
+                )}
+              </div>
             )}
-            <GeofenceEditor 
-              initialPolygon={geofence} 
-              address={formData.address}
-              onSave={(poly) => setGeofence(poly)} 
-            />
           </div>
         )}
       </div>
 
-      <button className="btn btn-primary" onClick={handleSave} style={{ width: '100%', padding: '1rem', fontSize: '1rem' }}>
-        <Save size={20} /> Save Client Profile
-      </button>
+      {activeTab !== 'stats' && (
+        <button className="btn btn-primary" onClick={handleSave} style={{ width: '100%', padding: '1rem', fontSize: '1rem' }}>
+          <Save size={20} /> {isDirty ? '● Save Client Profile' : 'Save Client Profile'}
+        </button>
+      )}
     </div>
   );
 }

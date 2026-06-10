@@ -1,7 +1,10 @@
+import { createContext, useContext } from 'react';
 import { useJsApiLoader } from '@react-google-maps/api';
 
-const GOOGLE_MAPS_API_KEY = 'AIzaSyDKHm5Bv_batsuOxZFMJQTe56iYRV1f6ik';
+export const GOOGLE_MAPS_API_KEY = 'AIzaSyDKHm5Bv_batsuOxZFMJQTe56iYRV1f6ik';
 const libraries = ['places', 'drawing', 'geometry'];
+
+const MapContext = createContext({ isLoaded: false, loadError: null });
 
 export default function MapProvider({ children }) {
   const { isLoaded, loadError } = useJsApiLoader({
@@ -9,13 +12,13 @@ export default function MapProvider({ children }) {
     libraries,
   });
 
-  if (loadError) {
-    return <div style={{ padding: '2rem', color: 'red' }}>Error loading Google Maps API</div>;
-  }
+  return (
+    <MapContext.Provider value={{ isLoaded, loadError }}>
+      {children}
+    </MapContext.Provider>
+  );
+}
 
-  if (!isLoaded) {
-    return <div style={{ padding: '2rem' }}>Loading Map...</div>;
-  }
-
-  return children;
+export function useMapStatus() {
+  return useContext(MapContext);
 }

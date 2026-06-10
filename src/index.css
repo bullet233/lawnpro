@@ -69,10 +69,10 @@ body {
 /* Utility Classes */
 .glass-card {
   background: var(--glass-bg);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid var(--glass-border);
-  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
   border-radius: var(--radius-lg);
   padding: 1.5rem;
 }
@@ -97,6 +97,10 @@ body {
   transition: all var(--transition-fast);
   border: none;
   font-size: 0.95rem;
+}
+
+.btn:hover {
+  transform: translateY(-1px);
 }
 
 .btn:active {
@@ -128,6 +132,30 @@ body {
   background-color: var(--color-danger);
   color: white;
 }
+
+.btn-danger:hover {
+  background-color: #dc2626;
+  box-shadow: 0 4px 14px 0 rgba(239, 68, 68, 0.3);
+}
+
+/* Pill Tags */
+.pill-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 9999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.pill-tag.success { background: rgba(16,185,129,0.1); color: var(--color-primary); border: 1px solid rgba(16,185,129,0.2); }
+.pill-tag.warning { background: rgba(245,158,11,0.1); color: var(--color-accent); border: 1px solid rgba(245,158,11,0.2); }
+.pill-tag.danger { background: rgba(239,68,68,0.1); color: var(--color-danger); border: 1px solid rgba(239,68,68,0.2); }
+.pill-tag.neutral { background: rgba(100,116,139,0.1); color: var(--color-text-muted); border: 1px solid rgba(100,116,139,0.2); }
 
 .btn-icon {
   padding: 0.5rem;
@@ -292,3 +320,119 @@ body {
 .completion-panel {
   animation: slideDown 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
+
+/* ── Sun Mode ── High contrast for outdoor visibility ───────────────────── */
+body.sun-mode {
+  --color-bg-main: #ffffff;
+  --color-bg-card: #ffffff;
+  --color-text-main: #000000;
+  --color-text-muted: #374151;
+  --color-border: #9ca3af;
+  --color-primary: #047857;
+  --color-primary-hover: #065f46;
+  --color-primary-light: #a7f3d0;
+  --glass-bg: rgba(255, 255, 255, 0.95);
+  --glass-border: rgba(0, 0, 0, 0.15);
+  --glass-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.12);
+}
+
+body.sun-mode {
+  font-size: 17px;
+  -webkit-text-size-adjust: 100%;
+}
+
+body.sun-mode .page-title {
+  font-size: 1.7rem;
+  font-weight: 800;
+}
+
+body.sun-mode .glass-card,
+body.sun-mode .card {
+  border-width: 2px;
+  border-color: #9ca3af;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+}
+
+body.sun-mode .btn {
+  font-size: 1.05rem;
+  font-weight: 700;
+  padding: 0.85rem 1.5rem;
+}
+
+body.sun-mode .btn-primary {
+  background-color: #047857;
+  box-shadow: none;
+  border: 2px solid #065f46;
+}
+
+body.sun-mode .btn-secondary {
+  border-width: 2px;
+  border-color: #6b7280;
+  font-weight: 700;
+}
+
+body.sun-mode .input-field {
+  font-size: 1.05rem;
+  border-width: 2px;
+  border-color: #9ca3af;
+  font-weight: 500;
+}
+
+body.sun-mode .input-label {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+body.sun-mode .tab-button {
+  font-size: 1rem;
+  font-weight: 700;
+  padding: 0.7rem 0.5rem;
+}
+
+body.sun-mode .tab-bar {
+  border-width: 2px;
+}
+
+body.sun-mode .nav-item {
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+body.sun-mode .bottom-nav {
+  background: rgba(255,255,255,0.97);
+  border-top-width: 2px;
+  border-color: #9ca3af;
+}
+
+body.sun-mode .modal-content {
+  border: 2px solid #6b7280;
+}
+
+/* Sun Mode Toggle Button */
+.sun-toggle {
+  position: fixed;
+  top: 0.5rem;
+  right: 0.5rem;
+  z-index: 200;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 2px solid var(--color-border);
+  background: var(--color-bg-card);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.2rem;
+  box-shadow: var(--shadow-md);
+  transition: all 0.2s;
+}
+
+body.sun-mode .sun-toggle {
+  background: #fbbf24;
+  border-color: #d97706;
+  box-shadow: 0 0 12px rgba(251,191,36,0.5);
+}
+

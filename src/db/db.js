@@ -21,3 +21,29 @@ db.version(3).stores({
   routes: '++id, date, status, isTemplate',
   visits: '++id, routeId, customerId, status, exitTime'
 });
+
+// v4: apiStats to track Google Maps cost
+db.version(4).stores({
+  customers: '++id, name, address',
+  routes: '++id, date, status, isTemplate',
+  visits: '++id, routeId, customerId, status, exitTime',
+  apiStats: 'date'
+});
+
+// v5: fuelLogs to track daily fuel costs
+db.version(5).stores({
+  customers: '++id, name, address',
+  routes: '++id, date, status, isTemplate',
+  visits: '++id, routeId, customerId, status, exitTime',
+  apiStats: 'date',
+  fuelLogs: 'date'
+});
+
+// v6: pendingSync index for fuelLogs offline mileage sync
+db.version(6).stores({
+  customers: '++id, name, address',
+  routes: '++id, date, status, isTemplate',
+  visits: '++id, routeId, customerId, status, exitTime',
+  apiStats: 'date',
+  fuelLogs: 'date, pendingSync'
+});

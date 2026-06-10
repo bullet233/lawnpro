@@ -1,6 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { GoogleMap, Polygon } from '@react-google-maps/api';
-import { Check, Square, Map as MapIcon } from 'lucide-react';
+import { useMapStatus } from '../components/MapProvider';
+import { Check, Square, Map as MapIcon, WifiOff } from 'lucide-react';
+import { trackApiCall } from '../utils/apiTracker';
 
 const containerStyle = {
   width: '100%',
@@ -16,6 +18,7 @@ export default function GeofenceEditor({ initialPolygon, onSave, address }) {
   const [mapCenter, setMapCenter] = useState(defaultCenter);
   const mapRef = useRef(null);
   const polygonRef = useRef(null);
+  const { isLoaded, loadError } = useMapStatus();
 
   const onMapLoad = useCallback((map) => {
     mapRef.current = map;
@@ -39,6 +42,7 @@ export default function GeofenceEditor({ initialPolygon, onSave, address }) {
   useEffect(() => {
     if (address && mapRef.current && (!polygonPath || polygonPath.length === 0)) {
       const geocoder = new window.google.maps.Geocoder();
+      trackApiCall('geocode');
       geocoder.geocode({ address }, (results, status) => {
         if (status === 'OK' && results[0]) {
           const loc = results[0].geometry.location;
@@ -109,35 +113,48 @@ export default function GeofenceEditor({ initialPolygon, onSave, address }) {
           Navigate to the property. Click "Add Square", then drag the corners to fit the property lines.
         </p>
 
-        <GoogleMap
-          mapContainerStyle={containerStyle}
-          center={mapCenter}
-          zoom={4}
-          onLoad={onMapLoad}
-          options={{ mapTypeId: 'satellite', disableDefaultUI: false }}
-        >
-          {polygonPath.length > 0 && (
-            <Polygon
-              path={polygonPath}
-              editable={true}
-              draggable={true}
-              onLoad={(p) => { polygonRef.current = p; }}
-              options={{
-                fillColor: 'var(--color-primary)',
-                fillOpacity: 0.4,
-                strokeColor: 'var(--color-primary-hover)',
-                strokeOpacity: 1,
-                strokeWeight: 2,
-              }}
-            />
-          )}
-        </GoogleMap>
+        {isLoaded && !loadError ? (
+          <GoogleMap
+            mapContainerStyle={containerStyle}
+            center={mapCenter}
+            zoom={4}
+            onLoad={(map) => {
+              onMapLoad(map);
+              trackApiCall('mapLoad');
+            }}
+            options={{ mapTypeId: 'satellite', disableDefaultUI: false }}
+          >
+            {polygonPath.length > 0 && (
+              <Polygon
+                path={polygonPath}
+                editable={true}
+                draggable={true}
+                onLoad={(p) => { polygonRef.current = p; }}
+                options={{
+                  fillColor: 'var(--color-primary)',
+                  fillOpacity: 0.4,
+                  strokeColor: 'var(--color-primary-hover)',
+                  strokeOpacity: 1,
+                  strokeWeight: 2,
+                }}
+              />
+            )}
+          </GoogleMap>
+        ) : (
+          <div style={{ ...containerStyle, background: '#e5e7eb', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--color-text-muted)' }}>
+            <WifiOff size={40} style={{ opacity: 0.5, marginBottom: '1rem' }} />
+            <div style={{ fontSize: '1.1rem', fontWeight: 600 }}>Map Unavailable Offline</div>
+            <div style={{ fontSize: '0.85rem', marginTop: '0.5rem', maxWidth: '80%', textAlign: 'center' }}>
+              You cannot edit geofences without an internet connection.
+            </div>
+          </div>
+        )}
 
         <div style={{ display: 'flex', gap: '1rem', marginTop: '1.5rem' }}>
-          <button className="btn btn-secondary" onClick={drawSquare} style={{ flex: 1 }}>
+          <button className="btn btn-secondary" onClick={drawSquare} style={{ flex: 1 }} disabled={!isLoaded || !!loadError}>
             <Square size={18} /> Add Square
           </button>
-          <button className="btn btn-secondary" onClick={handleSave} style={{ flex: 1 }}>
+          <button className="btn btn-secondary" onClick={handleSave} style={{ flex: 1 }} disabled={!isLoaded || !!loadError}>
             <Check size={18} /> Update Boundary
           </button>
         </div>

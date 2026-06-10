@@ -1,13 +1,17 @@
 import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { db } from '../db/db';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { CheckCircle, Save, X } from 'lucide-react';
+import { CheckCircle, Save, X, Truck, Fuel, ClipboardList } from 'lucide-react';
+import { getSettings } from '../db/settings';
+import { trackApiCall } from '../utils/apiTracker';
+import { getBusinessDayStart } from '../utils/dateUtils';
+import ComplianceLogModal from './ComplianceLogModal';
 
 export default function DayReviewModal({ onClose }) {
   const allCustomers = useLiveQuery(() => db.customers.toArray(), []) || [];
   const todayVisits = useLiveQuery(() => {
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
+    const startOfDay = getBusinessDayStart();
     return db.visits
       .where('exitTime').aboveOrEqual(startOfDay.getTime())
       .filter(v => v.status !== 'skipped')
@@ -16,12 +20,94 @@ export default function DayReviewModal({ onClose }) {
 
   // Local edits: { [visitId]: { appliedServices: [], priceEarned: number } }
   const [edits, setEdits] = useState({});
+  const [activeEpaVisitId, setActiveEpaVisitId] = useState(null);
+  const [truckMiles, setTruckMiles] = useState('');
+  const [milesCalculated, setMilesCalculated] = useState(false);
+  const [isCalculatingMiles, setIsCalculatingMiles] = useState(false);
+
+  const todayRoute = useLiveQuery(async () => {
+    const today = new Date().toLocaleDateString('en-CA');
+    const routes = await db.routes.where('date').startsWith(today).toArray();
+    if (routes.length === 0) return null;
+    return routes[routes.length - 1];
+  }, []);
+
+  useEffect(() => {
+    const calculateActualMiles = async () => {
+      if (milesCalculated) return;
+      if (todayVisits.length === 0 || allCustomers.length === 0) {
+        if (todayRoute && todayRoute.plannedDistanceMiles && !milesCalculated) {
+          setTruckMiles(todayRoute.plannedDistanceMiles.toString());
+          setMilesCalculated(true);
+        }
+        return;
+      }
+
+      const sortedVisits = [...todayVisits].sort((a, b) => a.exitTime - b.exitTime);
+      const waypoints = [];
+      for (const v of sortedVisits) {
+        const cust = allCustomers.find(c => c.id === v.customerId);
+        if (cust && cust.geofence && cust.geofence.length > 0) {
+          const lat = cust.geofence.reduce((s, p) => s + p.lat, 0) / cust.geofence.length;
+          const lng = cust.geofence.reduce((s, p) => s + p.lng, 0) / cust.geofence.length;
+          waypoints.push({ lat, lng });
+        }
+      }
+
+      if (waypoints.length >= 2 && waypoints.length <= 25 && window.google && window.google.maps) {
+        setIsCalculatingMiles(true);
+        const directionsService = new window.google.maps.DirectionsService();
+        const origin = waypoints[0];
+        const destination = waypoints[waypoints.length - 1];
+        const intermediate = waypoints.slice(1, waypoints.length - 1).map(loc => ({ location: loc, stopover: true }));
+
+        try {
+          trackApiCall('directions');
+          directionsService.route({
+            origin,
+            destination,
+            waypoints: intermediate,
+            optimizeWaypoints: false,
+            travelMode: window.google.maps.TravelMode.DRIVING
+          }, (response, status) => {
+            if (status === 'OK') {
+              const route = response.routes[0];
+              const totalMeters = route.legs.reduce((acc, leg) => acc + leg.distance.value, 0);
+              const totalMiles = (totalMeters * 0.000621371).toFixed(1);
+              setTruckMiles(totalMiles);
+            } else {
+               if (todayRoute && todayRoute.plannedDistanceMiles) {
+                 setTruckMiles(todayRoute.plannedDistanceMiles.toString());
+               }
+            }
+            setIsCalculatingMiles(false);
+            setMilesCalculated(true);
+          });
+        } catch (e) {
+          if (todayRoute && todayRoute.plannedDistanceMiles) setTruckMiles(todayRoute.plannedDistanceMiles.toString());
+          setIsCalculatingMiles(false);
+          setMilesCalculated(true);
+        }
+      } else {
+        if (todayRoute && todayRoute.plannedDistanceMiles && !milesCalculated) {
+          setTruckMiles(todayRoute.plannedDistanceMiles.toString());
+          setMilesCalculated(true);
+        }
+      }
+    };
+
+    calculateActualMiles();
+  }, [todayVisits, allCustomers, todayRoute, milesCalculated]);
 
   useEffect(() => {
     // Seed edits with existing data
     const initial = {};
     todayVisits.forEach(v => {
-      initial[v.id] = { appliedServices: v.appliedServices || [], priceEarned: v.priceEarned || 0 };
+      initial[v.id] = { 
+        appliedServices: v.appliedServices || [], 
+        priceEarned: v.priceEarned || 0,
+        complianceLog: v.complianceLog || null
+      };
     });
     setEdits(initial);
   }, [todayVisits.length]);
@@ -36,17 +122,90 @@ export default function DayReviewModal({ onClose }) {
       const newPrice = custServices
         .filter(s => newIds.includes(s.id))
         .reduce((sum, s) => sum + s.price, 0);
-      return { ...prev, [visitId]: { appliedServices: newIds, priceEarned: newPrice } };
+      return { ...prev, [visitId]: { ...current, appliedServices: newIds, priceEarned: newPrice } };
     });
+  };
+
+  const initEpaLog = (visitId) => {
+    setEdits(prev => {
+      const current = prev[visitId];
+      if (current.complianceLog) return prev; // already exists
+      const settings = getSettings();
+      return {
+        ...prev,
+        [visitId]: {
+          ...current,
+          complianceLog: {
+            applicatorName: settings.applicatorName || '',
+            targetSite: 'Turf',
+            productName: '',
+            epaRegNum: '',
+            amountApplied: '',
+            areaTreated: '',
+            mixSite: 'Business Location'
+          }
+        }
+      };
+    });
+    setActiveEpaVisitId(visitId);
+  };
+
+  const handleSaveEpaLog = (visitId, logData) => {
+    setEdits(prev => {
+      const current = prev[visitId];
+      return {
+        ...prev,
+        [visitId]: { ...current, complianceLog: logData }
+      };
+    });
+    setActiveEpaVisitId(null);
+  };
+
+  const copyNotice = (visit, edit) => {
+    const log = edit.complianceLog || {};
+    const text = `Post-Application Notice\nDate: ${new Date(visit.exitTime).toLocaleDateString()}\nApplicator: ${log.applicatorName || 'Technician'}\nProduct: ${log.productName || 'N/A'} (EPA Reg #${log.epaRegNum || 'N/A'})\nTarget: ${log.targetSite || 'Turf'}\n\nPlease keep children and pets off the treated area until dry (approx 2-3 hours).`;
+    navigator.clipboard.writeText(text);
+    alert('Notice copied to clipboard!');
   };
 
   const handleSaveAll = async () => {
     for (const [visitIdStr, data] of Object.entries(edits)) {
       await db.visits.update(Number(visitIdStr), {
         appliedServices: data.appliedServices,
-        priceEarned: data.priceEarned
+        priceEarned: data.priceEarned,
+        complianceLog: data.complianceLog
       });
     }
+
+    // Save fuel log
+    const miles = parseFloat(truckMiles);
+    const settings = getSettings();
+    const totalSecs = todayVisits.reduce((sum, v) => sum + (v.durationSecs || 0), 0);
+    const mowerHours = totalSecs / 3600;
+    const todayDate = new Date().toLocaleDateString('en-CA');
+
+    if (!isNaN(miles)) {
+      await db.fuelLogs.put({
+        date: todayDate,
+        milesDriven: miles,
+        mowerHours: mowerHours,
+        costOfGas: settings.costOfGas || 3.50,
+        truckMpg: settings.truckMpg || 7,
+        mowerGph: settings.mowerGph || 1.0,
+        pendingSync: 0
+      });
+    } else {
+      await db.fuelLogs.put({
+        date: todayDate,
+        milesDriven: 0,
+        mowerHours: mowerHours,
+        costOfGas: settings.costOfGas || 3.50,
+        truckMpg: settings.truckMpg || 7,
+        mowerGph: settings.mowerGph || 1.0,
+        pendingSync: 1
+      });
+    }
+
     onClose();
   };
 
@@ -56,7 +215,7 @@ export default function DayReviewModal({ onClose }) {
     return `${Math.floor(secs / 60)}m`;
   };
 
-  return (
+  return createPortal(
     <div className="modal-overlay">
       <div className="modal-content" style={{ maxWidth: '520px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.2rem' }}>
@@ -73,7 +232,7 @@ export default function DayReviewModal({ onClose }) {
           <p style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: '2rem 0' }}>No completed jobs today.</p>
         )}
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', maxHeight: '55vh', overflowY: 'auto' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', maxHeight: '45vh', overflowY: 'auto' }}>
           {todayVisits.map(visit => {
             const cust = allCustomers.find(c => c.id === visit.customerId);
             if (!cust) return null;
@@ -127,15 +286,73 @@ export default function DayReviewModal({ onClose }) {
                     })}
                   </div>
                 )}
+
+                {/* EPA Compliance Log Section */}
+                {activeServices.some(s => edit.appliedServices.includes(s.id) && s.name.toLowerCase().match(/(fertilizer|weed|spray|chem)/)) && (
+                  <div style={{ marginTop: '1rem', borderTop: '1px solid var(--color-border)', paddingTop: '0.8rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ fontSize: '0.85rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.4rem', color: edit.complianceLog?.productName ? 'var(--color-primary)' : 'var(--color-text-main)' }}>
+                        {edit.complianceLog?.productName ? <CheckCircle size={14} /> : '⚠️'} EPA Application Log
+                      </div>
+                      <button 
+                        onClick={() => initEpaLog(visit.id)}
+                        style={{ fontSize: '0.75rem', padding: '0.4rem 0.8rem', background: 'var(--color-primary-light)', color: 'var(--color-primary)', border: 'none', borderRadius: 'var(--radius-full)', cursor: 'pointer', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.3rem' }}
+                      >
+                        <ClipboardList size={14} />
+                        {edit.complianceLog ? 'Edit Log' : 'Fill Log'}
+                      </button>
+                    </div>
+
+                    {activeEpaVisitId === visit.id && (
+                      <ComplianceLogModal 
+                        visit={visit}
+                        customerName={cust.name}
+                        customerLawnSize={cust.lawnSize}
+                        initialLog={edit.complianceLog}
+                        onSave={(logData) => handleSaveEpaLog(visit.id, logData)}
+                        onClose={() => setActiveEpaVisitId(null)}
+                      />
+                    )}
+                  </div>
+                )}
               </div>
             );
           })}
         </div>
 
+        {todayVisits.length > 0 && (
+          <div style={{ marginTop: '1.2rem', padding: '1rem', background: 'rgba(59,130,246,0.1)', border: '1px solid rgba(59,130,246,0.3)', borderRadius: 'var(--radius-sm)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.6rem' }}>
+              <Truck size={16} color="var(--color-primary)" />
+              <div style={{ fontSize: '0.9rem', fontWeight: 600 }}>Daily Mileage (for fuel cost)</div>
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              <input
+                type="number"
+                step="0.1"
+                className="input-field"
+                placeholder="Miles"
+                value={truckMiles}
+                onChange={e => setTruckMiles(e.target.value)}
+                style={{ width: '100px' }}
+                disabled={isCalculatingMiles}
+              />
+              <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>miles</span>
+              {isCalculatingMiles && (
+                <span style={{ fontSize: '0.8rem', color: 'var(--color-primary)', marginLeft: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                  <div className="spinner" style={{ width: '12px', height: '12px', border: '2px solid var(--color-primary)', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+                  Calculating true distance...
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
         <button className="btn btn-primary" style={{ width: '100%', marginTop: '1.5rem' }} onClick={handleSaveAll}>
           <Save size={18} /> Save All & Close
         </button>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

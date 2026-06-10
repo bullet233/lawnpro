@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { AlertTriangle, CheckCircle, Info, Trash2, SkipForward } from 'lucide-react';
 
 /**
@@ -36,12 +37,14 @@ export default function AppDialog({ dialog, onClose }) {
     skip:    '#f59e0b',
   };
 
-  const handleConfirm = () => {
-    onConfirm?.();
+  const handleConfirm = async () => {
+    if (onConfirm) {
+      await onConfirm();
+    }
     onClose();
   };
 
-  return (
+  return createPortal(
     <div
       className="modal-overlay"
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
@@ -81,6 +84,7 @@ export default function AppDialog({ dialog, onClose }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
