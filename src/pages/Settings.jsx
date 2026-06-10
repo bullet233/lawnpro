@@ -29,6 +29,11 @@ export default function Settings() {
   const [newServiceName, setNewServiceName] = useState('');
   const [newServicePrice, setNewServicePrice] = useState('');
   const [newServiceCategory, setNewServiceCategory] = useState('Other');
+  const [addOnServices, setAddOnServices] = useState([]);
+  const [newAddOnName, setNewAddOnName] = useState('');
+  const [newAddOnPrice, setNewAddOnPrice] = useState('');
+  const [newAddOnCategory, setNewAddOnCategory] = useState('Maintenance');
+  const [editingAddOnId, setEditingAddOnId] = useState(null);
   const [newChemName, setNewChemName] = useState('');
   const [newChemEpa, setNewChemEpa] = useState('');
   const [newChemTarget, setNewChemTarget] = useState('');
@@ -74,6 +79,7 @@ export default function Settings() {
       }));
     setLicenseNumber(s.licenseNumber || '');
     setChemicalInventory(s.chemicalInventory || []);
+    setAddOnServices(s.addOnServices || []);
   }, []);
 
   const handleSave = () => {
@@ -134,6 +140,23 @@ export default function Settings() {
       setNewChemCategory('Fertilizer');
     }
 
+    // Auto-add unsaved add-on if present
+    let currentAddOns = [...addOnServices];
+    if (newAddOnName.trim()) {
+      const price = parseFloat(newAddOnPrice) || 0;
+      const cat = newAddOnCategory;
+      if (editingAddOnId) {
+        currentAddOns = currentAddOns.map(a => a.id === editingAddOnId ? { ...a, name: newAddOnName.trim(), defaultPrice: price, category: cat } : a);
+      } else {
+        currentAddOns.push({ id: 'ao_' + Date.now(), name: newAddOnName.trim(), defaultPrice: price, category: cat });
+      }
+      setAddOnServices(currentAddOns);
+      setEditingAddOnId(null);
+      setNewAddOnName('');
+      setNewAddOnPrice('');
+      setNewAddOnCategory('Maintenance');
+    }
+
     saveSettings({
       targetHourlyRate: target,
       rateUnderpaidThreshold: underpaid,
@@ -150,7 +173,8 @@ export default function Settings() {
       applicatorName,
       licenseNumber,
       defaultServices: currentServices,
-      chemicalInventory: currentInventory
+      chemicalInventory: currentInventory,
+      addOnServices: currentAddOns
     });
     
     toast('Settings saved successfully!');
@@ -281,6 +305,7 @@ export default function Settings() {
               setLicenseNumber(s.licenseNumber || '');
               if (s.defaultServices) setDefaultServices(s.defaultServices);
               if (s.chemicalInventory) setChemicalInventory(s.chemicalInventory);
+              if (s.addOnServices) setAddOnServices(s.addOnServices);
             }
 
             toast(`Successfully restored ${backup.customers.length} customers, ${backup.visits.length} visits, and ${backup.routes?.length || 0} routes.`);
@@ -371,6 +396,42 @@ export default function Settings() {
     setNewChemRate('');
     setNewChemNotice('');
     setNewChemCategory('Fertilizer');
+  };
+
+  // ── Add-On Services ───────────────────────────────────────────────────
+  const editAddOn = (addon) => {
+    setEditingAddOnId(addon.id);
+    setNewAddOnName(addon.name);
+    setNewAddOnPrice(addon.defaultPrice.toString());
+    setNewAddOnCategory(addon.category || 'Maintenance');
+  };
+
+  const saveAddOn = () => {
+    if (!newAddOnName.trim()) return;
+    const price = parseFloat(newAddOnPrice) || 0;
+    const cat = newAddOnCategory;
+    setAddOnServices(prev => {
+      let updated;
+      if (editingAddOnId) {
+        updated = prev.map(a => a.id === editingAddOnId ? { ...a, name: newAddOnName.trim(), defaultPrice: price, category: cat } : a);
+      } else {
+        updated = [...prev, { id: 'ao_' + Date.now(), name: newAddOnName.trim(), defaultPrice: price, category: cat }];
+      }
+      saveSettings({ addOnServices: updated });
+      return updated;
+    });
+    setEditingAddOnId(null);
+    setNewAddOnName('');
+    setNewAddOnPrice('');
+    setNewAddOnCategory('Maintenance');
+  };
+
+  const removeAddOn = (id) => {
+    setAddOnServices(prev => {
+      const updated = prev.filter(a => a.id !== id);
+      saveSettings({ addOnServices: updated });
+      return updated;
+    });
   };
 
   const removeChemical = (id) => {
@@ -609,6 +670,80 @@ export default function Settings() {
             />
             <button className="btn btn-secondary" onClick={saveDefaultService} style={{ padding: '0.4rem 0.6rem' }}>
               {editingServiceId ? <Check size={16} /> : <Plus size={16} />}
+            </button>
+          </div>
+        </div>
+
+        {/* Add-On Services (Extras Menu) */}
+        <div className="glass-card" style={{ padding: '1.5rem', marginBottom: '1.2rem' }}>
+          <h2 style={{ fontSize: '1.1rem', marginBottom: '0.3rem' }}>Add-On Services</h2>
+          <p style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem', marginBottom: '1rem' }}>
+            Quick-pick extras shown when completing a job. Use these for additional work performed during a visit (edging, weeding, debris removal, etc.).
+          </p>
+
+          {addOnServices.length === 0 && (
+            <div style={{ padding: '1.2rem', textAlign: 'center', color: 'var(--color-text-muted)', fontSize: '0.85rem', border: '1px dashed var(--color-border)', borderRadius: 'var(--radius-sm)', marginBottom: '1rem' }}>
+              No add-on services defined yet. Add your first one below.
+            </div>
+          )}
+
+          {addOnServices.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginBottom: '1rem' }}>
+              {addOnServices.map(addon => (
+                <div key={addon.id} style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', padding: '0.5rem 0.7rem', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
+                  <span style={{ flex: 1, fontSize: '0.9rem', fontWeight: 600 }}>
+                    {addon.name}
+                    <span style={{ fontSize: '0.65rem', color: 'var(--color-text-main)', background: 'rgba(0,0,0,0.05)', padding: '2px 6px', borderRadius: '4px', marginLeft: '6px', fontWeight: 500 }}>{addon.category || 'Maintenance'}</span>
+                  </span>
+                  <span style={{ fontSize: '0.85rem', color: 'var(--color-primary)' }}>${addon.defaultPrice}</span>
+                  <div style={{ display: 'flex', gap: '0.2rem' }}>
+                    <button 
+                      onClick={() => editAddOn(addon)}
+                      style={{ background: 'none', border: 'none', color: 'var(--color-primary)', cursor: 'pointer', padding: '2px' }}
+                    >
+                      <Edit2 size={14} />
+                    </button>
+                    <button 
+                      onClick={() => removeAddOn(addon.id)}
+                      style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: '2px' }}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <select
+              className="input-field"
+              value={newAddOnCategory}
+              onChange={e => setNewAddOnCategory(e.target.value)}
+              style={{ flex: '0 0 120px', padding: '0.4rem' }}
+            >
+              <option value="Maintenance">Maintenance</option>
+              <option value="Cleanup">Cleanup</option>
+              <option value="Other">Other</option>
+            </select>
+            <input
+              type="text"
+              className="input-field"
+              placeholder="Add-on name"
+              value={newAddOnName}
+              onChange={e => setNewAddOnName(e.target.value)}
+              style={{ flex: 1 }}
+            />
+            <input
+              type="number"
+              className="input-field"
+              placeholder="$"
+              value={newAddOnPrice}
+              onChange={e => setNewAddOnPrice(e.target.value)}
+              style={{ width: '60px' }}
+            />
+            <button className="btn btn-secondary" onClick={saveAddOn} style={{ padding: '0.4rem 0.6rem' }}>
+              {editingAddOnId ? <Check size={16} /> : <Plus size={16} />}
             </button>
           </div>
         </div>

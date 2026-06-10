@@ -298,7 +298,9 @@ export default function History() {
       const end      = fmtTime(job.exitTime)  || '';
       const bladeMins= fmtMins(job.durationSecs);
       const driveMins= fmtMins(job.driveTimeSecs || 0);
-      const services = getServiceNames(job).join('; ');
+      const baseServices = getServiceNames(job).join('; ');
+      const addOnServices = job.addOns?.map(a => '+' + a.name).join('; ') || '';
+      const services = [baseServices, addOnServices].filter(Boolean).join(' | ');
       const temp     = job.weather?.temp ?? '';
       const note     = (job.note || '').replace(/"/g, '""');
       return `"${date}","${start}","${end}",${bladeMins},${driveMins},"${job.custName}","${job.status}","${services}",${job.priceEarned},"${temp}","${note}"`;
@@ -633,6 +635,11 @@ export default function History() {
                       {serviceNames.map(name => (
                         <span key={name} style={{ padding: '4px 12px', fontSize: '0.8rem', borderRadius: '999px', background: 'rgba(16,185,129,0.1)', color: 'var(--color-primary)', fontWeight: 600 }}>
                           {name}
+                        </span>
+                      ))}
+                      {job.addOns?.map(addon => (
+                        <span key={addon.id} style={{ padding: '4px 12px', fontSize: '0.8rem', borderRadius: '999px', background: 'rgba(59,130,246,0.1)', color: '#3b82f6', fontWeight: 600 }}>
+                          + {addon.name}
                         </span>
                       ))}
                       {job.weather && (

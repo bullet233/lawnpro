@@ -53,6 +53,7 @@ import { useNavigate } from 'react-router-dom';
 import DayReviewModal from '../components/DayReviewModal';
 import AppDialog from '../components/AppDialog';
 import TimeSplitModal from '../components/TimeSplitModal';
+import EditJobModal from '../components/EditJobModal';
 import QuickAddModal from '../components/QuickAddModal';
 import { getSettings } from '../db/settings';
 import { trackApiCall } from '../utils/apiTracker';
@@ -106,6 +107,7 @@ export default function LiveMap() {
   const [showQuickAdd, setShowQuickAdd] = useState(false);
   // { primaryCustomer, primaryVisitId, durationSecs, nearbyCustomer }
   const [timeSplit, setTimeSplit] = useState(null);
+  const [isEditJobOpen, setIsEditJobOpen] = useState(false);
   const [nearbyOpportunity, setNearbyOpportunity] = useState(null);
   const [skipPrompt, setSkipPrompt] = useState(null);
   const [poorGps, setPoorGps] = useState(false);
@@ -881,6 +883,33 @@ export default function LiveMap() {
     setCompletionPanel(null);
   };
 
+  const handleSaveEditedJob = async (updatedData) => {
+    if (!completionPanel?.visitId) return;
+    
+    // updatedData contains { appliedServices, addOns, priceEarned, note }
+    const updateObj = {
+      appliedServices: updatedData.appliedServices,
+      addOns: updatedData.addOns,
+      priceEarned: updatedData.priceEarned
+    };
+    if (updatedData.note) {
+      updateObj.note = updatedData.note;
+    }
+    
+    await db.visits.update(completionPanel.visitId, updateObj);
+    
+    // Update the completion panel state to reflect the new total and note (if we want to keep it open)
+    setCompletionPanel(prev => ({
+      ...prev,
+      priceEarned: updatedData.priceEarned,
+      appliedServices: updatedData.appliedServices,
+      addOns: updatedData.addOns
+    }));
+    
+    if (updatedData.note) setPanelNote(updatedData.note);
+    setIsEditJobOpen(false);
+  };
+
   const handleDrivebyResolution = (status) => {
     logVisit(drivebyPrompt.customer, drivebyPrompt.duration, drivebyPrompt.entry, status);
     setDrivebyPrompt(null);
@@ -1223,6 +1252,16 @@ export default function LiveMap() {
           )}
 
           <div style={{ display: 'flex', gap: '0.8rem', flexWrap: 'wrap' }}>
+            <button 
+              className="btn btn-secondary" 
+              style={{ flex: '1 1 100%', minHeight: '52px', fontSize: '1rem', background: 'var(--color-bg-main)', border: '2px solid var(--color-primary)', color: 'var(--color-primary)' }} 
+              onClick={() => {
+                if (completionTimerRef.current) clearTimeout(completionTimerRef.current);
+                setIsEditJobOpen(true);
+              }}
+            >
+              ✏️ Edit Job & Extras
+            </button>
             <button className="btn btn-primary" style={{ flex: 1, minHeight: '52px', fontSize: '1rem' }} onClick={handleSaveNote}>
               {panelNote.trim() ? 'Save Note' : 'Done'}
             </button>
@@ -1250,6 +1289,14 @@ export default function LiveMap() {
           initialLog={null}
           onSave={handleSaveEpaLog}
           onClose={() => setActiveEpaJob(null)}
+        />
+      )}
+
+      {isEditJobOpen && completionPanel && (
+        <EditJobModal 
+          completionPanel={completionPanel}
+          onSave={handleSaveEditedJob}
+          onClose={() => setIsEditJobOpen(false)}
         />
       )}
 
