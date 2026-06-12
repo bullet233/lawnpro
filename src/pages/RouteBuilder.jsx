@@ -7,17 +7,9 @@ import { Plus, Save, Trash2, ChevronDown, ChevronUp, BookMarked, FolderOpen, Gri
 import AppDialog from '../components/AppDialog';
 import { trackApiCall } from '../utils/apiTracker';
 import WeeklyScheduler from '../components/WeeklyScheduler';
-import { calculateTieredMatrix } from '../utils/matrix';
+import { calculateTieredMatrix, parseLawnSizeToSqFt } from '../utils/matrix';
 
 const mapContainerStyle = { width: '100%', height: '300px', borderRadius: 'var(--radius-md)', marginTop: '1rem' };
-
-const getDist = (a, b) => {
-  const R = 6371000;
-  const dLat = (b.lat - a.lat) * Math.PI / 180;
-  const dLng = (b.lng - a.lng) * Math.PI / 180;
-  const x = Math.sin(dLat/2)**2 + Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLng/2)**2;
-  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
-};
 
 export default function RouteBuilder() {
   const customers   = useLiveQuery(() => db.customers.toArray(), []);
@@ -27,8 +19,8 @@ export default function RouteBuilder() {
 
   const tieredMatrixData = useMemo(() => calculateTieredMatrix(allVisits, customers), [allVisits, customers]);
 
-  const [activeTab,     setActiveTab]     = useState('daily');
-  const [customerTab,   setCustomerTab]   = useState('mowing');
+  const [activeTab,     setActiveTab]     = useState('build');
+  const [customerTab,   setCustomerTab]   = useState('all');
 
   const [selectedStops, setSelectedStops] = useState([]);
   const [showMap,       setShowMap]       = useState(false);
@@ -71,15 +63,7 @@ export default function RouteBuilder() {
 
   const removeStop = (index) => setSelectedStops(prev => prev.filter((_, i) => i !== index));
 
-  const moveStop = (index, direction) => {
-    setSelectedStops(prev => {
-      const next = [...prev];
-      const temp = next[index];
-      next[index] = next[index + direction];
-      next[index + direction] = temp;
-      return next;
-    });
-  };
+  const clearDriveTimes = (stops) => stops.map(s => ({ ...s, plannedDriveTimeSecs: null, plannedDriveDistanceMeters: null }));
 
   // ── Drag to reorder (desktop) ─────────────────────────────────────────────
   const handleDragStart = (e, index) => { setDragIndex(index); e.dataTransfer.effectAllowed = 'move'; };
@@ -91,7 +75,7 @@ export default function RouteBuilder() {
       const next = [...prev];
       const [removed] = next.splice(dragIndex, 1);
       next.splice(index, 0, removed);
-      return next;
+      return clearDriveTimes(next);
     });
     setDragIndex(null); setDragOverIndex(null);
   };
@@ -108,22 +92,28 @@ export default function RouteBuilder() {
       const r = ref.getBoundingClientRect();
       return y >= r.top && y <= r.bottom;
     });
-    if (overIndex !== -1 && overIndex !== touchDragIndex.current) {
+    const from = touchDragIndex.current;
+    const to = overIndex;
+    if (to !== -1 && from !== to) {
       setSelectedStops(prev => {
         const next = [...prev];
-        const [removed] = next.splice(touchDragIndex.current, 1);
-        next.splice(overIndex, 0, removed);
-        return next;
+        const [removed] = next.splice(from, 1);
+        next.splice(to, 0, removed);
+        return clearDriveTimes(next);
       });
-      touchDragIndex.current = overIndex;
-      setDragOverIndex(overIndex);
+      touchDragIndex.current = to;
+      setDragOverIndex(to);
     }
   };
   const handleTouchEnd = () => { touchDragIndex.current = null; setDragOverIndex(null); };
 
   // ── Optimize route order (Google Maps Directions API) ───────────────────────────────
-  const handleOptimizeRoute = () => {
+  const handleOptimizeRoute = async () => {
     if (selectedStops.length < 2) return;
+    if (selectedStops.length > 25) {
+      setDialog({ type: 'danger', title: 'Too Many Stops', message: 'Google Maps limits optimization to 25 stops. Split into two routes or remove some stops.' });
+      return;
+    }
     const getCenter = (stop) => {
       const geo = stop.customer.geofence;
       if (!geo || geo.length === 0) return null;
@@ -141,15 +131,42 @@ export default function RouteBuilder() {
 
     setDialog({ type: 'info', title: 'Optimizing...', message: 'Asking Google Maps for the fastest driving route. Please wait...' });
 
-    const directionsService = new window.google.maps.DirectionsService();
-    
-    const origin = getCenter(selectedStops[0]);
-    const destination = getCenter(selectedStops[selectedStops.length - 1]);
-    
-    const waypoints = selectedStops.slice(1, selectedStops.length - 1).map(stop => ({
+    let origin = getCenter(selectedStops[0]);
+    let destination = getCenter(selectedStops[selectedStops.length - 1]);
+    let waypoints = selectedStops.slice(1, selectedStops.length - 1).map(stop => ({
       location: getCenter(stop),
       stopover: true
     }));
+
+    if (settings.businessAddress) {
+      try {
+        const geocoder = new window.google.maps.Geocoder();
+        const results = await new Promise((resolve, reject) => {
+          geocoder.geocode({ address: settings.businessAddress }, (res, status) => {
+            if (status === 'OK') resolve(res);
+            else reject(status);
+          });
+        });
+        const loc = results[0].geometry.location;
+        origin = { lat: loc.lat(), lng: loc.lng() };
+        destination = { lat: loc.lat(), lng: loc.lng() };
+        waypoints = selectedStops.map(stop => ({
+          location: getCenter(stop),
+          stopover: true
+        }));
+      } catch (err) {
+        console.warn('Failed to geocode business address:', err);
+      }
+    }
+
+    const directionsService = new window.google.maps.DirectionsService();
+    let isResolved = false;
+    const timeout = setTimeout(() => {
+      if (!isResolved) {
+        isResolved = true;
+        setDialog({ type: 'danger', title: 'Optimization Timeout', message: 'Google Maps took too long to respond. Please check your network and try again.' });
+      }
+    }, 10000);
 
     directionsService.route({
       origin,
@@ -158,23 +175,39 @@ export default function RouteBuilder() {
       optimizeWaypoints: true,
       travelMode: window.google.maps.TravelMode.DRIVING
     }, (response, status) => {
+      if (isResolved) return;
+      isResolved = true;
+      clearTimeout(timeout);
+
       if (status === 'OK') {
         const route = response.routes[0];
         const optimizedOrder = route.waypoint_order;
         
-        const newStops = [selectedStops[0]]; // Start is fixed
-        optimizedOrder.forEach(idx => {
-          newStops.push(selectedStops[idx + 1]);
-        });
-        newStops.push(selectedStops[selectedStops.length - 1]); // End is fixed
-        
-        // Map exact driving times and distances (duration.value and distance.value are in seconds/meters)
-        newStops[0].plannedDriveTimeSecs = 0;
-        newStops[0].plannedDriveDistanceMeters = 0;
-        for (let i = 0; i < route.legs.length; i++) {
-           if (newStops[i + 1]) {
-             newStops[i + 1].plannedDriveTimeSecs = route.legs[i].duration.value;
-             newStops[i + 1].plannedDriveDistanceMeters = route.legs[i].distance.value;
+        let newStops = [];
+        if (settings.businessAddress) {
+           optimizedOrder.forEach(idx => {
+             newStops.push({ ...selectedStops[idx] });
+           });
+           for (let i = 0; i < route.legs.length - 1; i++) {
+             if (newStops[i]) {
+               newStops[i].plannedDriveTimeSecs = route.legs[i].duration.value;
+               newStops[i].plannedDriveDistanceMeters = route.legs[i].distance.value;
+             }
+           }
+        } else {
+           newStops = [{ ...selectedStops[0] }]; 
+           optimizedOrder.forEach(idx => {
+             newStops.push({ ...selectedStops[idx + 1] });
+           });
+           newStops.push({ ...selectedStops[selectedStops.length - 1] }); 
+           
+           newStops[0].plannedDriveTimeSecs = 0;
+           newStops[0].plannedDriveDistanceMeters = 0;
+           for (let i = 0; i < route.legs.length; i++) {
+              if (newStops[i + 1]) {
+                newStops[i + 1].plannedDriveTimeSecs = route.legs[i].duration.value;
+                newStops[i + 1].plannedDriveDistanceMeters = route.legs[i].distance.value;
+              }
            }
         }
         
@@ -206,10 +239,7 @@ export default function RouteBuilder() {
     }));
   };
 
-  // ── Save route ────────────────────────────────────────────────────────
-  const handleSaveRoute = async () => {
-    if (selectedStops.length === 0) return;
-    // Deactivate any existing active or pending routes first
+  const performSaveRoute = async () => {
     const existingActive = await db.routes.where('status').anyOf('active', 'pending').toArray();
     for (const r of existingActive) {
       await db.routes.update(r.id, { status: 'completed' });
@@ -237,7 +267,36 @@ export default function RouteBuilder() {
     setShowMap(false);
   };
 
-  // ── Save as template ─────────────────────────────────────────────────────────
+  const handleSaveRoute = async () => {
+    if (selectedStops.length === 0) return;
+    const existingActive = await db.routes.where('status').anyOf('active', 'pending').toArray();
+    let totalPendingStops = 0;
+    
+    for (const r of existingActive) {
+      if (r.stops) {
+        const visits = await db.visits.where({ routeId: r.id }).toArray();
+        const completedCustIds = new Set(visits.filter(v => v.status === 'completed' || v.status === 'skipped').map(v => v.customerId));
+        const pendingCount = r.stops.filter(s => !completedCustIds.has(s.customerId)).length;
+        totalPendingStops += pendingCount;
+      }
+    }
+    
+    if (totalPendingStops > 0) {
+      setDialog({
+        type: 'warning',
+        title: 'Replace Active Route?',
+        message: `You have an in-progress route with ${totalPendingStops} unfinished stop${totalPendingStops > 1 ? 's' : ''}. Saving this route will mark the current one as completed. Continue?`,
+        onConfirm: () => {
+          setDialog(null);
+          performSaveRoute();
+        },
+        onCancel: () => setDialog(null)
+      });
+    } else {
+      performSaveRoute();
+    }
+  };
+
   const handleSaveTemplate = async () => {
     if (selectedStops.length === 0) return;
     const name = routeName.trim() || `Template ${new Date().toLocaleDateString()}`;
@@ -253,7 +312,6 @@ export default function RouteBuilder() {
     setDialog({ type: 'success', title: 'Template Saved!', message: `"${name}" saved. Load it any time to pre-fill this route.` });
   };
 
-  // ── Load a template ───────────────────────────────────────────────────────────
   const handleLoadTemplate = async (template) => {
     if (!customers) return;
     const stops = [];
@@ -269,7 +327,6 @@ export default function RouteBuilder() {
     setDialog({ type: 'info', title: 'Template Loaded', message: `"${template.name}" — ${stops.length} stop${stops.length !== 1 ? 's' : ''} ready. Edit if needed, then save your active route.` });
   };
 
-  // ── Delete a template ─────────────────────────────────────────────────────────
   const handleDeleteTemplate = (template) => {
     setDialog({
       type: 'danger',
@@ -299,7 +356,7 @@ export default function RouteBuilder() {
     });
     setSelectedStops(stops);
     setRouteName(`${day} Route`);
-    setActiveTab('daily');
+    setActiveTab('build');
     setDialog({ type: 'info', title: `${day} Route Loaded`, message: `${stops.length} stop${stops.length !== 1 ? 's' : ''} added. (Snoozed customers were ignored).` });
   };
 
@@ -308,11 +365,10 @@ export default function RouteBuilder() {
       <AppDialog dialog={dialog} onClose={() => setDialog(null)} />
       <h1 className="page-title">Route Builder</h1>
 
-      {/* TABS */}
       <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem' }}>
         <button 
-          className={`btn ${activeTab === 'daily' ? 'btn-primary' : 'btn-secondary'}`}
-          onClick={() => setActiveTab('daily')}
+          className={`btn ${activeTab === 'build' ? 'btn-primary' : 'btn-secondary'}`}
+          onClick={() => setActiveTab('build')}
           style={{ flex: 1, display: 'flex', justifyContent: 'center', gap: '0.5rem' }}
         >
           <RouteIcon size={18} /> Daily Route
@@ -336,10 +392,8 @@ export default function RouteBuilder() {
         />
       )}
 
-      {activeTab === 'daily' && (
+      {activeTab === 'build' && (
         <>
-
-      {/* ── Templates ── */}
       {templates && templates.length > 0 && (
         <div className="glass-card" style={{ marginBottom: '1.5rem' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }} onClick={() => setShowTemplates(!showTemplates)}>
@@ -380,13 +434,9 @@ export default function RouteBuilder() {
         </div>
       )}
 
-      {/* Two-Column Layout */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(350px, 1fr))', gap: '1.5rem', alignItems: 'start' }}>
         
-        {/* ── LEFT COLUMN ── */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-          
-          {/* ── Route Name ── */}
           <div className="glass-card">
             <label className="input-label" style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600 }}>
               Route Name <span style={{ fontWeight: 400, color: 'var(--color-text-muted)' }}>(optional)</span>
@@ -401,17 +451,26 @@ export default function RouteBuilder() {
             />
           </div>
 
-          {/* ── Available Customers ── */}
           <div className="glass-card" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem' }}>
               <h3 style={{ margin: 0 }}>Add Clients</h3>
-              <div style={{ display: 'flex', gap: '0.5rem', background: 'var(--color-bg-main)', padding: '0.2rem', borderRadius: 'var(--radius-md)' }}>
+              <div style={{ display: 'flex', gap: '0.5rem', background: 'var(--color-bg-main)', padding: '0.2rem', borderRadius: 'var(--radius-md)', overflowX: 'auto' }}>
+                <button 
+                  onClick={() => setCustomerTab('all')}
+                  style={{ 
+                    background: customerTab === 'all' ? 'var(--color-primary)' : 'transparent', 
+                    color: customerTab === 'all' ? 'white' : 'var(--color-text-muted)',
+                    border: 'none', borderRadius: 'var(--radius-sm)', padding: '0.3rem 0.6rem', fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap'
+                  }}
+                >
+                  🌍 All
+                </button>
                 <button 
                   onClick={() => setCustomerTab('mowing')}
                   style={{ 
                     background: customerTab === 'mowing' ? 'var(--color-primary)' : 'transparent', 
                     color: customerTab === 'mowing' ? 'white' : 'var(--color-text-muted)',
-                    border: 'none', borderRadius: 'var(--radius-sm)', padding: '0.3rem 0.6rem', fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer'
+                    border: 'none', borderRadius: 'var(--radius-sm)', padding: '0.3rem 0.6rem', fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap'
                   }}
                 >
                   🌾 Mowing
@@ -421,7 +480,7 @@ export default function RouteBuilder() {
                   style={{ 
                     background: customerTab === 'fertilizer' ? 'var(--color-primary)' : 'transparent', 
                     color: customerTab === 'fertilizer' ? 'white' : 'var(--color-text-muted)',
-                    border: 'none', borderRadius: 'var(--radius-sm)', padding: '0.3rem 0.6rem', fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer'
+                    border: 'none', borderRadius: 'var(--radius-sm)', padding: '0.3rem 0.6rem', fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap'
                   }}
                 >
                   🧪 Fertilizer
@@ -440,17 +499,13 @@ export default function RouteBuilder() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '500px', overflowY: 'auto', paddingRight: '0.2rem' }}>
               {(() => {
                 const q = searchQuery.toLowerCase().trim();
-                
-                // Filter by selected tab
-                const tabFiltered = availableCustomers.filter(c => {
-                  if (customerTab === 'mowing') return !c.services || c.services.find(s => s.id === 's1')?.active;
-                  if (customerTab === 'fertilizer') return c.services && c.services.find(s => s.id === 's3')?.active;
-                  return true;
-                });
-                
-                const filtered = q
-                  ? tabFiltered.filter(c => c.name.toLowerCase().includes(q) || (c.address || '').toLowerCase().includes(q))
-                  : tabFiltered;
+                const filtered = q 
+                  ? availableCustomers.filter(c => c.name.toLowerCase().includes(q) || (c.address || '').toLowerCase().includes(q))
+                  : availableCustomers.filter(c => {
+                      if (customerTab === 'mowing') return !c.services || c.services.find(s => s.active && s.name && s.name.toLowerCase().includes('mow'));
+                      if (customerTab === 'fertilizer') return c.services && c.services.find(s => s.active && s.name && s.name.toLowerCase().includes('fertil'));
+                      return true;
+                  });
                   
                 if (filtered.length === 0) return <p style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>{q ? 'No matching clients.' : 'All clients added or none available.'}</p>;
                 return filtered.map(c => (
@@ -469,7 +524,6 @@ export default function RouteBuilder() {
           </div>
         </div>
 
-        {/* ── RIGHT COLUMN: Route Stops ── */}
         <div className="glass-card" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.2rem' }}>
             <h3 style={{ margin: 0, fontSize: '1.2rem' }}>
@@ -513,7 +567,6 @@ export default function RouteBuilder() {
                   onDragOver={e  => handleDragOver(e, index)}
                   onDrop={e      => handleDrop(e, index)}
                   onDragEnd={handleDragEnd}
-                  onTouchStart={e => handleTouchStart(e, index)}
                   style={{
                     background: 'var(--color-bg-card)',
                     borderRadius: 'var(--radius-md)',
@@ -527,7 +580,7 @@ export default function RouteBuilder() {
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.8rem 1rem' }}>
                     {/* Grip Handle */}
-                    <div style={{ color: 'var(--color-text-muted)', cursor: 'grab', padding: '0 4px', touchAction: 'none' }}>
+                    <div onTouchStart={e => handleTouchStart(e, index)} style={{ color: 'var(--color-text-muted)', cursor: 'grab', padding: '0 4px', touchAction: 'none' }}>
                       <GripVertical size={18} />
                     </div>
                     <div style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--color-text-muted)', minWidth: '22px' }}>{index + 1}</div>
@@ -628,6 +681,85 @@ export default function RouteBuilder() {
               <Save size={20} /> Save Active Route
             </button>
           </div>
+          {/* Route Summary Footer */}
+          {selectedStops.length > 0 && (
+            <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--color-border)' }}>
+              {(() => {
+                let totalRev = 0;
+                let totalDriveSecs = 0;
+                let totalMowSecs = 0;
+                let missingDrive = false;
+                
+                // Compute pace based on history, fallback to 250
+                let globalPace = 250;
+                if (allVisits.length > 0 && customers.length > 0) {
+                  let tSecs = 0;
+                  let tSqFt = 0;
+                  allVisits.forEach(v => {
+                    if (v.status !== 'completed' || !v.durationSecs || v.durationSecs < 60) return;
+                    const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.includes('s1') || v.appliedServices.some(s => typeof s === 'string' && s.toLowerCase().includes('mow'));
+                    if (!isMow) return;
+                    const cust = customers.find(c => c.id === v.customerId);
+                    if (!cust || !cust.lawnSize) return;
+                    const sqft = parseLawnSizeToSqFt(cust.lawnSize);
+                    if (sqft) {
+                      tSecs += v.durationSecs;
+                      tSqFt += sqft;
+                    }
+                  });
+                  if (tSecs > 0) globalPace = Math.max(10, Math.round(tSqFt / (tSecs / 60)));
+                }
+
+                selectedStops.forEach(s => {
+                  const activeServices = s.customer.services?.filter(srv => srv.active) || [];
+                  const plannedTotal = activeServices
+                    .filter(srv => s.plannedServiceIds.includes(srv.id))
+                    .reduce((sum, srv) => sum + srv.price, 0);
+                  totalRev += plannedTotal;
+
+                  if (s.plannedDriveTimeSecs != null) totalDriveSecs += s.plannedDriveTimeSecs;
+                  else missingDrive = true;
+
+                  // Mow time estimation
+                  let avgDuration = 900;
+                  const histVisits = allVisits.filter(v => v.customerId === s.customer.id && v.status === 'completed' && v.durationSecs);
+                  if (histVisits.length > 0) {
+                     avgDuration = histVisits.reduce((acc, v) => acc + v.durationSecs, 0) / histVisits.length;
+                  } else if (s.customer.lawnSize) {
+                     const sqft = parseLawnSizeToSqFt(s.customer.lawnSize);
+                     if (sqft) {
+                       avgDuration = Math.max(600, Math.round((sqft / globalPace) * 60));
+                     }
+                  }
+                  totalMowSecs += avgDuration;
+                });
+
+                const totalTimeMins = Math.round((totalDriveSecs + totalMowSecs) / 60);
+                const hours = Math.floor(totalTimeMins / 60);
+                const mins = totalTimeMins % 60;
+                const timeString = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+
+                return (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--color-bg-main)', padding: '0.8rem 1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
+                    <div>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Route Summary</div>
+                      <div style={{ fontWeight: 600 }}>{selectedStops.length} Stops</div>
+                    </div>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Est. Time</div>
+                      <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.3rem', justifyContent: 'center' }}>
+                        {timeString} {missingDrive && <span style={{ color: '#f59e0b', fontSize: '0.85rem' }} title="Re-optimize to include drive time">⚠️</span>}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Revenue</div>
+                      <div style={{ fontWeight: 800, color: 'var(--color-primary)' }}>${totalRev.toFixed(2)}</div>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
         </div>
       </div>
       </>

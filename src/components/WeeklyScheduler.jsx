@@ -48,9 +48,7 @@ export default function WeeklyScheduler({ customers, tieredMatrixData, settings,
       else if (cust.terrain === 'hilly') mins *= 1.3;
       if (cust.fencedBackyard) mins += 3;
       if (obstacles > 0) mins += (obstacles * 1.5);
-      
-      const setupBuffer = settings?.setupTimeMins ?? 5;
-      mins += setupBuffer;
+
       
       totalMins += mins;
     });

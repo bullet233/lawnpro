@@ -26,6 +26,8 @@ function ScatterPlot({ data, width = 340, height = 280 }) {
   const w = width - pad.left - pad.right;
   const h = height - pad.top - pad.bottom;
 
+  const [tooltip, setTooltip] = useState(null);
+
   if (data.length === 0) return null;
 
   const maxX = Math.max(...data.map(d => d.sqft)) * 1.1;
@@ -59,8 +61,6 @@ function ScatterPlot({ data, width = 340, height = 280 }) {
   const yTicks = [];
   const yStep = Math.max(5, Math.ceil(maxY / 10 / 5) * 5);
   for (let t = 0; t <= maxY; t += yStep) yTicks.push(t);
-
-  const [tooltip, setTooltip] = useState(null);
 
   return (
     <div style={{ position: 'relative', width: '100%', maxWidth: width }}>
@@ -341,11 +341,19 @@ export default function Analytics() {
   }, []);
 
   useEffect(() => {
-    if (containerRef.current) {
-      const w = containerRef.current.offsetWidth - 32; // minus padding
-      setChartWidth(Math.max(300, w));
-    }
-  }, [containerRef.current]);
+    const el = containerRef.current;
+    if (!el) return;
+    
+    const observer = new ResizeObserver((entries) => {
+      if (entries[0]) {
+        const w = entries[0].contentRect.width - 32; // minus padding
+        setChartWidth(Math.max(300, w));
+      }
+    });
+    
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   // 1. Prepare data for scatter plot
   const scatterData = useMemo(() => {
@@ -483,15 +491,14 @@ export default function Analytics() {
       if (targetFenced) difficultyMins += 3;
       if (obstacles > 0) difficultyMins += (obstacles * 1.5);
       
-      const setupBuffer = settings.setupTimeMins ?? 5;
-      baseMins += setupBuffer;
+
 
       let driveMins = 0;
       const parts = [`Uses ${bucket.label} bucket (${Math.round(bucket.pace)} sqft/m).`];
       if (obstacles > 0) parts.push(`+${Math.round(obstacles * 1.5)} min for obstacles.`);
       if (targetTerrain !== 'flat') parts.push(`+${targetTerrain === 'moderate' ? '15%' : '30%'} terrain penalty.`);
       if (targetFenced) parts.push(`+3 min fenced yard penalty.`);
-      parts.push(`+${setupBuffer} min setup buffer.`);
+      // Removed setup buffer push
 
       // --- Drive Time Logic ---
       if (targetAddress && window.google && window.google.maps) {
@@ -574,7 +581,8 @@ export default function Analytics() {
 
       const totalPredictedMins = baseMins + difficultyMins + driveMins;
       const rawPrice = totalPredictedMins * perMin;
-      const finalPrice = Math.max(30, rawPrice); // $30 floor
+      const minFee = settings.minStopFee ?? 30;
+      const finalPrice = Math.max(minFee, rawPrice); // Settings floor
 
       // Find Comparable Customers
       const comps = allCustomers
@@ -590,7 +598,7 @@ export default function Analytics() {
 
       setBidResult({
         targetPrice: finalPrice.toFixed(2),
-        isFloor: finalPrice === 30 && rawPrice < 30,
+        isFloor: finalPrice === minFee && rawPrice < minFee,
         basePrice: basePrice.toFixed(2),
         diffPrice: diffPrice.toFixed(2),
         drivePrice: drivePrice.toFixed(2),
@@ -852,8 +860,8 @@ export default function Analytics() {
             let mowerCost = 0;
             allFuelLogs.forEach(log => {
               totalMiles += log.milesDriven || 0;
-              truckCost += ((log.milesDriven || 0) / (log.truckMpg || 7)) * (log.costOfGas || 3.50);
-              mowerCost += (log.mowerHours || 0) * (log.mowerGph || 1) * (log.costOfGas || 3.50);
+              truckCost += ((log.milesDriven || 0) / (log.truckMpg || settings.truckMpg || 7)) * (log.costOfGas || settings.costOfGas || 3.50);
+              mowerCost += (log.mowerHours || 0) * (log.mowerGph || settings.mowerGph || 1) * (log.costOfGas || settings.costOfGas || 3.50);
             });
             
             return (
@@ -880,8 +888,8 @@ export default function Analytics() {
                   <h3 style={{ fontSize: '0.9rem', color: 'var(--color-text-main)', marginBottom: '0.8rem', marginTop: 0 }}>Daily Breakdown</h3>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '300px', overflowY: 'auto' }}>
                     {[...allFuelLogs].sort((a, b) => new Date(b.date) - new Date(a.date)).map(log => {
-                      const tCost = ((log.milesDriven || 0) / (log.truckMpg || 7)) * (log.costOfGas || 3.50);
-                      const mCostDaily = (log.mowerHours || 0) * (log.mowerGph || 1) * (log.costOfGas || 3.50);
+                      const tCost = ((log.milesDriven || 0) / (log.truckMpg || settings.truckMpg || 7)) * (log.costOfGas || settings.costOfGas || 3.50);
+                      const mCostDaily = (log.mowerHours || 0) * (log.mowerGph || settings.mowerGph || 1) * (log.costOfGas || settings.costOfGas || 3.50);
                       
                       const isEditing = editingFuelLogDate === log.date;
 
@@ -1141,11 +1149,10 @@ export default function Analytics() {
                         {/* Rows */}
                         {group.rows.map(sqft => {
                           let mins = sqft / group.pace;
-                          const setupBuffer = settings?.setupTimeMins ?? 5;
-                          mins += setupBuffer; // Add setup buffer
 
                           const rawPrice = (mins / 60) * (settings?.targetHourlyRate || 60);
-                          const price = Math.max(30, rawPrice); // $30 floor
+                          const minFee = settings?.minStopFee ?? 30;
+                          const price = Math.max(minFee, rawPrice); // Settings floor
                           
                           return (
                             <tr key={sqft} style={{ borderBottom: '1px solid var(--color-border)', background: 'var(--color-bg-card)' }}>
@@ -1160,7 +1167,7 @@ export default function Analytics() {
                   </tbody>
                 </table>
                 <div style={{ padding: '0.6rem 0.8rem', fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', position: 'sticky', bottom: 0, borderTop: '1px solid var(--color-border)' }}>
-                  * Denotes estimated pace borrowed from nearest bucket. Minimum stop fee: $30. Tap a category header to view history graph.
+                  * Denotes estimated pace borrowed from nearest bucket. Minimum stop fee: ${settings?.minStopFee ?? 30}. Tap a category header to view history graph.
                 </div>
               </div>
             ) : (

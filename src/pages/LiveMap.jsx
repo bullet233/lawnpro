@@ -58,7 +58,7 @@ import QuickAddModal from '../components/QuickAddModal';
 import { getSettings } from '../db/settings';
 import { trackApiCall } from '../utils/apiTracker';
 
-const mapContainerStyle = { width: '100%', height: 'calc(100vh - 8rem)', borderRadius: 'var(--radius-md)' };
+const mapContainerStyle = { width: '100%', height: 'calc(100vh - 6rem)', borderRadius: 'var(--radius-md)' };
 
 // Haversine formula to calculate distance in meters
 const getDistance = (lat1, lon1, lat2, lon2) => {
@@ -111,6 +111,7 @@ export default function LiveMap() {
   const [nearbyOpportunity, setNearbyOpportunity] = useState(null);
   const [skipPrompt, setSkipPrompt] = useState(null);
   const [poorGps, setPoorGps] = useState(false);
+  const [gpsError, setGpsError] = useState(false);
 
   const mapRef = useRef(null);
   const dismissedOpportunitiesRef = useRef(new Set());
@@ -130,6 +131,10 @@ export default function LiveMap() {
   const anchorGeofenceRef   = useRef(null); // Temporary anchor for manual starts
   const latestLocRef        = useRef(null);
   const poorGpsRef          = useRef(false);
+  const capturedDriveTimeSecsRef = useRef(0);
+  const panelNoteRef        = useRef('');
+
+  useEffect(() => { panelNoteRef.current = panelNote; }, [panelNote]);
 
   const saveDriveTimerState = (isPaused, accumulated) => {
     localStorage.setItem('drive_timer_state', JSON.stringify({
@@ -256,13 +261,14 @@ export default function LiveMap() {
   // Helper to get status of a stop
   const getStopStatus = (customerId) => {
     if (activeGeofenceIdRef.current === customerId) return 'active';
-    const visit = routeVisits.find(v => v.customerId === customerId && (v.status === 'completed' || v.status === 'quick-log' || v.status === 'skipped'));
-    if (visit) return 'completed';
+    const visit = routeVisits.find(v => v.customerId === customerId && (v.status === 'completed' || v.status === 'skipped'));
+    if (visit) return visit.status === 'skipped' ? 'skipped' : 'completed';
     return 'pending';
   };
 
   const getStatusColors = (status) => {
     if (status === 'completed') return { fill: '#10b981', stroke: '#059669' }; // Emerald Green
+    if (status === 'skipped') return { fill: '#9ca3af', stroke: '#6b7280' }; // Gray
     if (status === 'active') return { fill: '#f59e0b', stroke: '#d97706' }; // Amber Orange
     return { fill: '#ef4444', stroke: '#b91c1c' }; // Red for pending
   };
@@ -287,7 +293,7 @@ export default function LiveMap() {
 
   const progressInfo = useMemo(() => {
     if (!activeRoute || !activeRoute.expandedStops || activeRoute.expandedStops.length === 0) return null;
-    const completedStops = activeRoute.expandedStops.filter(s => getStopStatus(s.id) === 'completed').length;
+    const completedStops = activeRoute.expandedStops.filter(s => getStopStatus(s.id) === 'completed' || getStopStatus(s.id) === 'skipped').length;
     const totalStops = activeRoute.expandedStops.length;
     
     let totalSecondsLeft = 0;
@@ -331,7 +337,7 @@ export default function LiveMap() {
     }
 
     return { completedStops, totalStops, etaString };
-  }, [activeRoute, routeVisits, activeGeofenceIdRef.current, allVisits, allCustomers, globalPace]);
+  }, [activeRoute, routeVisits, activeGeofence?.id, allVisits, allCustomers, globalPace]);
 
   // Reuse the top-level getDistance (Haversine) — alias for clarity
   const getDistanceFromLatLonInMeters = getDistance;
@@ -378,7 +384,7 @@ export default function LiveMap() {
     }
 
     return plannedNext;
-  }, [activeRoute, routeVisits, activeGeofenceIdRef.current, currentPosition, allCustomers]);
+  }, [activeRoute, routeVisits, activeGeofence?.id, currentPosition, allCustomers]);
 
   // 1. Dynamic Map Navigation & Snap Back
   const onMapLoad = (map) => {
@@ -481,7 +487,7 @@ export default function LiveMap() {
             // Ignore already completed jobs so we don't re-trigger them if we drive by again
             const isCompleted = routeVisitsRef.current.some(v => 
                v.customerId === customer.id && 
-               (v.status === 'completed' || v.status === 'quick-log' || v.status === 'skipped')
+               (v.status === 'completed' || v.status === 'skipped')
             );
             if (isCompleted) continue;
 
@@ -595,6 +601,17 @@ export default function LiveMap() {
                     handleExitGeofence();
                   }
                   if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+                  
+                  // Capture drive time right when entering the geofence
+                  capturedDriveTimeSecsRef.current = Math.floor(
+                    isDrivingPausedRef.current
+                      ? accumulatedDriveTimeRef.current
+                      : accumulatedDriveTimeRef.current + (Date.now() - lastDriveResumeTimeRef.current) / 1000
+                  );
+                  // Reset drive timer
+                  accumulatedDriveTimeRef.current = 0;
+                  lastDriveResumeTimeRef.current = Date.now();
+
                   jobStartRef.current = Date.now();
                   accumulatedTimeRef.current = 0;
                   lastResumeTimeRef.current = Date.now();
@@ -639,7 +656,10 @@ export default function LiveMap() {
           }
         }
       },
-      (err) => console.error(err),
+      (err) => {
+        console.error(err);
+        setGpsError(true);
+      },
       { enableHighAccuracy: true }
     );
     return () => {
@@ -652,6 +672,8 @@ export default function LiveMap() {
     if (drivebyPrompt) {
       if (drivebyTimerRef.current) clearTimeout(drivebyTimerRef.current);
       drivebyTimerRef.current = setTimeout(() => {
+        // Auto-dismiss defaults to 'skipped' so the visit is never silently lost
+        logVisit(drivebyPrompt.customer, drivebyPrompt.duration, drivebyPrompt.entry, 'skipped', '', drivebyPrompt.driveTime);
         setDrivebyPrompt(null);
       }, 15000); // Auto dismiss after 15 seconds
     } else {
@@ -678,7 +700,6 @@ export default function LiveMap() {
     setTimerState('idle');
     potentialEnterRef.current = null;
     potentialExitRef.current = null;
-    accumulatedDriveTimeRef.current = 0;
     lastDriveResumeTimeRef.current = Date.now();
     setIsDrivingPaused(false);
     isDrivingPausedRef.current = false;
@@ -686,9 +707,9 @@ export default function LiveMap() {
     const threshold = getSettings().drivebyThresholdSecs || 45;
 
     if (finalDuration < threshold && completedCust) {
-      setDrivebyPrompt({ customer: completedCust, duration: finalDuration, entry: jobStartRef.current });
+      setDrivebyPrompt({ customer: completedCust, duration: finalDuration, entry: jobStartRef.current, driveTime: capturedDriveTimeSecsRef.current });
     } else if (completedCust) {
-      logVisit(completedCust, finalDuration, jobStartRef.current, 'completed', liveNoteRef.current);
+      logVisit(completedCust, finalDuration, jobStartRef.current, 'completed', liveNoteRef.current, capturedDriveTimeSecsRef.current);
       setLiveNote('');
     }
   };
@@ -721,7 +742,7 @@ export default function LiveMap() {
     setLiveNote('');
   };
 
-  const logVisit = async (customer, durationSecs, entryTime, status, note = '') => {
+  const logVisit = async (customer, durationSecs, entryTime, status, note = '', overrideDriveTimeSecs = null) => {
     accumulatedDriveTimeRef.current = 0;
     lastDriveResumeTimeRef.current = Date.now();
     setIsDrivingPaused(false);
@@ -751,7 +772,7 @@ export default function LiveMap() {
 
     // Calculate Drive Time — use the accumulated drive timer (respects pause for lunch etc.)
     // If the drive timer was running, capture the final value; otherwise use accumulated
-    let driveTimeSecs = Math.floor(
+    let driveTimeSecs = overrideDriveTimeSecs !== null ? overrideDriveTimeSecs : Math.floor(
       isDrivingPausedRef.current
         ? accumulatedDriveTimeRef.current
         : accumulatedDriveTimeRef.current + (Date.now() - lastDriveResumeTimeRef.current) / 1000
@@ -759,7 +780,7 @@ export default function LiveMap() {
 
     // Check if there are any stops left on the current route
     const hasMoreStops = route && route.normalizedStops ? route.normalizedStops.some(s => {
-      const alreadyVisited = routeVisitsRef.current.some(v => v.customerId === s.customerId && (v.status === 'completed' || v.status === 'quick-log'));
+      const alreadyVisited = routeVisitsRef.current.some(v => v.customerId === s.customerId && (v.status === 'completed'));
       return !alreadyVisited && s.customerId !== customer.id;
     }) : false;
 
@@ -847,12 +868,24 @@ export default function LiveMap() {
         appliedServices
       });
       if (completionTimerRef.current) clearTimeout(completionTimerRef.current);
-      completionTimerRef.current = setTimeout(() => {
-        if (!panelNoteActiveRef.current) {
-          setCompletionPanel(null);
+      completionTimerRef.current = setTimeout(async () => {
+        if (panelNoteActiveRef.current) {
+          // Retry in 5 seconds if user is actively typing
+          completionTimerRef.current = setTimeout(async () => {
+            // Save note on final auto-dismiss so typed text is never lost
+            const currentNote = panelNoteRef.current.trim();
+            if (currentNote && completionPanel?.visitId) {
+              await db.visits.update(completionPanel.visitId, { note: currentNote });
+            }
+            setCompletionPanel(null);
+          }, 5000);
         } else {
-          // Retry in 5 seconds if user is typing
-          completionTimerRef.current = setTimeout(() => setCompletionPanel(null), 5000);
+          // Save note on auto-dismiss so typed text is never lost
+          const currentNote = panelNoteRef.current.trim();
+          if (currentNote && visitId) {
+            await db.visits.update(visitId, { note: currentNote });
+          }
+          setCompletionPanel(null);
         }
       }, 12000);
     }
@@ -911,7 +944,7 @@ export default function LiveMap() {
   };
 
   const handleDrivebyResolution = (status) => {
-    logVisit(drivebyPrompt.customer, drivebyPrompt.duration, drivebyPrompt.entry, status);
+    logVisit(drivebyPrompt.customer, drivebyPrompt.duration, drivebyPrompt.entry, status, '', drivebyPrompt.driveTime);
     setDrivebyPrompt(null);
   };
 
@@ -1081,11 +1114,7 @@ export default function LiveMap() {
 
   return (
     <div className="animate-fade-in" style={{ position: 'relative' }}>
-      {poorGps && (
-        <div style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 100, background: '#ef4444', color: 'white', fontSize: '0.8rem', fontWeight: 600, textAlign: 'center', padding: '6px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', boxShadow: '0 2px 10px rgba(239,68,68,0.4)' }}>
-          <AlertTriangle size={16} /> Poor GPS Signal — Auto-routing paused
-        </div>
-      )}
+
       <AppDialog dialog={dialog} onClose={() => setDialog(null)} />
       {showDayReview && <DayReviewModal onClose={() => setShowDayReview(false)} />}
       {showLiveNoteModal && (
@@ -1301,7 +1330,17 @@ export default function LiveMap() {
       )}
 
       {/* Top Panel: Current or Next Job Info */}
-      <div style={{ position: 'absolute', top: '0.8rem', left: '0.8rem', right: '0.8rem', zIndex: 10 }}>
+      <div style={{ position: 'absolute', top: '0.8rem', left: '0.8rem', right: '0.8rem', zIndex: 100 }}>
+        {gpsError && (
+          <div style={{ background: '#ef4444', color: 'white', fontSize: '0.85rem', fontWeight: 600, textAlign: 'center', padding: '10px', borderRadius: 'var(--radius-md)', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', boxShadow: '0 4px 12px rgba(239,68,68,0.4)', marginBottom: '0.8rem' }}>
+            <AlertTriangle size={18} /> Location unavailable — check permissions in your phone settings.
+          </div>
+        )}
+        {poorGps && !gpsError && (
+          <div style={{ background: '#ef4444', color: 'white', fontSize: '0.85rem', fontWeight: 600, textAlign: 'center', padding: '10px', borderRadius: 'var(--radius-md)', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', boxShadow: '0 4px 12px rgba(239,68,68,0.4)', marginBottom: '0.8rem' }}>
+            <AlertTriangle size={18} /> Poor GPS Signal — Auto-routing paused
+          </div>
+        )}
         {activeGeofence ? (
           <div className="animate-fade-in" style={{ 
             padding: '1rem', 
@@ -1351,11 +1390,20 @@ export default function LiveMap() {
                 </button>
                 <button 
                   onClick={() => {
-                    activeGeofenceIdRef.current = null;
-                    setActiveGeofence(null);
-                    anchorGeofenceRef.current = null;
-                    setTimerState('idle');
-                    setLiveNote('');
+                    setDialog({
+                      type: 'warning',
+                      title: 'Discard Active Job?',
+                      message: 'Are you sure you want to cancel this job? This will reset the timer and discard any unsaved work.',
+                      onConfirm: () => {
+                        activeGeofenceIdRef.current = null;
+                        setActiveGeofence(null);
+                        anchorGeofenceRef.current = null;
+                        setTimerState('idle');
+                        setLiveNote('');
+                        setDialog(null);
+                      },
+                      onCancel: () => setDialog(null)
+                    });
                   }}
                   style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', padding: '0.2rem', marginTop: '-0.2rem' }}
                 >
@@ -1441,9 +1489,21 @@ export default function LiveMap() {
                         );
                       })()}
                     </div>
-                    <div style={{ textAlign: 'right' }}>
-                      <div style={{ fontSize: '1.4rem', fontWeight: 800, fontFamily: 'monospace', color: isDrivingPaused ? 'var(--color-warning)' : 'var(--color-primary)', lineHeight: 1.2, fontVariantNumeric: 'tabular-nums' }}>
-                        {formatLiveTimer(drivingDuration)}
+                    <div style={{ textAlign: 'right', display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                      <div style={{ 
+                        background: isDrivingPaused ? 'rgba(245,158,11,0.1)' : 'rgba(16,185,129,0.1)', 
+                        border: `1px solid ${isDrivingPaused ? 'rgba(245,158,11,0.3)' : 'rgba(16,185,129,0.3)'}`,
+                        borderRadius: 'var(--radius-full)', 
+                        padding: '0.2rem 0.6rem', 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        gap: '0.4rem',
+                        marginBottom: '0.4rem'
+                      }}>
+                        <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: isDrivingPaused ? 'var(--color-warning)' : 'var(--color-primary)' }} />
+                        <span style={{ fontSize: '1.1rem', fontWeight: 800, fontFamily: 'monospace', color: isDrivingPaused ? 'var(--color-warning)' : 'var(--color-primary)', fontVariantNumeric: 'tabular-nums' }}>
+                          {formatLiveTimer(drivingDuration)}
+                        </span>
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', justifyContent: 'flex-end', marginTop: '0.2rem' }}>
                         {isDrivingPaused && drivingDuration === 0 ? (
@@ -1461,33 +1521,29 @@ export default function LiveMap() {
                             <Play size={12} fill="currentColor" style={{ marginRight: '4px' }}/> START DRIVING
                           </button>
                         ) : (
-                          <>
-                            <div style={{ fontSize: '0.75rem', color: isDrivingPaused ? 'var(--color-warning)' : 'var(--color-primary)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                              {isDrivingPaused ? 'PAUSED' : 'DRIVING'}
-                            </div>
-                            <button 
-                              className="btn"
-                              style={{ padding: '0.1rem 0.3rem', fontSize: '0.65rem', background: isDrivingPaused ? 'var(--color-primary)' : 'var(--color-bg-card)', color: isDrivingPaused ? '#fff' : 'var(--color-text-main)', border: `1px solid ${isDrivingPaused ? 'var(--color-primary)' : 'var(--color-border)'}` }}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (isDrivingPausedRef.current) {
-                                  // Resume
-                                  lastDriveResumeTimeRef.current = Date.now();
-                                  isDrivingPausedRef.current = false;
-                                  setIsDrivingPaused(false);
-                                  saveDriveTimerState(false, accumulatedDriveTimeRef.current);
-                                } else {
-                                  // Pause
-                                  accumulatedDriveTimeRef.current += (Date.now() - lastDriveResumeTimeRef.current) / 1000;
-                                  isDrivingPausedRef.current = true;
-                                  setIsDrivingPaused(true);
-                                  saveDriveTimerState(true, accumulatedDriveTimeRef.current);
-                                }
-                              }}
-                            >
-                              {isDrivingPaused ? '▶' : '||'}
-                            </button>
-                          </>
+                          <button 
+                            className="btn"
+                            style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem', borderRadius: 'var(--radius-md)', background: isDrivingPaused ? 'var(--color-primary)' : 'var(--color-bg-card)', color: isDrivingPaused ? '#fff' : 'var(--color-text-main)', border: `1px solid ${isDrivingPaused ? 'var(--color-primary)' : 'var(--color-border)'}`, display: 'flex', alignItems: 'center', gap: '0.3rem' }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (isDrivingPausedRef.current) {
+                                // Resume
+                                lastDriveResumeTimeRef.current = Date.now();
+                                isDrivingPausedRef.current = false;
+                                setIsDrivingPaused(false);
+                                saveDriveTimerState(false, accumulatedDriveTimeRef.current);
+                              } else {
+                                // Pause
+                                accumulatedDriveTimeRef.current += (Date.now() - lastDriveResumeTimeRef.current) / 1000;
+                                isDrivingPausedRef.current = true;
+                                setIsDrivingPaused(true);
+                                saveDriveTimerState(true, accumulatedDriveTimeRef.current);
+                              }
+                            }}
+                          >
+                            {isDrivingPaused ? <Play size={14} fill="currentColor" /> : <Pause size={14} fill="currentColor" />}
+                            {isDrivingPaused ? 'RESUME' : 'PAUSE'}
+                          </button>
                         )}
                       </div>
                     </div>
@@ -1615,7 +1671,7 @@ export default function LiveMap() {
                     }}
                     onClick={async () => {
                       const visits = await db.visits.where({ customerId: c.id }).toArray();
-                      const completed = visits.filter(v => v.status === 'completed' || v.status === 'quick-log');
+                      const completed = visits.filter(v => v.status === 'completed');
                       let message = `Do you want to add ${c.name} to the current route?\n\nLast cut: Never`;
                       if (completed.length > 0) {
                         completed.sort((a, b) => b.exitTime - a.exitTime);
@@ -1647,7 +1703,7 @@ export default function LiveMap() {
       )}
       
       {/* Bottom Panel (Native-style Bottom Sheet) */}
-      <div className="glass-card" style={{ position: 'absolute', bottom: '4.5rem', left: 0, right: 0, zIndex: 10, padding: 0, overflow: 'hidden', borderRadius: '1.5rem 1.5rem 0 0', borderBottom: 'none', boxShadow: '0 -10px 25px rgba(0,0,0,0.08)' }}>
+      <div className="glass-card" style={{ position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 10, padding: 0, overflow: 'hidden', borderRadius: '1.5rem 1.5rem 0 0', borderBottom: 'none', boxShadow: '0 -10px 25px rgba(0,0,0,0.08)' }}>
         
         {/* Progress Bar & Header */}
         {progressInfo && (
@@ -1666,8 +1722,8 @@ export default function LiveMap() {
                        {activeRoute.name}
                      </span>
                    )}
-                   <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>Progress</span>
-                   <strong>Stop {progressInfo.completedStops + (activeGeofence ? 1 : 0)} of {progressInfo.totalStops}</strong>
+                   <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '2px' }}>Route Progress</span>
+                   <strong style={{ fontSize: '1.1rem', color: 'var(--color-text-main)' }}>{progressInfo.completedStops} of {progressInfo.totalStops} Stops Completed</strong>
                  </div>
                  {isRouteListOpen ? <ChevronDown size={18} color="var(--color-text-muted)" style={{ marginLeft: '0.5rem' }} /> : <ChevronUp size={18} color="var(--color-text-muted)" style={{ marginLeft: '0.5rem' }} />}
                </div>
@@ -1693,7 +1749,7 @@ export default function LiveMap() {
             )}
 
             {/* Actual Visual Progress Bar */}
-            <div style={{ width: '100%', height: '8px', background: 'var(--color-border)', borderRadius: '4px', overflow: 'hidden' }}>
+            <div style={{ width: '100%', height: '5px', background: 'var(--color-border)', borderRadius: '3px', overflow: 'hidden' }}>
               <div 
                 style={{ 
                   height: '100%', 

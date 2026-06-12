@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { getSettings, saveSettings } from '../db/settings';
 import { db } from '../db/db';
-import { Settings as SettingsIcon, Save, Download, Upload, Plus, Trash2, Map as MapIcon, Edit2, Check } from 'lucide-react';
+import { Settings as SettingsIcon, Save, Download, Upload, Plus, Trash2, Map as MapIcon, Edit2, Check, FileText } from 'lucide-react';
 import AppDialog from '../components/AppDialog';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { API_PRICES } from '../utils/apiTracker';
@@ -11,7 +11,7 @@ export default function Settings() {
   const [settings, setSettings] = useState(null);
   const [targetRate, setTargetRate] = useState('');
   const [underpaidRate, setUnderpaidRate] = useState('');
-  const [setupTimeMins, setSetupTimeMins] = useState('');
+  const [minStopFee, setMinStopFee] = useState('');
   const [drivebySecs, setDrivebySecs] = useState('');
   const [costOfGas, setCostOfGas] = useState('');
   const [truckMpg, setTruckMpg] = useState('');
@@ -52,7 +52,7 @@ export default function Settings() {
     setSettings(s);
     setTargetRate(s.targetHourlyRate.toString());
     setUnderpaidRate(s.rateUnderpaidThreshold.toString());
-    setSetupTimeMins((s.setupTimeMins ?? 5).toString());
+    setMinStopFee((s.minStopFee ?? 30).toString());
     setDrivebySecs((s.drivebyThresholdSecs || 45).toString());
     setCostOfGas((s.costOfGas || 3.50).toString());
     setTruckMpg((s.truckMpg || 7).toString());
@@ -85,13 +85,13 @@ export default function Settings() {
   const handleSave = () => {
     const target = parseFloat(targetRate);
     const underpaid = parseFloat(underpaidRate);
-    const setupTime = parseInt(setupTimeMins, 10);
+    const minFee = parseFloat(minStopFee);
     const driveby = parseInt(drivebySecs, 10);
     const gas = parseFloat(costOfGas);
     const mpg = parseFloat(truckMpg);
     const mower = parseFloat(mowerGph);
     
-    if (isNaN(target) || isNaN(underpaid) || isNaN(setupTime) || isNaN(driveby) || isNaN(gas) || isNaN(mpg) || isNaN(mower)) {
+    if (isNaN(target) || isNaN(underpaid) || isNaN(minFee) || isNaN(driveby) || isNaN(gas) || isNaN(mpg) || isNaN(mower)) {
       setDialog({ type: 'warning', title: 'Invalid Input', message: 'Please enter valid numbers for all fields.' });
       return;
     }
@@ -160,7 +160,7 @@ export default function Settings() {
     saveSettings({
       targetHourlyRate: target,
       rateUnderpaidThreshold: underpaid,
-      setupTimeMins: setupTime,
+      minStopFee: minFee,
       drivebyThresholdSecs: driveby,
       costOfGas: gas,
       truckMpg: mpg,
@@ -291,7 +291,7 @@ export default function Settings() {
               const s = backup.settings;
               setTargetRate(s.targetHourlyRate?.toString() || '60');
               setUnderpaidRate(s.rateUnderpaidThreshold?.toString() || '45');
-              setSetupTimeMins((s.setupTimeMins ?? 5).toString());
+              setMinStopFee((s.minStopFee ?? 30).toString());
               setDrivebySecs((s.drivebyThresholdSecs || 45).toString());
               setCostOfGas((s.costOfGas || 3.50).toString());
               setTruckMpg((s.truckMpg || 7).toString());
@@ -450,6 +450,7 @@ export default function Settings() {
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.5rem' }}>
         <SettingsIcon size={24} color="var(--color-primary)" />
         <h1 className="page-title" style={{ margin: 0 }}>Settings</h1>
+        <span style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px', border: '1px solid var(--color-border)', marginLeft: 'auto', fontWeight: 600 }}>v1.1.3</span>
       </div>
 
       <div className="tab-bar">
@@ -457,6 +458,7 @@ export default function Settings() {
         <button className={`tab-button ${activeTab === 'general' ? 'active' : ''}`} onClick={() => setActiveTab('general')}>General</button>
         <button className={`tab-button ${activeTab === 'fertilizer' ? 'active' : ''}`} onClick={() => setActiveTab('fertilizer')}>Fertilizer</button>
         <button className={`tab-button ${activeTab === 'data' ? 'active' : ''}`} onClick={() => setActiveTab('data')}>Data</button>
+        <button className={`tab-button ${activeTab === 'changelog' ? 'active' : ''}`} onClick={() => setActiveTab('changelog')}>Changelog</button>
       </div>
 
       {/* ── DATA TAB ── */}
@@ -579,20 +581,6 @@ export default function Settings() {
           </div>
 
           <div>
-            <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem' }}>Setup / Drive Buffer (Minutes)</label>
-            <input
-              type="number"
-              className="input-field"
-              style={{ width: '100%' }}
-              value={setupTimeMins}
-              onChange={e => setSetupTimeMins(e.target.value)}
-            />
-            <p style={{ color: 'var(--color-text-muted)', fontSize: '0.75rem', marginTop: '0.4rem' }}>
-              This time is automatically added to quotes in the Bidding tab to account for unloading, loading, and driving. Set to 0 to disable.
-            </p>
-          </div>
-
-          <div>
             <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem' }}>Underpaid Threshold ($/hr)</label>
             <div style={{ position: 'relative' }}>
               <span style={{ position: 'absolute', left: '0.8rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--color-text-muted)' }}>$</span>
@@ -604,6 +592,23 @@ export default function Settings() {
                 onChange={e => setUnderpaidRate(e.target.value)}
               />
             </div>
+          </div>
+
+          <div>
+            <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem' }}>Minimum Stop Fee ($)</label>
+            <div style={{ position: 'relative' }}>
+              <span style={{ position: 'absolute', left: '0.8rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--color-text-muted)' }}>$</span>
+              <input
+                type="number"
+                className="input-field"
+                style={{ width: '100%', paddingLeft: '1.8rem' }}
+                value={minStopFee}
+                onChange={e => setMinStopFee(e.target.value)}
+              />
+            </div>
+            <p style={{ color: 'var(--color-text-muted)', fontSize: '0.75rem', marginTop: '0.4rem' }}>
+              The absolute minimum price charged for any stop, regardless of size or time.
+            </p>
           </div>
         </div>
       </div>
@@ -942,6 +947,45 @@ export default function Settings() {
           </button>
         </div>
       )}
-    </div>
+    
+      {/* ── CHANGELOG TAB ── */}
+      {activeTab === 'changelog' && (
+        <div className="glass-card" style={{ padding: '1.5rem', marginBottom: '1.2rem' }}>
+          <h2 style={{ fontSize: '1.1rem', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <FileText size={18} color="var(--color-primary)" /> Release Notes & Changelog
+          </h2>
+          
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+            <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-primary)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.1.0</h3>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>June 2026</span>
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '1.2rem', color: 'var(--color-text-main)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <li><strong>Added global Visit Editing:</strong> You can now seamlessly edit visits right from the Customer Detail page.</li>
+                <li><strong>Fixed Field Service Selection Trap:</strong> Edited jobs now properly retrieve custom or deleted services originally logged from the field.</li>
+                <li><strong>Missing Info Warning:</strong> Added an amber "MISSING INFO" badge for clients quickly logged from the field with incomplete profiles.</li>
+                <li><strong>Cleaned up interface:</strong> Removed the confusing 'quick-log' status entirely.</li>
+                <li><strong>Improved live map interface:</strong> Restyled GPS status banner so it no longer obstructs map markers or bottom sheets.</li>
+                <li><strong>Increased touch targets:</strong> Enhanced Pause and Done buttons on the route player for easier tapping while in the truck.</li>
+              </ul>
+            </div>
+            
+            <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-border)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 600, color: 'var(--color-text-muted)' }}>v1.0.0</h3>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>Initial Release</span>
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '1.2rem', color: 'var(--color-text-muted)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <li>Initial launch of Lawn Route Tracker.</li>
+                <li>Dynamic route optimization and field tracking functionality.</li>
+                <li>Integrated EPA compliance logs.</li>
+                <li>Local-first architecture via Dexie.js for offline functionality.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      )}
+</div>
   );
 }

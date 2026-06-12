@@ -1,27 +1,12 @@
-export function parseLawnSizeToSqFt(sizeStr) {
-  if (!sizeStr) return 0;
-  if (typeof sizeStr === 'number') return sizeStr;
-  
-  const s = sizeStr.toString().toLowerCase().trim();
-  
-  if (s.includes('acre')) {
-    const numMatch = s.match(/[\d.]+/);
-    if (numMatch) {
-      const acres = parseFloat(numMatch[0]);
-      return Math.round(acres * 43560);
-    }
-  }
-  
-  const numStr = s.replace(/[^\d.]/g, '');
-  if (numStr) {
-    return Math.round(parseFloat(numStr));
-  }
-  
-  return 0;
-}
+import { getSettings } from '../db/settings';
+import { parseLawnSizeToSqFt } from './parseLawnSize';
+
+export { parseLawnSizeToSqFt };
 
 export function calculateTieredMatrix(allVisits, allCustomers) {
   if (!allVisits || !allCustomers || allVisits.length === 0 || allCustomers.length === 0) return null;
+
+  const settings = getSettings();
 
   const buckets = [
     { maxSqft: 2500, label: '0 - 2.5k' },
@@ -47,10 +32,22 @@ export function calculateTieredMatrix(allVisits, allCustomers) {
     const sqft = parseLawnSizeToSqFt(cust.lawnSize);
     if (!sqft) return;
 
+    // Normalize duration
+    let mins = v.durationSecs / 60;
+    
+    const obstacles = parseInt(cust.obstacleCount, 10) || 0;
+    if (obstacles > 0) mins -= (obstacles * 1.5);
+    if (cust.fencedBackyard) mins -= 3;
+    
+    if (cust.terrain === 'moderate') mins /= 1.15;
+    else if (cust.terrain === 'hilly') mins /= 1.30;
+    
+    mins = Math.max(0.5, mins); // Sanity floor: at least 30 seconds
+
     // Find which bucket this belongs to
     for (let i = 0; i < stats.length; i++) {
       if (sqft <= stats[i].maxSqft) {
-        stats[i].totalSecs += v.durationSecs;
+        stats[i].totalSecs += (mins * 60);
         stats[i].totalSqFt += sqft;
         break;
       }

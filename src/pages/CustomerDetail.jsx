@@ -2,10 +2,11 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { db } from '../db/db';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { MapPin, Save, ArrowLeft, Trash2, BarChart3, Clock, DollarSign, Calendar, Hash } from 'lucide-react';
+import { MapPin, Save, ArrowLeft, Trash2, BarChart3, Clock, DollarSign, Calendar, Hash, Edit2 } from 'lucide-react';
 import GeofenceEditor from '../components/GeofenceEditor';
 import { Autocomplete } from '@react-google-maps/api';
 import AppDialog from '../components/AppDialog';
+import VisitEditModal from '../components/VisitEditModal';
 import { getSettings } from '../db/settings';
 import { trackApiCall } from '../utils/apiTracker';
 import { getDaysSince } from '../utils/dateUtils';
@@ -46,6 +47,7 @@ export default function CustomerDetail() {
   const [activeTab, setActiveTab] = useState('details');
   const [dialog, setDialog] = useState(null);
   const [settings, setSettings] = useState(null);
+  const [editingJob, setEditingJob] = useState(null);
   const [isDirty, setIsDirty] = useState(false);
   const initialDataRef = useRef(null);
 
@@ -679,6 +681,14 @@ export default function CustomerDetail() {
                             <div style={{ fontWeight: 700, color: 'var(--color-primary)', flexShrink: 0 }}>
                               ${(v.priceEarned || 0).toFixed(0)}
                             </div>
+                            <button 
+                              className="btn btn-secondary" 
+                              style={{ padding: '0.3rem', flexShrink: 0, marginLeft: '0.2rem', color: 'var(--color-text-muted)' }}
+                              onClick={() => setEditingJob(v)}
+                              title="Edit Visit"
+                            >
+                              <Edit2 size={14} />
+                            </button>
                           </div>
                         );
                       })}

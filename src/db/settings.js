@@ -3,7 +3,7 @@ const SETTINGS_KEY = 'lawn_route_tracker_settings';
 const DEFAULT_SETTINGS = {
   targetHourlyRate: 60,
   rateUnderpaidThreshold: 45,
-  setupTimeMins: 5,
+  minStopFee: 30,
   drivebyThresholdSecs: 45,
   costOfGas: 3.50,
   truckMpg: 7,

@@ -1,6 +1,8 @@
 export function parseLawnSizeToSqFt(inputStr) {
-  if (!inputStr) return null;
-  const str = inputStr.toLowerCase().trim().replace(/,/g, '');
+  if (inputStr === null || inputStr === undefined || inputStr === '') return null;
+  if (typeof inputStr === 'number') return Math.round(inputStr);
+
+  const str = inputStr.toString().toLowerCase().trim().replace(/,/g, '');
   
   // Extract the first number found (handling decimals)
   const match = str.match(/[\d.]+/);

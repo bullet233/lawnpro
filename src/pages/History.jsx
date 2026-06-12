@@ -3,6 +3,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/db';
 import { FileText, Download, Clock, Edit2, Save, X, ClipboardList, Trash2, CheckCircle, Calendar, List } from 'lucide-react';
 import DayReviewModal from '../components/DayReviewModal';
+import VisitEditModal from '../components/VisitEditModal';
 import AppDialog from '../components/AppDialog';
 import ComplianceLogModal from '../components/ComplianceLogModal';
 import { getSettings } from '../db/settings';
@@ -30,7 +31,6 @@ const dayLabel = (dateStr) => {
 
 const STATUS_COLORS = {
   completed:  { border: 'var(--color-primary)',    bg: 'rgba(16,185,129,0.07)' },
-  'quick-log': { border: '#f59e0b',                 bg: 'rgba(245,158,11,0.07)'  },
   skipped:    { border: '#ef4444',                  bg: 'rgba(239,68,68,0.05)'   },
 };
 
@@ -45,17 +45,10 @@ export default function History() {
   const [customerFilter, setCustomerFilter] = useState('all');
   const [statusFilter,   setStatusFilter]   = useState('all');
   const [serviceFilter,  setServiceFilter]  = useState('all');
-  const [editingJobId,   setEditingJobId]   = useState(null);
-  const [editingServices, setEditingServices] = useState([]);
-  const [editingNote,    setEditingNote]    = useState('');
+  const [editingJob, setEditingJob] = useState(null);
   const [showDayReview,  setShowDayReview]  = useState(false);
   const [dialog,         setDialog]         = useState(null);
   const [activeEpaJob,   setActiveEpaJob]   = useState(null);
-  const [editingDuration, setEditingDuration] = useState('');
-  const [editingDrive, setEditingDrive] = useState('');
-  const [editingPrice, setEditingPrice] = useState('');
-  const [editingEntryTime, setEditingEntryTime] = useState('');
-  const [editingExitTime, setEditingExitTime] = useState('');
   const [settings, setSettings] = useState(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [viewMode, setViewMode] = useState('list');
@@ -183,80 +176,14 @@ export default function History() {
   };
 
   // ── Edit handlers ─────────────────────────────────────────────────────────
-  const fmtInputTime = (d) => d ? `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}` : '';
-
-  const handleTimeChange = (type, val) => {
-    if (type === 'entry') setEditingEntryTime(val);
-    else setEditingExitTime(val);
-
-    const inTime = type === 'entry' ? val : editingEntryTime;
-    const outTime = type === 'exit' ? val : editingExitTime;
-
-    if (inTime && outTime) {
-      const [hIn, mIn] = inTime.split(':').map(Number);
-      const [hOut, mOut] = outTime.split(':').map(Number);
-      const start = hIn * 60 + mIn;
-      let end = hOut * 60 + mOut;
-      if (end < start) end += 24 * 60; // crossed midnight
-      setEditingDuration((end - start).toString());
-    }
-  };
-
   const handleEditClick = (job) => { 
-    setEditingJobId(job.id); 
-    setEditingServices(job.appliedServices || []); 
-    setEditingPrice(job.priceEarned != null ? job.priceEarned.toString() : '0');
-    setEditingDuration(Math.floor((job.durationSecs || 0) / 60).toString());
-    setEditingDrive(Math.floor((job.driveTimeSecs || 0) / 60).toString());
-    setEditingNote(job.note || '');
-    setEditingEntryTime(job.entryTime ? fmtInputTime(new Date(job.entryTime)) : '');
-    setEditingExitTime(job.exitTime ? fmtInputTime(new Date(job.exitTime)) : '');
+    setEditingJob(job);
   };
 
-  const handleSaveEdit = async (job) => {
-    let newPrice = parseFloat(editingPrice);
-    if (isNaN(newPrice)) newPrice = job.priceEarned || 0;
-    
-    let updatedDurationSecs = job.durationSecs;
-    if (editingDuration !== '' && !isNaN(parseInt(editingDuration))) {
-      updatedDurationSecs = parseInt(editingDuration) * 60;
-    }
-    
-    let updatedDriveSecs = job.driveTimeSecs || 0;
-    if (editingDrive !== '' && !isNaN(parseInt(editingDrive))) {
-      updatedDriveSecs = parseInt(editingDrive) * 60;
-    }
-
-    let updatedEntryTime = job.entryTime;
-    if (editingEntryTime) {
-      const [h, m] = editingEntryTime.split(':');
-      const d = job.entryTime ? new Date(job.entryTime) : new Date(job.exitTime);
-      if (d && !isNaN(d.getTime())) {
-        d.setHours(parseInt(h, 10), parseInt(m, 10), 0, 0);
-        updatedEntryTime = d.getTime();
-      }
-    }
-    
-    let updatedExitTime = job.exitTime;
-    if (editingExitTime) {
-      const [h, m] = editingExitTime.split(':');
-      const d = new Date(job.exitTime);
-      if (d && !isNaN(d.getTime())) {
-        d.setHours(parseInt(h, 10), parseInt(m, 10), 0, 0);
-        updatedExitTime = d.getTime();
-      }
-    }
-
-    await db.visits.update(job.id, { 
-      appliedServices: editingServices, 
-      priceEarned: newPrice,
-      durationSecs: updatedDurationSecs,
-      driveTimeSecs: updatedDriveSecs,
-      entryTime: updatedEntryTime,
-      exitTime: updatedExitTime,
-      note: editingNote || undefined
-    });
-    setEditingJobId(null);
+  const handleSaveEdit = async (updates) => {
+    if (!editingJob) return;
+    await db.visits.update(editingJob.id, updates);
+    setEditingJob(null);
   };
 
   const handleSaveEpaLog = async (logData) => {
@@ -532,7 +459,6 @@ export default function History() {
       <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '1.2rem', flexWrap: 'wrap' }}>
         <button style={statusPillStyle('all')} onClick={() => setStatusFilter('all')}>All</button>
         <button style={statusPillStyle('completed')} onClick={() => setStatusFilter('completed')}>Completed</button>
-        <button style={statusPillStyle('quick-log')} onClick={() => setStatusFilter('quick-log')}>Quick Log</button>
         <button style={statusPillStyle('skipped')} onClick={() => setStatusFilter('skipped')}>Skipped</button>
       </div>
 
@@ -583,7 +509,7 @@ export default function History() {
               {jobs.map(job => {
                 const colors       = STATUS_COLORS[job.status] || STATUS_COLORS.completed;
                 const serviceNames = getServiceNames(job);
-                const isEditing    = editingJobId === job.id;
+                const isEditing    = false; // Handled by VisitEditModal now
                 const activeServices = job.custObj?.services?.filter(s => s.active) || [];
 
                 return (
@@ -704,87 +630,6 @@ export default function History() {
                         </div>
                       )}
                     </div>
-
-                    {/* Edit Mode */}
-                    {isEditing && (
-                      <div style={{ marginTop: '0.8rem', paddingTop: '0.8rem', borderTop: '1px solid var(--color-border)' }}>
-                        <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
-                          <div style={{ flex: 1, minWidth: '100px' }}>
-                            <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.75rem' }}>Price ($)</label>
-                            <input type="number" step="0.01" className="input-field" style={{ width: '100%', padding: '0.4rem' }} value={editingPrice} onChange={e => setEditingPrice(e.target.value)} />
-                          </div>
-                          <div style={{ flex: 1, minWidth: '100px' }}>
-                            <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.75rem' }}>Start Time</label>
-                            <input type="time" className="input-field" style={{ width: '100%', padding: '0.4rem' }} value={editingEntryTime} onChange={e => handleTimeChange('entry', e.target.value)} />
-                          </div>
-                          <div style={{ flex: 1, minWidth: '100px' }}>
-                            <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.75rem' }}>End Time</label>
-                            <input type="time" className="input-field" style={{ width: '100%', padding: '0.4rem' }} value={editingExitTime} onChange={e => handleTimeChange('exit', e.target.value)} />
-                          </div>
-                        </div>
-
-                        <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem' }}>
-                          <div style={{ flex: 1 }}>
-                            <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.75rem' }}>Job Time (mins)</label>
-                            <input type="number" className="input-field" style={{ width: '100%', padding: '0.4rem' }} value={editingDuration} onChange={e => setEditingDuration(e.target.value)} />
-                          </div>
-                          <div style={{ flex: 1 }}>
-                            <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.75rem' }}>Drive Time (mins)</label>
-                            <input type="number" className="input-field" style={{ width: '100%', padding: '0.4rem' }} value={editingDrive} onChange={e => setEditingDrive(e.target.value)} />
-                          </div>
-                        </div>
-
-                        {/* Inline Note Editing */}
-                        <div style={{ marginBottom: '1rem' }}>
-                          <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.75rem' }}>Note</label>
-                          <textarea
-                            className="input-field"
-                            style={{ width: '100%', padding: '0.4rem', minHeight: '3rem', resize: 'vertical', fontFamily: 'inherit', fontSize: '0.82rem' }}
-                            value={editingNote}
-                            onChange={e => setEditingNote(e.target.value)}
-                            placeholder="Add a note…"
-                          />
-                        </div>
-
-                        <div style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', marginBottom: '0.5rem' }}>
-                          Services performed:
-                        </div>
-                        {activeServices.length === 0 ? (
-                          <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>No active services on this customer's profile.</span>
-                        ) : (
-                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '0.8rem' }}>
-                            {activeServices.map(svc => {
-                              const checked = editingServices.includes(svc.id);
-                              return (
-                                <label key={svc.id} style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', padding: '0.3rem 0.7rem', borderRadius: '999px', border: `1px solid ${checked ? 'var(--color-primary)' : 'var(--color-border)'}`, background: checked ? 'rgba(16,185,129,0.1)' : 'var(--color-bg-card)', cursor: 'pointer', fontSize: '0.82rem', userSelect: 'none', transition: 'all 0.15s' }}>
-                                  <input type="checkbox" checked={checked} onChange={e => {
-                                    const isChecked = e.target.checked;
-                                    setEditingServices(p => {
-                                      const next = isChecked ? [...p, svc.id] : p.filter(id => id !== svc.id);
-                                      if (job.custObj?.services) {
-                                        const autoPrice = job.custObj.services.filter(s => next.includes(s.id)).reduce((sum, s) => sum + s.price, 0);
-                                        setEditingPrice(autoPrice.toString());
-                                      }
-                                      return next;
-                                    });
-                                  }} style={{ display: 'none' }} />
-                                  {checked && <CheckCircle size={12} color="var(--color-primary)" />}
-                                  {svc.name} <span style={{ color: 'var(--color-text-muted)', fontSize: '0.75rem' }}>${svc.price}</span>
-                                </label>
-                              );
-                            })}
-                          </div>
-                        )}
-                        <div style={{ display: 'flex', gap: '0.5rem' }}>
-                          <button className="btn btn-primary" style={{ flex: 1, padding: '0.4rem', fontSize: '0.82rem' }} onClick={() => handleSaveEdit(job)}>
-                            <Save size={13} /> Save
-                          </button>
-                          <button className="btn btn-secondary" style={{ padding: '0.4rem 0.7rem', fontSize: '0.82rem' }} onClick={() => setEditingJobId(null)}>
-                            <X size={13} />
-                          </button>
-                        </div>
-                      </div>
-                    )}
                   </div>
                 );
               })}
@@ -804,6 +649,16 @@ export default function History() {
             Show More ({totalVisibleJobs} of {historyLog.length})
           </button>
         </div>
+      )}
+
+      {editingJob && (
+        <VisitEditModal
+          job={editingJob}
+          customer={allCustomers.find(c => c.id === editingJob.customerId)}
+          defaultServices={settings?.defaultServices}
+          onClose={() => setEditingJob(null)}
+          onSave={handleSaveEdit}
+        />
       )}
     </div>
   );

@@ -244,7 +244,7 @@ export default function Dashboard() {
   const nextCustomer = useMemo(() => {
     if (!activeRoute || !activeRoute.expandedStops) return null;
     const completedIds = new Set(routeVisits.filter(v => 
-      v.status === 'completed' || v.status === 'quick-log' || v.status === 'skipped'
+      v.status === 'completed' || v.status === 'skipped'
     ).map(v => v.customerId));
     return activeRoute.expandedStops.find(c => !completedIds.has(c.id)) || null;
   }, [activeRoute, routeVisits]);
@@ -266,7 +266,7 @@ export default function Dashboard() {
       const isMowingCust = !cust.services || cust.services.length === 0 || cust.services.some(s => s.active && mowingServiceIds.includes(s.id));
       const isFertCust = cust.services && cust.services.some(s => s.active && fertServiceIds.includes(s.id));
       
-      const custVisits = allVisits.filter(v => v.customerId === cust.id && (v.status === 'completed' || v.status === 'quick-log'));
+      const custVisits = allVisits.filter(v => v.customerId === cust.id && (v.status === 'completed'));
       
       // Mowing
       if (isMowingCust) {

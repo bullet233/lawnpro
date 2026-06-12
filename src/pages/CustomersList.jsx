@@ -533,6 +533,7 @@ export default function CustomersList() {
                         {isInactive && <span className="pill-tag neutral">INACTIVE</span>}
                         {overduePill}
                         {c.isOutlier && <span className="pill-tag danger"><AlertTriangle size={12} /> BAD GPS</span>}
+                        {c.address === 'Added from field' && <span className="pill-tag warning"><AlertTriangle size={12} /> MISSING INFO</span>}
                       </div>
                       <p style={{ margin: '0 0 0.5rem 0', color: 'var(--color-text-muted)', fontSize: '0.9rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.address}</p>
                       
@@ -605,6 +606,7 @@ export default function CustomersList() {
                             style={{ width: '100%', padding: '0.4rem', border: 'none', background: 'transparent', fontWeight: 600, color: 'var(--color-text-main)' }}
                           />
                           {c.isOutlier && <AlertTriangle size={16} color="#ef4444" title="Bad GPS Pin" style={{ flexShrink: 0, marginRight: '0.4rem' }} />}
+                          {c.address === 'Added from field' && <AlertTriangle size={16} color="var(--color-accent)" title="Missing Info" style={{ flexShrink: 0, marginRight: '0.4rem' }} />}
                         </div>
                       </td>
                       <td style={{ padding: '0.4rem', borderRight: '1px solid var(--color-border)', background: !currentAddress ? 'rgba(239,68,68,0.1)' : 'transparent' }}>
