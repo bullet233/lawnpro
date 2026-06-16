@@ -19,7 +19,7 @@ import { AlertTriangle, CheckCircle, Info, Trash2, SkipForward } from 'lucide-re
 export default function AppDialog({ dialog, onClose }) {
   if (!dialog) return null;
 
-  const { type = 'info', title, message, confirmLabel, onConfirm } = dialog;
+  const { type = 'info', title, message, confirmLabel, cancelLabel, onConfirm, onCancel } = dialog;
 
   const icons = {
     info:    <Info size={22} color="#3b82f6" />,
@@ -66,13 +66,16 @@ export default function AppDialog({ dialog, onClose }) {
         )}
 
         <div style={{ display: 'flex', gap: '0.8rem', justifyContent: 'center' }}>
-          {onConfirm && (
+          {(onConfirm || onCancel) && (
             <button
-              onClick={onClose}
+              onClick={async () => {
+                if (onCancel) await onCancel();
+                onClose();
+              }}
               className="btn btn-secondary"
               style={{ flex: 1 }}
             >
-              Cancel
+              {cancelLabel ?? 'Cancel'}
             </button>
           )}
           <button

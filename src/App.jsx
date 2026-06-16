@@ -112,7 +112,7 @@ function App() {
     <>
 
 
-      <main className="page-container animate-fade-in">
+      <main className={`page-container animate-fade-in ${isLive ? 'live-mode' : ''}`}>
         <Toast />
         <ReloadPrompt />
         <div style={{ display: isLive ? 'block' : 'none', height: '100%' }}>

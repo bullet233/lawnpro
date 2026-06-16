@@ -4,12 +4,21 @@ export function parseLawnSizeToSqFt(inputStr) {
 
   const str = inputStr.toString().toLowerCase().trim().replace(/,/g, '');
   
-  // Extract the first number found (handling decimals)
-  const match = str.match(/[\d.]+/);
+  // Extract the first number or fraction found (e.g. 1/4, 0.5, 1)
+  const match = str.match(/[\d.]+(?:\/[\d.]+)?/);
   if (!match) return null;
   
-  let val = parseFloat(match[0]);
-  if (isNaN(val)) return null;
+  let val = 0;
+  if (match[0].includes('/')) {
+    const parts = match[0].split('/');
+    const num = parseFloat(parts[0]);
+    const den = parseFloat(parts[1]);
+    if (den === 0 || isNaN(num) || isNaN(den)) return null;
+    val = num / den;
+  } else {
+    val = parseFloat(match[0]);
+    if (isNaN(val)) return null;
+  }
 
   // Check for 'k' suffix for thousands
   if (str.includes('k')) {

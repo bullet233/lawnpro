@@ -4,6 +4,13 @@ import { db } from '../db/db';
 import { Printer, ArrowLeft, Leaf } from 'lucide-react';
 import { getSettings } from '../db/settings';
 
+// Renders a value, or a muted "N/A" placeholder when empty. Module-scoped so it
+// isn't recreated (and its subtree remounted) on every render of PrintEpaLog.
+const Field = ({ val }) => {
+  if (!val || val === 'N/A') return <span style={{ color: '#94a3b8', fontStyle: 'italic', fontWeight: 400 }}>N/A</span>;
+  return val;
+};
+
 export default function PrintEpaLog() {
   const { visitId } = useParams();
   const [visit, setVisit] = useState(null);
@@ -31,9 +38,17 @@ export default function PrintEpaLog() {
   }, [visitId]);
 
   if (loading) return <div style={{ padding: '2rem', fontFamily: 'system-ui, sans-serif' }}>Loading document...</div>;
-  if (!visit || !visit.complianceLog) return <div style={{ padding: '2rem', fontFamily: 'system-ui, sans-serif' }}>EPA Log not found for this visit.</div>;
+  const urlParams = new URLSearchParams(window.location.search);
+  const isPreview = urlParams.get('preview') === 'true';
+  const previewLogStr = isPreview ? localStorage.getItem(`preview_epa_log_${visitId}`) : null;
+  let previewLog = null;
+  try {
+    if (previewLogStr) previewLog = JSON.parse(previewLogStr);
+  } catch { /* malformed preview payload — fall back to saved log */ }
 
-  const log = visit.complianceLog;
+  if (!visit || (!visit.complianceLog && !previewLog)) return <div style={{ padding: '2rem', fontFamily: 'system-ui, sans-serif' }}>EPA Log not found for this visit.</div>;
+
+  const log = previewLog || visit.complianceLog;
   const settings = getSettings();
   const businessName = settings.businessName || settings.applicatorName || 'Landscape Professional';
   const logo = settings.businessLogo;
@@ -48,12 +63,16 @@ export default function PrintEpaLog() {
         epaRegNum: log.epaRegNum, 
         targetSite: log.targetSite, 
         applicationRate: log.applicationRate || log.amountApplied,
-        customerNotice: log.customerNotice
+        customerNotices: log.customerNotices || (log.customerNotice ? [log.customerNotice] : [])
       }];
 
   let customNotices = [];
   productsToPrint.forEach(p => {
-    if (p.customerNotice && p.customerNotice.trim() !== '') {
+    if (p.customerNotices && p.customerNotices.length > 0) {
+      p.customerNotices.forEach(n => {
+        if (n.trim() !== '') customNotices.push({ name: p.productName || 'Product', notice: n.trim() });
+      });
+    } else if (p.customerNotice && p.customerNotice.trim() !== '') {
       customNotices.push({ name: p.productName || 'Product', notice: p.customerNotice.trim() });
     }
   });
@@ -144,153 +163,188 @@ export default function PrintEpaLog() {
       }}>
         
         {/* HEADER / LETTERHEAD */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '3px solid #0f172a', paddingBottom: '1.5rem', marginBottom: '2rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '2px solid #0f172a', paddingBottom: '1rem', marginBottom: '1rem' }}>
           
-          <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
             {logo ? (
-              <img src={logo} alt="Business Logo" style={{ maxHeight: '80px', maxWidth: '180px', objectFit: 'contain' }} />
+              <img src={logo} alt="Business Logo" style={{ maxHeight: '60px', maxWidth: '140px', objectFit: 'contain' }} />
             ) : (
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '60px', height: '60px', background: '#f1f5f9', borderRadius: '8px' }}>
-                <Leaf size={32} color="#10b981" />
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '48px', height: '48px', background: '#f1f5f9', borderRadius: '8px' }}>
+                <Leaf size={24} color="#10b981" />
               </div>
             )}
             <div>
-              <h1 style={{ fontSize: '2rem', fontWeight: 800, margin: '0 0 0.2rem 0', color: '#0f172a' }}>
+              <h1 style={{ fontSize: '1.5rem', fontWeight: 800, margin: '0 0 0.1rem 0', color: '#0f172a', lineHeight: 1.1 }}>
                 {businessName}
               </h1>
-              <div style={{ fontSize: '1rem', color: '#64748b', fontWeight: 500, marginBottom: '0.4rem' }}>
+              <div style={{ fontSize: '0.9rem', color: '#64748b', fontWeight: 600, marginBottom: '0.2rem' }}>
                 Official Pesticide Application Record
               </div>
               {(address || phone || email) && (
-                <div style={{ fontSize: '0.85rem', color: '#475569', lineHeight: 1.4 }}>
-                  {address && <div>{address}</div>}
+                <div style={{ fontSize: '0.8rem', color: '#475569', lineHeight: 1.4 }}>
+                  {address && <span>{address}</span>}
+                  {address && (phone || email) && ' • '}
                   {(phone || email) && (
-                    <div>{phone}{phone && email && ' • '}{email}</div>
+                    <span>{phone}{phone && email && ' • '}{email}</span>
                   )}
                 </div>
               )}
             </div>
           </div>
 
-          <div style={{ textAlign: 'right' }}>
-            <div style={{ fontSize: '0.8rem', textTransform: 'uppercase', color: '#64748b', fontWeight: 700, marginBottom: '4px' }}>Date of Application</div>
-            <div style={{ fontSize: '1.2rem', fontWeight: 700, color: '#0f172a' }}>
-              {new Date(visit.exitTime).toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+          <div style={{ textAlign: 'right', flexShrink: 0 }}>
+            <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: '#64748b', fontWeight: 700, marginBottom: '2px' }}>Date of Application</div>
+            <div style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0f172a' }}>
+              {new Date(visit.exitTime).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })}
             </div>
           </div>
         </div>
 
-        {/* CUSTOMER & TIMING */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr', gap: '1.5rem' }}>
+        {/* SECTION 1: CUSTOMER INFORMATION */}
+        <div style={{ border: '1px solid #1e293b', marginBottom: '1rem', borderRadius: '4px', overflow: 'hidden' }}>
+          <div style={{ backgroundColor: '#f1f5f9', borderBottom: '1px solid #1e293b', padding: '6px 12px', fontWeight: 'bold', fontSize: '0.9rem', color: '#0f172a' }}>
+            CUSTOMER INFORMATION
+          </div>
           
-          <div className="data-box">
-            <div className="box-label">Service Address</div>
-            <div className="box-value" style={{ fontWeight: 700, fontSize: '1.2rem', marginBottom: '4px' }}>{customer?.name || 'N/A'}</div>
-            <div className="box-value" style={{ color: '#475569' }}>{customer?.address || 'Address Not Provided'}</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', borderBottom: '1px solid #cbd5e1' }}>
+            <div style={{ padding: '4px 10px', borderRight: '1px solid #cbd5e1' }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#475569', marginBottom: '2px' }}>Customer Name</div>
+              <div style={{ color: '#0f172a', fontWeight: 600 }}><Field val={log.customerName || customer?.name} /></div>
+            </div>
+            <div style={{ padding: '4px 10px' }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#475569', marginBottom: '2px' }}>Phone</div>
+              <div style={{ color: '#0f172a', fontWeight: 600 }}><Field val={log.customerPhone || customer?.phone} /></div>
+            </div>
           </div>
-
-          <div className="data-box">
-            <div className="box-label">Application Timing</div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-              <span style={{ color: '#64748b', fontSize: '0.9rem' }}>Date:</span>
-              <span className="box-value">{new Date(visit.exitTime).toLocaleDateString()}</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-              <span style={{ color: '#64748b', fontSize: '0.9rem' }}>Start Time:</span>
-              <span className="box-value">{visit.entryTime ? new Date(visit.entryTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A'}</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span style={{ color: '#64748b', fontSize: '0.9rem' }}>End Time:</span>
-              <span className="box-value">{new Date(visit.exitTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+          
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr', borderBottom: '1px solid #cbd5e1' }}>
+            <div style={{ padding: '4px 10px' }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#475569', marginBottom: '2px' }}>Address</div>
+              <div style={{ color: '#0f172a', fontWeight: 600 }}><Field val={log.customerAddress || customer?.address} /></div>
             </div>
           </div>
 
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr' }}>
+            <div style={{ padding: '4px 10px', borderRight: '1px solid #cbd5e1' }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#475569', marginBottom: '2px' }}>Date of Service</div>
+              <div style={{ color: '#0f172a', fontWeight: 600 }}>{log.dateOfService || new Date(visit.exitTime).toLocaleDateString()}</div>
+            </div>
+            <div style={{ padding: '4px 10px', borderRight: '1px solid #cbd5e1' }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#475569', marginBottom: '2px' }}>Start Time</div>
+              <div style={{ color: '#0f172a', fontWeight: 600 }}>{log.startTime || (visit.entryTime ? new Date(visit.entryTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : new Date(visit.exitTime - (visit.durationSecs || 0) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}</div>
+            </div>
+            <div style={{ padding: '4px 10px' }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#475569', marginBottom: '2px' }}>End Time</div>
+              <div style={{ color: '#0f172a', fontWeight: 600 }}>{log.endTime || new Date(visit.exitTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+            </div>
+          </div>
         </div>
 
-        {/* APPLICATION DETAILS */}
-        <div className="section-title">Chemical Application Details</div>
-        
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem', marginBottom: '2rem' }}>
+        {/* SECTION 2: APPLICATOR INFORMATION */}
+        <div style={{ border: '1px solid #1e293b', marginBottom: '1rem', borderRadius: '4px', overflow: 'hidden' }}>
+          <div style={{ backgroundColor: '#f1f5f9', borderBottom: '1px solid #1e293b', padding: '6px 12px', fontWeight: 'bold', fontSize: '0.9rem', color: '#0f172a' }}>
+            APPLICATOR INFORMATION
+          </div>
+          
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', borderBottom: '1px solid #cbd5e1' }}>
+            <div style={{ padding: '4px 10px', borderRight: '1px solid #cbd5e1' }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#475569', marginBottom: '2px' }}>Applicator Name</div>
+              <div style={{ color: '#0f172a', fontWeight: 600 }}><Field val={log.applicatorName} /></div>
+            </div>
+            <div style={{ padding: '4px 10px' }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#475569', marginBottom: '2px' }}>License #</div>
+              <div style={{ color: '#0f172a', fontWeight: 600 }}><Field val={log.licenseNumber} /></div>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr' }}>
+            <div style={{ padding: '4px 10px', borderRight: '1px solid #cbd5e1' }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#475569', marginBottom: '2px' }}>Mix/Loading Site</div>
+              <div style={{ color: '#0f172a', fontWeight: 600 }}>{log.mixSite || 'Business Location'}</div>
+            </div>
+            <div style={{ padding: '4px 10px' }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#475569', marginBottom: '2px' }}>Business Phone</div>
+              <div style={{ color: '#0f172a', fontWeight: 600 }}><Field val={log.businessPhone || phone} /></div>
+            </div>
+          </div>
+        </div>
+
+
+        {/* SECTION 4: FERTILIZERS AND CHEMICALS USED */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1rem' }}>
           {CATEGORIES.map(category => {
             const items = productsByCategory[category];
             if (items.length === 0) return null;
 
             return (
-              <div key={category}>
-                <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#334155', textTransform: 'uppercase', marginBottom: '1rem' }}>
+              <div key={category} style={{ border: '1px solid #1e293b', borderRadius: '4px', overflow: 'hidden' }}>
+                <div style={{ backgroundColor: '#f1f5f9', borderBottom: '1px solid #1e293b', padding: '6px 12px', fontWeight: 'bold', fontSize: '0.9rem', color: '#0f172a', textTransform: 'uppercase' }}>
                   {category} APPLIED
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-                  {items.map((prod, idx) => (
-                    <div key={idx} style={{ background: '#f8fafc', border: '1px solid #cbd5e1', borderRadius: '6px', padding: '16px' }}>
-                      {items.length > 1 && (
-                        <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', marginBottom: '12px', borderBottom: '1px solid #e2e8f0', paddingBottom: '6px' }}>
-                          Item {idx + 1}
+                {items.map((prod, idx) => (
+                  <div key={idx} style={{ borderBottom: idx === items.length - 1 ? 'none' : '1px solid #1e293b' }}>
+                    {items.length > 1 && (
+                      <div style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #cbd5e1', padding: '4px 12px', fontSize: '0.75rem', fontWeight: 'bold', color: '#64748b', textTransform: 'uppercase' }}>
+                        Item {idx + 1}
+                      </div>
+                    )}
+                    <div style={{ display: 'grid', gridTemplateColumns: category === 'Fertilizer' ? '1fr' : '1fr 1fr', borderBottom: '1px solid #cbd5e1' }}>
+                      <div style={{ padding: '4px 10px', borderRight: category === 'Fertilizer' ? 'none' : '1px solid #cbd5e1' }}>
+                        <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#475569', marginBottom: '2px' }}>Product Name</div>
+                        <div style={{ color: '#0f172a', fontWeight: 600 }}><Field val={prod.productName} /></div>
+                      </div>
+                      {category !== 'Fertilizer' && (
+                        <div style={{ padding: '4px 10px' }}>
+                          <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#475569', marginBottom: '2px' }}>EPA Registration Number</div>
+                          <div style={{ color: '#0f172a', fontWeight: 600 }}><Field val={prod.epaRegNum} /></div>
                         </div>
                       )}
-                      
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', marginBottom: '1.2rem' }}>
-                        <div>
-                          <div className="box-label">Product Name</div>
-                          <div className="box-value" style={{ fontSize: '1.2rem', fontWeight: 700 }}>{prod.productName || 'N/A'}</div>
-                        </div>
-                        <div>
-                          <div className="box-label">EPA Registration Number</div>
-                          <div className="box-value" style={{ fontSize: '1.2rem', fontFamily: 'monospace' }}>{prod.epaRegNum || 'N/A'}</div>
-                        </div>
-                      </div>
+                    </div>
 
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
-                        <div>
-                          <div className="box-label">Target Site</div>
-                          <div className="box-value">{prod.targetSite || 'N/A'}</div>
-                        </div>
-                        <div>
-                          <div className="box-label">Application Rate</div>
-                          <div className="box-value">{prod.applicationRate || prod.amountApplied || 'N/A'}</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', borderBottom: prod.isSpotTreatment ? '1px solid #cbd5e1' : 'none' }}>
+                      <div style={{ padding: '4px 10px', borderRight: '1px solid #cbd5e1' }}>
+                        <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#475569', marginBottom: '2px' }}>Target Site</div>
+                        <div style={{ color: '#0f172a', fontWeight: 600 }}>{prod.targetSite || log.treatmentLocation || 'Turf'}</div>
+                      </div>
+                      <div style={{ padding: '4px 10px', borderRight: '1px solid #cbd5e1' }}>
+                        <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#475569', marginBottom: '2px' }}>Application Rate</div>
+                        <div style={{ color: '#0f172a', fontWeight: 600 }}><Field val={prod.applicationRate || prod.amountApplied} /></div>
+                      </div>
+                      <div style={{ padding: '4px 10px' }}>
+                        <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#475569', marginBottom: '2px' }}>Area Treated</div>
+                        <div style={{ color: '#0f172a', fontWeight: 600 }}>
+                          {(() => {
+                            const val = prod.areaTreated || log.areaTreated || 'N/A';
+                            let displayVal = val;
+                            if (val !== 'N/A' && !String(val).toLowerCase().includes('sq') && !String(val).toLowerCase().includes('acre')) {
+                              displayVal = `${val} sq ft`;
+                            }
+                            if (prod.isSpotTreatment) {
+                              return <span>{displayVal} <span style={{ color: '#64748b', fontWeight: 500, fontSize: '0.9em' }}>(Spot Treatment)</span></span>;
+                            }
+                            return displayVal;
+                          })()}
                         </div>
                       </div>
                     </div>
-                  ))}
-                </div>
+                    {prod.isSpotTreatment && prod.spotLocation && (
+                      <div style={{ padding: '4px 10px', borderTop: '1px solid #cbd5e1', display: 'flex', gap: '0.5rem', alignItems: 'baseline' }}>
+                        <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#475569', textTransform: 'uppercase' }}>Spot Treatment Location:</div>
+                        <div style={{ color: '#0f172a', fontWeight: 600, fontSize: '0.85rem' }}>{prod.spotLocation}</div>
+                      </div>
+                    )}
+                  </div>
+                ))}
               </div>
             );
           })}
         </div>
 
-        {/* AREA TREATED & APPLICATOR DETAILS */}
-        <div className="section-title">Treatment & Applicator Information</div>
-        
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', marginBottom: '1.5rem' }}>
-          <div className="data-box">
-            <div className="box-label">Total Area Treated</div>
-            <div className="box-value" style={{ fontSize: '1.2rem', fontWeight: 700 }}>{log.areaTreated || 'N/A'}</div>
-          </div>
-          <div className="data-box">
-            <div className="box-label">Mix & Load Site</div>
-            <div className="box-value" style={{ fontSize: '1.2rem' }}>{log.mixSite || 'Business Location'}</div>
-          </div>
-        </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '1.5rem' }}>
-          <div className="data-box">
-            <div className="box-label">Applicator Name</div>
-            <div className="box-value">{log.applicatorName || 'N/A'}</div>
-            {log.licenseNumber && (
-              <div style={{ marginTop: '4px', fontSize: '0.85rem', color: '#475569', fontWeight: 600 }}>
-                Lic #: {log.licenseNumber}
-              </div>
-            )}
-          </div>
-        </div>
 
         {/* FOOTER */}
-        <div style={{ marginTop: '4rem', padding: '1.5rem', background: '#f8fafc', borderRadius: '8px', borderLeft: '4px solid #10b981', fontSize: '0.85rem', color: '#475569', lineHeight: 1.6 }}>
-          <p style={{ fontWeight: 700, color: '#0f172a', fontSize: '1rem', margin: '0 0 0.5rem 0' }}>Regulatory Compliance Statement</p>
-          <p style={{ margin: 0 }}>
-            This document serves as the official pesticide application record for the customer listed above. Application details comply with all reporting standards for Commercial Landscape Applications under ATCP 29.21 & 29.22. 
-          </p>
-          <div style={{ marginTop: '1rem' }}>
+        <div style={{ marginTop: '2rem', padding: '1rem', background: '#f8fafc', borderRadius: '8px', borderLeft: '4px solid #10b981', fontSize: '0.85rem', color: '#475569', lineHeight: 1.6 }}>
+          <div>
             <strong style={{ display: 'block', marginBottom: '0.2rem', color: '#0f172a' }}>Customer Instructions:</strong>
             {customNotices.length > 0 ? (
               <ul style={{ margin: 0, paddingLeft: '1.2rem' }}>

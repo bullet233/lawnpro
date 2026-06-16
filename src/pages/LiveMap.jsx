@@ -1,4 +1,15 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
+
+import { useGeolocation } from '../hooks/useGeolocation';
+import { useWeatherTracker } from '../hooks/useWeatherTracker';
+import { useWakeLock } from '../hooks/useWakeLock';
+import { useDriveTimer } from '../hooks/useDriveTimer';
+import { useJobTimer } from '../hooks/useJobTimer';
+import JobCompletionModal from '../components/livemap/JobCompletionModal';
+import DrivebyPromptModal from '../components/livemap/DrivebyPromptModal';
+import RouteListPanel from '../components/livemap/RouteListPanel';
+import LiveTimerPanel from '../components/livemap/LiveTimerPanel';
+import PendingArrivalAlert from '../components/livemap/PendingArrivalAlert';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/db';
 import { GoogleMap, Marker, Polygon } from '@react-google-maps/api';
@@ -7,48 +18,7 @@ import { CheckCircle, Navigation, MapPin, FastForward, CloudRain, ChevronUp, Che
 import { parseLawnSizeToSqFt } from '../utils/parseLawnSize';
 import ComplianceLogModal from '../components/ComplianceLogModal';
 
-function SlideToFinish({ onComplete }) {
-  const [progress, setProgress] = useState(0);
-  const trackRef = useRef(null);
-  
-  const handleMove = (clientX) => {
-    if (!trackRef.current) return;
-    const rect = trackRef.current.getBoundingClientRect();
-    const x = Math.max(0, Math.min(clientX - rect.left, rect.width));
-    const p = x / rect.width;
-    setProgress(p);
-    if (p > 0.95) {
-      onComplete();
-      setProgress(0);
-    }
-  };
 
-  const handleTouchMove = (e) => handleMove(e.touches[0].clientX);
-  const handleMouseMove = (e) => { if (e.buttons === 1) handleMove(e.clientX); };
-  const handleEnd = () => { if (progress < 0.95) setProgress(0); };
-
-  return (
-    <div 
-      ref={trackRef}
-      style={{ position: 'relative', height: '52px', background: '#ffffff', borderRadius: '26px', overflow: 'hidden', touchAction: 'none', border: 'none', width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}
-      onTouchMove={handleTouchMove}
-      onTouchEnd={handleEnd}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleEnd}
-      onMouseLeave={handleEnd}
-    >
-      <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${progress * 100}%`, background: 'rgba(16,185,129,0.1)', transition: progress === 0 ? 'width 0.3s' : 'none' }} />
-      <div style={{ position: 'absolute', width: '100%', textAlign: 'center', fontWeight: 800, color: '#10b981', fontSize: '0.95rem', letterSpacing: '1px', userSelect: 'none', pointerEvents: 'none' }}>
-        SLIDE TO FINISH JOB
-      </div>
-      <div 
-        style={{ position: 'absolute', left: `calc(${progress * 100}% - ${progress * 44}px - 4px)`, top: '4px', width: '44px', height: '44px', borderRadius: '50%', background: '#10b981', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ffffff', transition: progress === 0 ? 'left 0.3s' : 'none', cursor: 'grab', zIndex: 2, boxShadow: '0 2px 8px rgba(16,185,129,0.4)' }}
-      >
-        <FastForward size={22} fill="currentColor" />
-      </div>
-    </div>
-  );
-}
 import { useNavigate } from 'react-router-dom';
 import DayReviewModal from '../components/DayReviewModal';
 import AppDialog from '../components/AppDialog';
@@ -70,30 +40,35 @@ const getDistance = (lat1, lon1, lat2, lon2) => {
 
 export default function LiveMap() {
   const navigate = useNavigate();
-  const [currentPosition, setCurrentPosition] = useState(null);
-  const [heading, setHeading] = useState(0);
-  const [speed, setSpeed] = useState(0);
-  const [autoCenter, setAutoCenter] = useState(true);
+
+  const { position, positionRef, speed, heading, poorGps, accuracy } = useGeolocation();
+  const { weather, weatherRef } = useWeatherTracker(positionRef);
+  
+  const { 
+    isDrivingPaused, drivingDuration, togglePause: toggleDrivePause, 
+    resetTimer: resetDriveTimer, getFinalDriveTimeSecs,
+    isDrivingPausedRef, accumulatedDriveTimeRef, lastDriveResumeTimeRef 
+  } = useDriveTimer();
+
+  const {
+    timerState, liveDuration, startTimer, pauseTimer, resumeTimer, toggleTimer, resetTimer: resetJobTimer,
+    getFinalDurationSecs, jobStartRef, accumulatedTimeRef, lastResumeTimeRef, timerStateRef
+  } = useJobTimer();
+
+
+
+  const currentPosition = position; // backwards compatibility alias
+  const latestLocRef = positionRef; // backwards compatibility alias
+        const [autoCenter, setAutoCenter] = useState(true);
   const autoCenterRef = useRef(true);
   const [mapTypeId, setMapTypeId] = useState('roadmap');
-  const [weather, setWeather] = useState(null);
-  const [activeEpaJob, setActiveEpaJob] = useState(null);
+    const [activeEpaJob, setActiveEpaJob] = useState(null);
   const { isLoaded, loadError } = useMapStatus();
   
   const [activeGeofence, setActiveGeofence] = useState(null);
   const [drivebyPrompt, setDrivebyPrompt] = useState(null);
   const [isRouteListOpen, setIsRouteListOpen] = useState(false);
-  const [liveDuration, setLiveDuration] = useState(0);
-  const [drivingDuration, setDrivingDuration] = useState(0);
-  const [isDrivingPaused, setIsDrivingPaused] = useState(true);
-  const [timerState, setTimerState] = useState('idle'); // 'idle', 'running', 'paused'
-  const timerStateRef = useRef('idle');
-  const accumulatedTimeRef = useRef(0);
-  const lastResumeTimeRef = useRef(null);
-  const isDrivingPausedRef = useRef(true);
-  const accumulatedDriveTimeRef = useRef(0);
-  const lastDriveResumeTimeRef = useRef(Date.now());
-  const potentialEnterRef = useRef(null);
+                      const potentialEnterRef = useRef(null);
   const potentialExitRef = useRef(null);
   const [completionPanel, setCompletionPanel] = useState(null);
   const [panelNote, setPanelNote] = useState('');
@@ -110,15 +85,12 @@ export default function LiveMap() {
   const [isEditJobOpen, setIsEditJobOpen] = useState(false);
   const [nearbyOpportunity, setNearbyOpportunity] = useState(null);
   const [skipPrompt, setSkipPrompt] = useState(null);
-  const [poorGps, setPoorGps] = useState(false);
-  const [gpsError, setGpsError] = useState(false);
+    const [gpsError, setGpsError] = useState(false);
 
   const mapRef = useRef(null);
   const dismissedOpportunitiesRef = useRef(new Set());
-  const jobStartRef = useRef(null);
-  const activeGeofenceIdRef = useRef(null);
-  const weatherTimerRef    = useRef(null);
-  const panelTouchRef      = useRef(null); // for swipe-to-dismiss
+    const activeGeofenceIdRef = useRef(null);
+    const panelTouchRef      = useRef(null); // for swipe-to-dismiss
   const routeVisitsRef     = useRef([]);
   const drivebyTimerRef    = useRef(null);
   const snapBackRef        = useRef(null);
@@ -127,50 +99,16 @@ export default function LiveMap() {
   const panelNoteActiveRef = useRef(false);
   const polygonCacheRef    = useRef({});  // Cache Google Maps Polygon objects by customer ID
   const wakeLockRef         = useRef(null);  // Screen Wake Lock to keep GPS alive
-  const weatherRef          = useRef(null); // Ref to hold latest weather for closures
+
   const anchorGeofenceRef   = useRef(null); // Temporary anchor for manual starts
-  const latestLocRef        = useRef(null);
+
   const poorGpsRef          = useRef(false);
   const capturedDriveTimeSecsRef = useRef(0);
   const panelNoteRef        = useRef('');
 
   useEffect(() => { panelNoteRef.current = panelNote; }, [panelNote]);
 
-  const saveDriveTimerState = (isPaused, accumulated) => {
-    localStorage.setItem('drive_timer_state', JSON.stringify({
-      accumulated: accumulated,
-      lastResume: lastDriveResumeTimeRef.current,
-      isPaused: isPaused,
-      savedAt: Date.now()
-    }));
-  };
-
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem('drive_timer_state');
-      if (stored) {
-        const { accumulated, lastResume, isPaused, savedAt } = JSON.parse(stored);
-        
-        // Prevent runaway timers: if it's been >12 hours since last save, auto-pause it
-        const isStale = savedAt && (Date.now() - savedAt > 12 * 60 * 60 * 1000);
-
-        if (!isPaused && !isStale && lastResume && savedAt) {
-          accumulatedDriveTimeRef.current = accumulated + (Date.now() - savedAt) / 1000;
-          lastDriveResumeTimeRef.current = Date.now();
-          isDrivingPausedRef.current = false;
-          setIsDrivingPaused(false);
-        } else {
-          accumulatedDriveTimeRef.current = accumulated || 0;
-          isDrivingPausedRef.current = true;
-          setIsDrivingPaused(true);
-          if (!isPaused && isStale) saveDriveTimerState(true, accumulated || 0);
-        }
-      }
-    } catch (e) {
-      console.error('Failed to load drive timer state', e);
-    }
-  }, []);
-
+  
   // Load all data
   const allCustomers = useLiveQuery(() => db.customers.toArray(), []) || [];
   const activeRoute = useLiveQuery(async () => {
@@ -193,6 +131,8 @@ export default function LiveMap() {
 
     return { ...route, normalizedStops, expandedStops };
   }, []);
+
+  useWakeLock(activeRoute?.status === 'active');
 
   const routeVisits = useLiveQuery(() => {
     if (!activeRoute) return [];
@@ -400,290 +340,6 @@ export default function LiveMap() {
     });
   };
 
-  // 2. Real-Time Weather Logging
-  const fetchWeather = async (lat, lng) => {
-    try {
-      const res = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=temperature_2m,weather_code,wind_speed_10m&temperature_unit=fahrenheit&wind_speed_unit=mph`);
-      const data = await res.json();
-      if (data.current) {
-        const newWeather = {
-          temp: Math.round(data.current.temperature_2m),
-          wind: Math.round(data.current.wind_speed_10m),
-          code: data.current.weather_code
-        };
-        setWeather(newWeather);
-        weatherRef.current = newWeather;
-      }
-    } catch (e) {
-      console.log('Weather fetch failed', e);
-    }
-  };
-
-  // 3. Main Geolocation Tracking
-  useEffect(() => {
-    if (!navigator.geolocation) return;
-    const watchId = navigator.geolocation.watchPosition(
-      (pos) => {
-        const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-        const gpsAccuracy = pos.coords.accuracy || 999; // meters
-        setCurrentPosition(loc);
-        
-        const currentSpeedMph = (pos.coords.speed || 0) * 2.237;
-        setSpeed(currentSpeedMph);
-        
-        if (pos.coords.heading && !isNaN(pos.coords.heading)) {
-          setHeading(pos.coords.heading);
-        }
-
-        latestLocRef.current = loc;
-
-        // Fetch weather on first lock, then every 10 mins using the LATEST location
-        if (!weatherTimerRef.current) {
-          fetchWeather(loc.lat, loc.lng);
-          weatherTimerRef.current = setInterval(() => {
-            if (latestLocRef.current) fetchWeather(latestLocRef.current.lat, latestLocRef.current.lng);
-          }, 10 * 60 * 1000);
-        }
-
-        // Auto Center and Zoom (uses ref to avoid restarting watchPosition)
-        if (autoCenterRef.current && mapRef.current) {
-          mapRef.current.panTo(loc);
-          if (pos.coords.heading && !isNaN(pos.coords.heading)) {
-            mapRef.current.setHeading(pos.coords.heading);
-          }
-          
-          let targetZoom = 18;
-          if (currentSpeedMph > 45) targetZoom = 15;
-          else if (currentSpeedMph > 25) targetZoom = 16;
-          else if (currentSpeedMph > 5) targetZoom = 17;
-          
-          if (Math.abs(mapRef.current.getZoom() - targetZoom) >= 1) {
-            mapRef.current.setZoom(targetZoom);
-          }
-        }
-
-        // Skip geofence checks entirely when GPS accuracy is poor (> 30 meters)
-        // This prevents phantom enter/exit triggers from bad satellite lock
-        if (gpsAccuracy > 30) {
-          if (!poorGpsRef.current) {
-            setPoorGps(true);
-            poorGpsRef.current = true;
-          }
-          return;
-        } else {
-          if (poorGpsRef.current) {
-            setPoorGps(false);
-            poorGpsRef.current = false;
-          }
-        }
-
-        // Geofence Checking (For Active Route)
-        // Skip auto-entry scanning when driving is paused (e.g. lunch break).
-        // The user can always manually start a job via the START JOB button.
-        const route = activeRouteRef.current;
-        if (route && route.status === 'active' && !isDrivingPausedRef.current && window.google?.maps?.geometry?.poly) {
-          let insideCustomers = [];
-          for (const customer of route.expandedStops) {
-            // Ignore already completed jobs so we don't re-trigger them if we drive by again
-            const isCompleted = routeVisitsRef.current.some(v => 
-               v.customerId === customer.id && 
-               (v.status === 'completed' || v.status === 'skipped')
-            );
-            if (isCompleted) continue;
-
-            let isInside = false;
-
-            if (activeGeofenceIdRef.current === customer.id && anchorGeofenceRef.current) {
-              // Manual anchor override
-              if (anchorGeofenceRef.current === 'no-gps') {
-                isInside = true;
-              } else {
-                const d = getDistance(loc.lat, loc.lng, anchorGeofenceRef.current.lat, anchorGeofenceRef.current.lng);
-                if (d <= 150) isInside = true;
-              }
-            } else if (customer.geofence && customer.geofence.length > 0) {
-              // Normal polygon geofence
-              if (!polygonCacheRef.current[customer.id]) {
-                polygonCacheRef.current[customer.id] = new window.google.maps.Polygon({ paths: customer.geofence });
-              }
-              const poly = polygonCacheRef.current[customer.id];
-              const pt = new window.google.maps.LatLng(loc.lat, loc.lng);
-              
-              if (window.google.maps.geometry.poly.containsLocation(pt, poly)) {
-                isInside = true;
-              } else {
-                // Fallback: if GPS is bouncing, check if we are within 25m of the property center
-                const centerLat = customer.geofence.reduce((s, p) => s + p.lat, 0) / customer.geofence.length;
-                const centerLng = customer.geofence.reduce((s, p) => s + p.lng, 0) / customer.geofence.length;
-                const d = getDistance(loc.lat, loc.lng, centerLat, centerLng);
-                if (d <= 25) {
-                  isInside = true;
-                }
-              }
-            }
-
-            if (isInside) {
-              insideCustomers.push(customer);
-            }
-          }
-
-          // Geofence Checking (For Unplanned Opportunities)
-          let foundOpportunity = null;
-          for (const customer of allCustomersRef.current) {
-            // Ignore if already on route
-            if (route.expandedStops.some(s => s.id === customer.id)) continue;
-            // Ignore if user manually dismissed this session
-            if (dismissedOpportunitiesRef.current.has(customer.id)) continue;
-            // Note: we don't query db for today's visits synchronously here. If they visited today, 
-            // they would likely be on the route anyway, or they can just dismiss it.
-            
-            let isInside = false;
-            if (customer.geofence && customer.geofence.length > 0) {
-              if (!polygonCacheRef.current[customer.id]) {
-                polygonCacheRef.current[customer.id] = new window.google.maps.Polygon({ paths: customer.geofence });
-              }
-              const poly = polygonCacheRef.current[customer.id];
-              const pt = new window.google.maps.LatLng(loc.lat, loc.lng);
-              
-              if (window.google.maps.geometry.poly.containsLocation(pt, poly)) {
-                isInside = true;
-              } else {
-                const centerLat = customer.geofence.reduce((s, p) => s + p.lat, 0) / customer.geofence.length;
-                const centerLng = customer.geofence.reduce((s, p) => s + p.lng, 0) / customer.geofence.length;
-                const d = getDistance(loc.lat, loc.lng, centerLat, centerLng);
-                if (d <= 25) isInside = true;
-              }
-            }
-            if (isInside) {
-              foundOpportunity = customer;
-              break;
-            }
-          }
-          setNearbyOpportunity(foundOpportunity);
-          
-          let insideCustomer = null;
-          if (insideCustomers.length === 1) {
-            insideCustomer = insideCustomers[0];
-          } else if (insideCustomers.length > 1) {
-            // If overlapping geofences, pick the one we are physically closest to
-            let closestDist = Infinity;
-            for (const cust of insideCustomers) {
-              const centerLat = cust.geofence.reduce((s, p) => s + p.lat, 0) / cust.geofence.length;
-              const centerLng = cust.geofence.reduce((s, p) => s + p.lng, 0) / cust.geofence.length;
-              const d = getDistance(loc.lat, loc.lng, centerLat, centerLng);
-              if (d < closestDist) {
-                closestDist = d;
-                insideCustomer = cust;
-              }
-            }
-          }
-          
-          if (insideCustomer) {
-            // We are inside a geofence. Clear any potential exit timers.
-            potentialExitRef.current = null;
-            
-            if (activeGeofenceIdRef.current !== insideCustomer.id) {
-              // We are not YET officially inside this new geofence according to state.
-              if (!potentialEnterRef.current || potentialEnterRef.current.id !== insideCustomer.id) {
-                // Start the debounce timer (first detection)
-                potentialEnterRef.current = { id: insideCustomer.id, timestamp: Date.now(), lastSeen: Date.now() };
-                setPendingArrival({ name: insideCustomer.name, secondsLeft: 8 });
-              } else {
-                // Update last seen time (we are still inside)
-                potentialEnterRef.current.lastSeen = Date.now();
-                const elapsed = Date.now() - potentialEnterRef.current.timestamp;
-                const remaining = Math.max(0, Math.ceil((8000 - elapsed) / 1000));
-                setPendingArrival({ name: insideCustomer.name, secondsLeft: remaining });
-                
-                if (elapsed >= 8000) {
-                  // We have been inside for ~8 seconds! Trigger enter.
-                  if (activeGeofenceIdRef.current) {
-                    handleExitGeofence();
-                  }
-                  if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
-                  
-                  // Capture drive time right when entering the geofence
-                  capturedDriveTimeSecsRef.current = Math.floor(
-                    isDrivingPausedRef.current
-                      ? accumulatedDriveTimeRef.current
-                      : accumulatedDriveTimeRef.current + (Date.now() - lastDriveResumeTimeRef.current) / 1000
-                  );
-                  // Reset drive timer
-                  accumulatedDriveTimeRef.current = 0;
-                  lastDriveResumeTimeRef.current = Date.now();
-
-                  jobStartRef.current = Date.now();
-                  accumulatedTimeRef.current = 0;
-                  lastResumeTimeRef.current = Date.now();
-                  setTimerState('running');
-                  activeGeofenceIdRef.current = insideCustomer.id;
-                  setActiveGeofence(insideCustomer);
-                  potentialEnterRef.current = null;
-                  setPendingArrival(null);
-                  dismissedOpportunitiesRef.current.clear();
-                }
-              }
-            }
-          } else {
-            // We are NOT inside any geofence.
-            // Only reset the enter timer if we have been outside for more than 5 seconds (GPS grace period)
-            if (potentialEnterRef.current) {
-              if (Date.now() - potentialEnterRef.current.lastSeen > 5000) {
-                potentialEnterRef.current = null; // Truly left, reset
-                setPendingArrival(null);
-              }
-              // Otherwise keep the timer running — just a GPS bounce
-            } else {
-              setPendingArrival(null);
-            }
-            
-            if (activeGeofenceIdRef.current) {
-              // If the timer is paused, the user is clearly still working (water break, etc.)
-              // Do NOT trigger an exit — they need to manually resume or finish.
-              if (timerStateRef.current === 'paused') {
-                potentialExitRef.current = null; // Reset any pending exit
-              } else {
-                // We just exited an active geofence. Start the 15-second debounce timer.
-                if (!potentialExitRef.current) {
-                  potentialExitRef.current = Date.now();
-                } else if (Date.now() - potentialExitRef.current >= 15000) {
-                  // We have been outside for 15 contiguous seconds! Trigger exit.
-                  handleExitGeofence();
-                  potentialExitRef.current = null;
-                }
-              }
-            }
-          }
-        }
-      },
-      (err) => {
-        console.error(err);
-        setGpsError(true);
-      },
-      { enableHighAccuracy: true }
-    );
-    return () => {
-      navigator.geolocation.clearWatch(watchId);
-      if (weatherTimerRef.current) clearInterval(weatherTimerRef.current);
-    };
-  }, []); // Empty deps — runs once on mount, uses refs for all mutable state
-
-  useEffect(() => {
-    if (drivebyPrompt) {
-      if (drivebyTimerRef.current) clearTimeout(drivebyTimerRef.current);
-      drivebyTimerRef.current = setTimeout(() => {
-        // Auto-dismiss defaults to 'skipped' so the visit is never silently lost
-        logVisit(drivebyPrompt.customer, drivebyPrompt.duration, drivebyPrompt.entry, 'skipped', '', drivebyPrompt.driveTime);
-        setDrivebyPrompt(null);
-      }, 15000); // Auto dismiss after 15 seconds
-    } else {
-      if (drivebyTimerRef.current) clearTimeout(drivebyTimerRef.current);
-    }
-    return () => {
-      if (drivebyTimerRef.current) clearTimeout(drivebyTimerRef.current);
-    };
-  }, [drivebyPrompt]);
-
   // 4. Job Timers & Driveby Detection
   const handleExitGeofence = () => {
     // Use timerStateRef (not timerState) to avoid stale closure from watchPosition
@@ -697,11 +353,10 @@ export default function LiveMap() {
     activeGeofenceIdRef.current = null;
     setActiveGeofence(null);
     anchorGeofenceRef.current = null;
-    setTimerState('idle');
+    resetJobTimer();
     potentialEnterRef.current = null;
     potentialExitRef.current = null;
     lastDriveResumeTimeRef.current = Date.now();
-    setIsDrivingPaused(false);
     isDrivingPausedRef.current = false;
 
     const threshold = getSettings().drivebyThresholdSecs || 45;
@@ -730,12 +385,11 @@ export default function LiveMap() {
     activeGeofenceIdRef.current = null;
     setActiveGeofence(null);
     anchorGeofenceRef.current = null;
-    setTimerState('idle');
+    resetJobTimer();
     potentialEnterRef.current = null;
     potentialExitRef.current = null;
     accumulatedDriveTimeRef.current = 0;
     lastDriveResumeTimeRef.current = Date.now();
-    setIsDrivingPaused(false);
     isDrivingPausedRef.current = false;
     
     logVisit(completedCust, finalDuration, jobStartRef.current, 'completed', liveNote);
@@ -745,7 +399,6 @@ export default function LiveMap() {
   const logVisit = async (customer, durationSecs, entryTime, status, note = '', overrideDriveTimeSecs = null) => {
     accumulatedDriveTimeRef.current = 0;
     lastDriveResumeTimeRef.current = Date.now();
-    setIsDrivingPaused(false);
     isDrivingPausedRef.current = false;
     const route = activeRouteRef.current;
     let priceEarned = 0;
@@ -785,21 +438,8 @@ export default function LiveMap() {
     }) : false;
 
     // Reset drive timer
-    accumulatedDriveTimeRef.current = 0;
-    lastDriveResumeTimeRef.current = Date.now();
-    setDrivingDuration(0);
+    resetDriveTimer(hasMoreStops);
 
-    if (hasMoreStops) {
-      // AUTO-START for the next job
-      isDrivingPausedRef.current = false;
-      setIsDrivingPaused(false);
-      saveDriveTimerState(false, 0);
-    } else {
-      // Route complete or manual job: PAUSE the drive timer
-      isDrivingPausedRef.current = true;
-      setIsDrivingPaused(true);
-      saveDriveTimerState(true, 0);
-    }
     // Sanity: if drive timer wasn't active (e.g. manual start, skip), fall back to wall-clock
     if (driveTimeSecs <= 0) {
       const startOfDay = new Date();
@@ -1067,42 +707,9 @@ export default function LiveMap() {
     anchor: window.google ? new window.google.maps.Point(0, 0) : null
   });
 
-  const togglePause = () => {
-    if (timerState === 'running') {
-      accumulatedTimeRef.current += (Date.now() - lastResumeTimeRef.current) / 1000;
-      setTimerState('paused');
-    } else if (timerState === 'paused') {
-      lastResumeTimeRef.current = Date.now();
-      setTimerState('running');
-    }
-  };
+  const togglePause = toggleTimer;
 
-  // Live Timer Effect
-  useEffect(() => {
-    let interval;
-    if (activeGeofence) {
-      interval = setInterval(() => {
-        if (timerState === 'running' && lastResumeTimeRef.current) {
-          setLiveDuration(Math.floor(accumulatedTimeRef.current + (Date.now() - lastResumeTimeRef.current) / 1000));
-        } else if (timerState === 'paused') {
-          setLiveDuration(Math.floor(accumulatedTimeRef.current));
-        }
-      }, 1000);
-    } else if (activeRoute) {
-      interval = setInterval(() => {
-        if (!isDrivingPausedRef.current && lastDriveResumeTimeRef.current) {
-          setDrivingDuration(Math.floor(accumulatedDriveTimeRef.current + (Date.now() - lastDriveResumeTimeRef.current) / 1000));
-        } else {
-          setDrivingDuration(Math.floor(accumulatedDriveTimeRef.current));
-        }
-      }, 1000);
-    } else {
-      setLiveDuration(0);
-      setDrivingDuration(0);
-      accumulatedDriveTimeRef.current = 0;
-    }
-    return () => clearInterval(interval);
-  }, [activeGeofence, timerState, activeRoute]);
+
 
   const formatLiveTimer = (secs) => {
     const h = Math.floor(secs / 3600);
@@ -1200,126 +807,19 @@ export default function LiveMap() {
         </div>
       )}
 
-      {completionPanel && (
-        <div
-          className="completion-panel glass-card"
-          style={{ position: 'absolute', top: '1rem', left: '1rem', right: '1rem', zIndex: 20, border: '1px solid var(--color-primary)' }}
-          onTouchStart={e => { panelTouchRef.current = e.touches[0].clientY; }}
-          onTouchEnd={e => {
-            if (panelTouchRef.current !== null) {
-              const dy = e.changedTouches[0].clientY - panelTouchRef.current;
-              if (dy > 80) { if (completionTimerRef.current) clearTimeout(completionTimerRef.current); setCompletionPanel(null); }
-              panelTouchRef.current = null;
-            }
-          }}
-        >
-          {/* Swipe indicator */}
-          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '0.6rem' }}>
-            <div style={{ width: '36px', height: '4px', borderRadius: '2px', background: 'var(--color-border)' }} />
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.8rem' }}>
-            <CheckCircle size={20} color="var(--color-primary)" />
-            <strong style={{ fontSize: '1.05rem' }}>{completionPanel.custName} — Completed</strong>
-          </div>
-          <div style={{ display: 'flex', gap: '1.2rem', fontSize: '0.9rem', color: 'var(--color-text-muted)', marginBottom: completionPanel.primaryCustomer?.propertyNotes ? '0.8rem' : '1rem', borderTop: '1px solid var(--color-border)', paddingTop: '0.8rem' }}>
-            <span>⏱ {formatLiveTimer(completionPanel.durationSecs)}</span>
-            <span>💰 ${completionPanel.priceEarned?.toFixed(2) ?? '0.00'}</span>
-            {completionPanel.weather && <span>🌡 {completionPanel.weather.temp}°F</span>}
-          </div>
-          {completionPanel.primaryCustomer?.propertyNotes && (
-            <div style={{ marginBottom: '0.8rem', padding: '0.6rem 0.8rem', borderRadius: 'var(--radius-sm)', background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.35)', fontSize: '0.82rem', color: '#b45309', lineHeight: 1.5 }}>
-              <span style={{ fontWeight: 700, display: 'block', marginBottom: '0.2rem' }}>📋 Property Note</span>
-              {completionPanel.primaryCustomer.propertyNotes}
-            </div>
-          )}
-          <textarea
-            rows={2}
-            className="input-field"
-            placeholder="📝 Add a note... (optional)"
-            value={panelNote}
-            onChange={e => setPanelNote(e.target.value)}
-            onFocus={() => { panelNoteActiveRef.current = true; }}
-            onBlur={() => { panelNoteActiveRef.current = false; }}
-            style={{ width: '100%', resize: 'none', fontSize: '0.9rem', marginBottom: '0.8rem' }}
-          />
-
-          {/* Nearby Companion Prompt */}
-          {completionPanel.nearbyCandidate && (
-            <div style={{ marginBottom: '0.8rem', padding: '0.7rem', borderRadius: 'var(--radius-sm)', background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.3)' }}>
-              <div style={{ fontSize: '0.8rem', color: 'var(--color-primary)', fontWeight: 600, marginBottom: '0.4rem' }}>
-                📍 Nearby: {completionPanel.nearbyCandidate.name} ({Math.round(completionPanel.nearbyCandidate.dist)}m away)
-              </div>
-              <div style={{ fontSize: '0.78rem', color: 'var(--color-text-muted)', marginBottom: '0.6rem' }}>
-                Did you also mow this property?
-              </div>
-              <div style={{ display: 'flex', gap: '0.5rem' }}>
-                <button
-                  className="btn btn-secondary"
-                  style={{ flex: 1, fontSize: '0.85rem', padding: '0.4rem' }}
-                  onClick={() => setCompletionPanel(prev => ({ ...prev, nearbyCandidate: null }))}
-                >
-                  No
-                </button>
-                <button
-                  className="btn btn-primary"
-                  style={{ flex: 2, fontSize: '0.85rem', padding: '0.4rem' }}
-                  onClick={() => {
-                    if (completionTimerRef.current) clearTimeout(completionTimerRef.current);
-                    setTimeSplit({
-                      primaryCustomer: completionPanel.primaryCustomer,
-                      primaryVisitId: completionPanel.visitId,
-                      primaryExitTime: completionPanel.exitTime,
-                      durationSecs: completionPanel.durationSecs,
-                      nearbyCustomer: completionPanel.nearbyCandidate
-                    });
-                  }}
-                >
-                  ⏱ Yes — Split Time
-                </button>
-              </div>
-            </div>
-          )}
-
-          <div style={{ display: 'flex', gap: '0.8rem', flexWrap: 'wrap' }}>
-            <button 
-              className="btn btn-secondary" 
-              style={{ flex: '1 1 100%', minHeight: '52px', fontSize: '1rem', background: 'var(--color-bg-main)', border: '2px solid var(--color-primary)', color: 'var(--color-primary)' }} 
-              onClick={() => {
-                if (completionTimerRef.current) clearTimeout(completionTimerRef.current);
-                setIsEditJobOpen(true);
-              }}
-            >
-              ✏️ Edit Job & Extras
-            </button>
-            <button className="btn btn-primary" style={{ flex: 1, minHeight: '52px', fontSize: '1rem' }} onClick={handleSaveNote}>
-              {panelNote.trim() ? 'Save Note' : 'Done'}
-            </button>
-            {completionPanel.primaryCustomer?.services?.some(s => completionPanel.appliedServices?.includes(s.id) && s.name.toLowerCase().match(/(fertilizer|weed|spray|chem)/)) && (
-              <button 
-                className="btn btn-secondary" 
-                style={{ flex: 1, minHeight: '52px', fontSize: '0.9rem', color: 'var(--color-primary)', borderColor: 'var(--color-primary)' }} 
-                onClick={() => setActiveEpaJob({ id: completionPanel.visitId, custName: completionPanel.custName, exitTime: completionPanel.exitTime })}
-              >
-                <ClipboardList size={18} /> EPA Log
-              </button>
-            )}
-            <button className="btn btn-secondary" style={{ minHeight: '52px', padding: '0 1.2rem', fontSize: '1rem' }} onClick={() => { if (completionTimerRef.current) clearTimeout(completionTimerRef.current); setCompletionPanel(null); }}>
-              Dismiss
-            </button>
-          </div>
-        </div>
-      )}
-
-      {activeEpaJob && (
-        <ComplianceLogModal 
-          visit={activeEpaJob}
-          customerName={activeEpaJob.custName}
-          customerLawnSize={completionPanel?.primaryCustomer?.lawnSize}
-          initialLog={null}
-          onSave={handleSaveEpaLog}
-          onClose={() => setActiveEpaJob(null)}
-        />
-      )}
+      
+      <JobCompletionModal 
+        completionPanel={completionPanel}
+        panelNote={panelNote}
+        setPanelNote={setPanelNote}
+        panelNoteActiveRef={panelNoteActiveRef}
+        completionTimerRef={completionTimerRef}
+        setCompletionPanel={setCompletionPanel}
+        setTimeSplit={setTimeSplit}
+        setIsEditJobOpen={setIsEditJobOpen}
+        setActiveEpaJob={setActiveEpaJob}
+        handleSaveNote={handleSaveNote}
+      />
 
       {isEditJobOpen && completionPanel && (
         <EditJobModal 
@@ -1342,96 +842,24 @@ export default function LiveMap() {
           </div>
         )}
         {activeGeofence ? (
-          <div className="animate-fade-in" style={{ 
-            padding: '1rem', 
-            background: timerState === 'running' ? 'rgba(16,185,129,0.95)' : 'rgba(245,158,11,0.95)',
-            backdropFilter: 'blur(16px)',
-            WebkitBackdropFilter: 'blur(16px)',
-            borderRadius: '1.2rem',
-            color: 'white',
-            border: 'none', 
-            boxShadow: timerState === 'running' ? '0 10px 40px rgba(16,185,129,0.4)' : '0 10px 40px rgba(245,158,11,0.4)',
-            transition: 'all 0.3s ease'
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.8rem' }}>
-              <div>
-                <strong style={{ fontSize: '1.2rem', display: 'block', lineHeight: 1.2, textShadow: '0 1px 2px rgba(0,0,0,0.1)' }}>{activeGeofence.name}</strong>
-                <div style={{ fontSize: '0.8rem', color: 'rgba(255,255,255,0.8)', marginTop: '2px' }}>{activeGeofence.address}</div>
-                {weather && (() => {
-                  const code = weather.code ?? 0;
-                  let Icon = CloudRain;
-                  if (code === 0) Icon = Sun;
-                  else if (code <= 2) Icon = CloudSun;
-                  else if (code === 3 || code <= 49) Icon = Cloud;
-                  else if (code <= 55) Icon = CloudDrizzle;
-                  else if (code <= 77 || code <= 86) Icon = CloudSnow;
-                  else if (code <= 99) Icon = CloudLightning;
-                  return (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', marginTop: '0.4rem', color: 'white', fontSize: '0.8rem', fontWeight: 600 }}>
-                      <Icon size={14} color="rgba(255,255,255,0.9)" />
-                      <span>{weather.temp}°F · {weather.wind} mph</span>
-                    </div>
-                  );
-                })()}
-                {liveNote && (
-                  <div style={{ fontSize: '0.8rem', color: '#fcd34d', marginTop: '0.4rem', fontWeight: 600, display: 'flex', alignItems: 'flex-start', gap: '0.3rem' }}>
-                    <FileText size={14} style={{ marginTop: '2px' }} />
-                    <span style={{ fontStyle: 'italic' }}>{liveNote}</span>
-                  </div>
-                )}
-              </div>
-              <div style={{ textAlign: 'right', display: 'flex', gap: '0.2rem' }}>
-                <button 
-                  onClick={() => setShowLiveNoteModal(true)}
-                  style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', padding: '0.4rem', marginTop: '-0.4rem' }}
-                  title="Add Note"
-                >
-                  <FileText size={20} />
-                </button>
-                <button 
-                  onClick={() => {
-                    setDialog({
-                      type: 'warning',
-                      title: 'Discard Active Job?',
-                      message: 'Are you sure you want to cancel this job? This will reset the timer and discard any unsaved work.',
-                      onConfirm: () => {
-                        activeGeofenceIdRef.current = null;
-                        setActiveGeofence(null);
-                        anchorGeofenceRef.current = null;
-                        setTimerState('idle');
-                        setLiveNote('');
-                        setDialog(null);
-                      },
-                      onCancel: () => setDialog(null)
-                    });
-                  }}
-                  style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', padding: '0.2rem', marginTop: '-0.2rem' }}
-                >
-                  <X size={20} />
-                </button>
-              </div>
-            </div>
-            
-            <div style={{ textAlign: 'center', marginBottom: '1.2rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(0,0,0,0.15)', padding: '0.6rem 1rem', borderRadius: 'var(--radius-md)', border: '1px solid rgba(255,255,255,0.1)', boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.05)' }}>
-              <div style={{ fontSize: '0.8rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'rgba(255,255,255,0.9)' }}>
-                {timerState === 'paused' ? 'TIMER PAUSED' : 'JOB RUNNING'}
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem' }}>
-                <div style={{ fontSize: '2rem', fontWeight: 800, fontFamily: 'monospace', fontVariantNumeric: 'tabular-nums', lineHeight: 1, color: 'white', textShadow: '0 2px 4px rgba(0,0,0,0.2)' }}>
-                  {formatLiveTimer(liveDuration)}
-                </div>
-                <button 
-                  onClick={togglePause}
-                  style={{ border: 'none', color: 'white', cursor: 'pointer', padding: '0.5rem', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '50%', background: 'rgba(255,255,255,0.25)', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}
-                  title={timerState === 'paused' ? 'Resume Timer' : 'Pause Timer'}
-                >
-                  {timerState === 'paused' ? <Play size={18} fill="white" /> : <Pause size={18} fill="white" />}
-                </button>
-              </div>
-            </div>
-
-            <SlideToFinish onComplete={handleManualDone} />
-          </div>
+          <LiveTimerPanel 
+            activeGeofence={activeGeofence}
+            timerState={timerState}
+            liveDuration={liveDuration}
+            weather={weather}
+            liveNote={liveNote}
+            setShowLiveNoteModal={setShowLiveNoteModal}
+            setDialog={setDialog}
+            togglePause={togglePause}
+            handleManualDone={handleManualDone}
+            onCancelJob={() => {
+              activeGeofenceIdRef.current = null;
+              setActiveGeofence(null);
+              anchorGeofenceRef.current = null;
+              resetJobTimer();
+              setLiveNote('');
+            }}
+          />
         ) : (
           activeRoute ? (() => {
             if (activeRoute.status === 'pending') {
@@ -1446,11 +874,7 @@ export default function LiveMap() {
                      await db.routes.update(activeRoute.id, { status: 'active' });
                      
                      // Tie the driving timer explicitly to this Start Route action!
-                     accumulatedDriveTimeRef.current = 0;
-                     lastDriveResumeTimeRef.current = Date.now();
-                     isDrivingPausedRef.current = false;
-                     setIsDrivingPaused(false);
-                     saveDriveTimerState(false, 0);
+                     resetDriveTimer(true);
                   }}>
                     <Play fill="currentColor" size={20} /> START ROUTE
                   </button>
@@ -1512,10 +936,7 @@ export default function LiveMap() {
                             style={{ padding: '0.2rem 0.6rem', fontSize: '0.75rem', fontWeight: 700, borderRadius: '4px' }}
                             onClick={(e) => {
                               e.stopPropagation();
-                              lastDriveResumeTimeRef.current = Date.now();
-                              isDrivingPausedRef.current = false;
-                              setIsDrivingPaused(false);
-                              saveDriveTimerState(false, accumulatedDriveTimeRef.current);
+                              resetDriveTimer(true);
                             }}
                           >
                             <Play size={12} fill="currentColor" style={{ marginRight: '4px' }}/> START DRIVING
@@ -1526,19 +947,7 @@ export default function LiveMap() {
                             style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem', borderRadius: 'var(--radius-md)', background: isDrivingPaused ? 'var(--color-primary)' : 'var(--color-bg-card)', color: isDrivingPaused ? '#fff' : 'var(--color-text-main)', border: `1px solid ${isDrivingPaused ? 'var(--color-primary)' : 'var(--color-border)'}`, display: 'flex', alignItems: 'center', gap: '0.3rem' }}
                             onClick={(e) => {
                               e.stopPropagation();
-                              if (isDrivingPausedRef.current) {
-                                // Resume
-                                lastDriveResumeTimeRef.current = Date.now();
-                                isDrivingPausedRef.current = false;
-                                setIsDrivingPaused(false);
-                                saveDriveTimerState(false, accumulatedDriveTimeRef.current);
-                              } else {
-                                // Pause
-                                accumulatedDriveTimeRef.current += (Date.now() - lastDriveResumeTimeRef.current) / 1000;
-                                isDrivingPausedRef.current = true;
-                                setIsDrivingPaused(true);
-                                saveDriveTimerState(true, accumulatedDriveTimeRef.current);
-                              }
+                              toggleDrivePause();
                             }}
                           >
                             {isDrivingPaused ? <Play size={14} fill="currentColor" /> : <Pause size={14} fill="currentColor" />}
@@ -1552,10 +961,7 @@ export default function LiveMap() {
                   <div style={{ display: 'flex', gap: '0.6rem' }}>
                     <button className="btn btn-primary" style={{ flex: 2, padding: '0.6rem', fontSize: '0.95rem', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.4rem' }} onClick={() => {
                       if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
-                      jobStartRef.current = Date.now();
-                      accumulatedTimeRef.current = 0;
-                      lastResumeTimeRef.current = Date.now();
-                      setTimerState('running');
+                      startTimer();
                       activeGeofenceIdRef.current = nextStop.id;
                       anchorGeofenceRef.current = currentPosition ? { lat: currentPosition.lat, lng: currentPosition.lng } : 'no-gps';
                       setActiveGeofence(nextStop);
@@ -1702,165 +1108,40 @@ export default function LiveMap() {
         </div>
       )}
       
-      {/* Bottom Panel (Native-style Bottom Sheet) */}
-      <div className="glass-card" style={{ position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 10, padding: 0, overflow: 'hidden', borderRadius: '1.5rem 1.5rem 0 0', borderBottom: 'none', boxShadow: '0 -10px 25px rgba(0,0,0,0.08)' }}>
-        
-        {/* Progress Bar & Header */}
-        {progressInfo && (
-          <div style={{ padding: isRouteListOpen ? '0.5rem 1rem' : '0.5rem 1rem 1.5rem 1rem', cursor: 'pointer', background: isRouteListOpen ? 'var(--color-bg-card)' : 'var(--glass-bg)', backdropFilter: isRouteListOpen ? 'none' : 'blur(12px)' }} onClick={() => setIsRouteListOpen(!isRouteListOpen)}>
-            
-            {/* Grab Handle */}
-            <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1rem', paddingTop: '0.5rem' }}>
-              <div style={{ width: '40px', height: '5px', borderRadius: '3px', background: 'var(--color-border)' }} />
-            </div>
-
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem' }}>
-             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                 <div style={{ display: 'flex', flexDirection: 'column' }}>
-                   {activeRoute?.name && (
-                     <span style={{ fontSize: '0.75rem', color: 'var(--color-primary)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                       {activeRoute.name}
-                     </span>
-                   )}
-                   <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '2px' }}>Route Progress</span>
-                   <strong style={{ fontSize: '1.1rem', color: 'var(--color-text-main)' }}>{progressInfo.completedStops} of {progressInfo.totalStops} Stops Completed</strong>
-                 </div>
-                 {isRouteListOpen ? <ChevronDown size={18} color="var(--color-text-muted)" style={{ marginLeft: '0.5rem' }} /> : <ChevronUp size={18} color="var(--color-text-muted)" style={{ marginLeft: '0.5rem' }} />}
-               </div>
-               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-                 <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>Est. Time</span>
-                 <strong style={{ color: 'var(--color-primary)' }}>{progressInfo.etaString}</strong>
-               </div>
-            </div>
-
-            {/* End Route Button */}
-            {isRouteListOpen && progressInfo.completedStops < progressInfo.totalStops && (
-              <button 
-                className="btn btn-secondary" 
-                style={{ width: '100%', marginBottom: '1rem', padding: '0.6rem', color: '#ef4444', borderColor: '#ef4444', background: 'rgba(239,68,68,0.05)' }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  const pendingStops = activeRoute.expandedStops.filter(s => getStopStatus(s.id) === 'pending');
-                  setSkipPrompt({ type: 'end_route', customers: pendingStops });
-                }}
-              >
-                Force End Route
-              </button>
-            )}
-
-            {/* Actual Visual Progress Bar */}
-            <div style={{ width: '100%', height: '5px', background: 'var(--color-border)', borderRadius: '3px', overflow: 'hidden' }}>
-              <div 
-                style={{ 
-                  height: '100%', 
-                  background: 'var(--color-primary)', 
-                  width: `${(progressInfo.completedStops / progressInfo.totalStops) * 100}%`,
-                  transition: 'width 0.5s ease'
-                }} 
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Collapsible Route List */}
-        {isRouteListOpen && activeRoute && (
-          <div style={{ maxHeight: '45vh', overflowY: 'auto', padding: '1rem', borderTop: '1px solid var(--color-border)', background: 'var(--color-bg-main)' }}>
-            <h4 style={{ margin: '0 0 1rem 0', color: 'var(--color-text-main)' }}>Route List</h4>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-              {activeRoute.expandedStops.map((stop, i) => {
-                const status = getStopStatus(stop.id);
-                return (
-                  <div key={stop.id} style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.8rem', padding: '0.6rem', background: 'var(--color-bg-card)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)', opacity: status === 'completed' ? 0.6 : 1 }}>
-                    <div style={{ width: '24px', display: 'flex', justifyContent: 'center' }}>
-                      {status === 'completed' ? (
-                        <CheckCircle size={18} color="var(--color-primary)" />
-                      ) : status === 'skipped' ? (
-                        <SkipForward size={16} color="var(--color-text-muted)" />
-                      ) : (
-                        <div style={{ width: '16px', height: '16px', borderRadius: '50%', border: '2px solid var(--color-text-muted)' }} />
-                      )}
-                    </div>
-                    <div style={{ flex: 1, minWidth: '150px' }}>
-                      <div style={{ fontWeight: 600, fontSize: '0.9rem', color: status === 'completed' || status === 'skipped' ? 'var(--color-text-muted)' : 'var(--color-text-main)', textDecoration: status === 'completed' || status === 'skipped' ? 'line-through' : 'none' }}>
-                        {i + 1}. {stop.name}
-                      </div>
-                      <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', display: 'flex', justifyContent: 'space-between', marginTop: '0.2rem' }}>
-                        <span>{stop.address}</span>
-                        {status === 'pending' && (() => {
-                           let estMins = 15;
-                           const histVisits = allVisits.filter(v => v.customerId === stop.id && v.status === 'completed' && v.durationSecs);
-                           if (histVisits.length > 0) {
-                             estMins = Math.round((histVisits.reduce((acc, v) => acc + v.durationSecs, 0) / histVisits.length) / 60);
-                           } else if (stop.lawnSize) {
-                             const sqft = parseLawnSizeToSqFt(stop.lawnSize);
-                             if (sqft) estMins = Math.max(10, Math.round(sqft / globalPace));
-                           }
-                           const normalizedStop = activeRoute.normalizedStops?.find(n => n.customerId === stop.id);
-                           const driveMins = normalizedStop?.plannedDriveTimeSecs ? Math.round(normalizedStop.plannedDriveTimeSecs / 60) : null;
-                           return (
-                             <span style={{ fontWeight: 600, color: 'var(--color-primary)', whiteSpace: 'nowrap' }}>
-                               {driveMins !== null && driveMins > 0 ? `${driveMins}m drive · ` : ''}~{estMins}m job
-                             </span>
-                           );
-                        })()}
-                      </div>
-                    </div>
-                    {status === 'pending' && (
-                      <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', justifyContent: 'flex-end', marginTop: '0.3rem' }}>
-                        <button
-                          className="btn btn-secondary"
-                          style={{ padding: '0.4rem 0.6rem', fontSize: '0.8rem', minHeight: '36px' }}
-                          onClick={() => handleSkipStop(stop)}
-                          title="Skip Stop"
-                        >
-                          <SkipForward size={14} />
-                        </button>
-                        <button
-                          className="btn btn-secondary"
-                          style={{ padding: '0.4rem 0.6rem', fontSize: '0.8rem', minHeight: '36px' }}
-                          onClick={() => window.open(`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(stop.address)}`, '_blank')}
-                          title="Navigate"
-                        >
-                          <Navigation size={14} />
-                        </button>
-                        <button
-                          className="btn btn-primary"
-                          style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem', minHeight: '36px' }}
-                          onClick={() => {
-                            if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
-                            jobStartRef.current = Date.now();
-                            accumulatedTimeRef.current = 0;
-                            lastResumeTimeRef.current = Date.now();
-                            setTimerState('running');
-                            activeGeofenceIdRef.current = stop.id;
-                            anchorGeofenceRef.current = currentPosition ? { lat: currentPosition.lat, lng: currentPosition.lng } : 'no-gps';
-                            setActiveGeofence(stop);
-                            dismissedOpportunitiesRef.current.clear();
-                            setIsRouteListOpen(false);
-                            potentialEnterRef.current = null;
-                            potentialExitRef.current = null;
-                          }}
-                        >
-                          ▶ Start
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-              <button
-                className="btn btn-secondary"
-                style={{ marginTop: '0.5rem', padding: '0.6rem', borderStyle: 'dashed' }}
-                onClick={() => setShowQuickAdd(true)}
-              >
-                + Add Unplanned Stop
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-
-
+      <RouteListPanel 
+        activeRoute={activeRoute}
+        allVisits={allVisits}
+        getStopStatus={getStopStatus}
+        handleSkipStop={handleSkipStop}
+        isRouteListOpen={isRouteListOpen}
+        setIsRouteListOpen={setIsRouteListOpen}
+        progressInfo={progressInfo}
+        onStartJob={(stop) => {
+          if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+          activeGeofenceIdRef.current = stop.id;
+          anchorGeofenceRef.current = position ? { lat: position.lat, lng: position.lng } : 'no-gps';
+          setActiveGeofence(stop);
+          setIsRouteListOpen(false);
+          startTimer();
+          
+          // Inform Engine
+          if (engineRef.current) {
+            engineRef.current.manualStartJob(stop);
+          }
+        }}
+        onForceEndRoute={() => {
+          setDialog({
+            type: 'warning',
+            title: 'End Active Route?',
+            message: 'Are you sure you want to forcibly end this route? Incomplete jobs will be skipped.',
+            onConfirm: () => {
+              finishActiveRoute();
+              setDialog(null);
+            },
+            onCancel: () => setDialog(null)
+          });
+        }}
+      />
 
       {/* Recenter Button if autoCenter is disabled */}
       {!autoCenter && (

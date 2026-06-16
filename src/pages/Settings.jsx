@@ -38,7 +38,7 @@ export default function Settings() {
   const [newChemEpa, setNewChemEpa] = useState('');
   const [newChemTarget, setNewChemTarget] = useState('');
   const [newChemRate, setNewChemRate] = useState('');
-  const [newChemNotice, setNewChemNotice] = useState('');
+  const [newChemNotices, setNewChemNotices] = useState([]);
   const [newChemCategory, setNewChemCategory] = useState('Fertilizer');
   const [activeTab, setActiveTab] = useState('pricing');
   const [editingServiceId, setEditingServiceId] = useState(null);
@@ -122,7 +122,7 @@ export default function Settings() {
         epaRegNum: newChemEpa.trim(),
         targetSite: newChemTarget.trim(),
         applicationRate: newChemRate.trim(),
-        customerNotice: newChemNotice.trim(),
+        customerNotices: newChemNotices.filter(n => n.trim() !== ''),
         category: newChemCategory || 'Other'
       };
       if (editingChemId) {
@@ -136,7 +136,7 @@ export default function Settings() {
       setNewChemEpa('');
       setNewChemTarget('');
       setNewChemRate('');
-      setNewChemNotice('');
+      setNewChemNotices([]);
       setNewChemCategory('Fertilizer');
     }
 
@@ -362,7 +362,7 @@ export default function Settings() {
     setNewChemEpa(chem.epaRegNum || '');
     setNewChemTarget(chem.targetSite || '');
     setNewChemRate(chem.applicationRate || '');
-    setNewChemNotice(chem.customerNotice || '');
+    setNewChemNotices(chem.customerNotices || (chem.customerNotice ? [chem.customerNotice] : []));
     setNewChemCategory(chem.category || 'Fertilizer');
   };
 
@@ -374,7 +374,7 @@ export default function Settings() {
       epaRegNum: newChemEpa.trim(),
       targetSite: newChemTarget.trim(),
       applicationRate: newChemRate.trim(),
-      customerNotice: newChemNotice.trim(),
+      customerNotices: newChemNotices.filter(n => n.trim() !== ''),
       category: newChemCategory || 'Other'
     };
     
@@ -394,7 +394,7 @@ export default function Settings() {
     setNewChemEpa('');
     setNewChemTarget('');
     setNewChemRate('');
-    setNewChemNotice('');
+    setNewChemNotices([]);
     setNewChemCategory('Fertilizer');
   };
 
@@ -889,7 +889,16 @@ export default function Settings() {
                   <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--color-primary)' }}>{chem.name} <span style={{ fontSize: '0.7rem', color: 'var(--color-text-main)', background: 'rgba(0,0,0,0.05)', padding: '2px 6px', borderRadius: '4px', marginLeft: '6px' }}>{chem.category || 'Other'}</span></div>
                   <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginTop: '0.2rem' }}>
                     EPA: {chem.epaRegNum || 'N/A'} • Target: {chem.targetSite || 'N/A'} • Rate: {chem.applicationRate || 'N/A'}
-                    {chem.customerNotice && <div>Notice: {chem.customerNotice}</div>}
+                    {chem.customerNotices && chem.customerNotices.length > 0 ? (
+                      <div style={{ marginTop: '0.2rem' }}>
+                        Instructions:
+                        <ul style={{ margin: '0.2rem 0 0 1rem', padding: 0 }}>
+                          {chem.customerNotices.map((n, i) => <li key={i}>{n}</li>)}
+                        </ul>
+                      </div>
+                    ) : chem.customerNotice ? (
+                      <div style={{ marginTop: '0.2rem' }}>Notice: {chem.customerNotice}</div>
+                    ) : null}
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: '0.2rem' }}>
@@ -930,11 +939,27 @@ export default function Settings() {
               <input type="text" className="input-field" placeholder="Target Site (e.g. Turf)" value={newChemTarget} onChange={e => setNewChemTarget(e.target.value)} style={{ flex: 1 }} />
               <input type="text" className="input-field" placeholder="Rate (e.g. 1.5oz / 1000 sqft)" value={newChemRate} onChange={e => setNewChemRate(e.target.value)} style={{ flex: 1 }} />
             </div>
-            <div style={{ display: 'flex', gap: '0.5rem' }}>
-              <input type="text" className="input-field" placeholder="Customer Notice (e.g. Keep off until dry)" value={newChemNotice} onChange={e => setNewChemNotice(e.target.value)} style={{ flex: 1 }} />
-              <button className="btn btn-secondary" onClick={saveChemical} style={{ padding: '0.4rem 0.8rem' }}>
-                {editingChemId ? <Check size={16} /> : <Plus size={16} />}
-              </button>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+              {newChemNotices.map((notice, idx) => (
+                <div key={idx} style={{ display: 'flex', gap: '0.5rem' }}>
+                  <input type="text" className="input-field" placeholder="Instruction (e.g. Keep off until dry)" value={notice} onChange={e => {
+                    const updated = [...newChemNotices];
+                    updated[idx] = e.target.value;
+                    setNewChemNotices(updated);
+                  }} style={{ flex: 1 }} />
+                  <button type="button" className="btn btn-secondary" onClick={() => setNewChemNotices(newChemNotices.filter((_, i) => i !== idx))} style={{ padding: '0.4rem 0.6rem', color: 'var(--color-danger)' }}>
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              ))}
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <button type="button" className="btn btn-secondary" onClick={() => setNewChemNotices([...newChemNotices, ''])} style={{ flex: 1, padding: '0.4rem' }}>
+                  <Plus size={16} style={{ marginRight: '0.4rem' }} /> Add Instruction
+                </button>
+                <button type="button" className="btn btn-secondary" onClick={saveChemical} style={{ padding: '0.4rem 0.8rem' }}>
+                  {editingChemId ? <Check size={16} /> : <Plus size={16} />}
+                </button>
+              </div>
             </div>
           </div>
 

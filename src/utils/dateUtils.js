@@ -14,3 +14,11 @@ export const getDaysSince = (timestamp) => {
   const past = getBusinessDayStart(new Date(timestamp));
   return Math.round((today - past) / 86400000);
 };
+
+export const formatLiveTimer = (secs) => {
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60).toString().padStart(2, '0');
+  const s = (secs % 60).toString().padStart(2, '0');
+  if (h > 0) return h + ':' + m + ':' + s;
+  return m + ':' + s;
+};

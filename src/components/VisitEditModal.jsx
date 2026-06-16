@@ -127,6 +127,29 @@ const VisitEditModal = ({ job, customer, defaultServices, onClose, onSave }) => 
       note: editingNote || undefined
     };
 
+    // Construct new service details breakdown
+    const serviceDetails = {};
+    if (editingServices.length === 1) {
+      serviceDetails[editingServices[0]] = newPrice;
+    } else if (editingServices.length > 1) {
+      // Try to match exact prices, otherwise dump all in first service
+      let sum = 0;
+      const temp = {};
+      editingServices.forEach(sId => {
+        const s = customer?.services?.find(x => x.id === sId) || defaultServices?.find(x => x.id === sId);
+        if (s) {
+          temp[sId] = s.price;
+          sum += s.price;
+        }
+      });
+      if (sum === newPrice && sum > 0) {
+        Object.assign(serviceDetails, temp);
+      } else {
+        serviceDetails[editingServices[0]] = newPrice;
+      }
+    }
+    updates.revenueBreakdown = serviceDetails;
+
     await onSave(updates);
   };
 

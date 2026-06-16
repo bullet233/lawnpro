@@ -1,13 +1,13 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/db';
-import { FileText, Download, Clock, Edit2, Save, X, ClipboardList, Trash2, CheckCircle, Calendar, List } from 'lucide-react';
 import DayReviewModal from '../components/DayReviewModal';
 import VisitEditModal from '../components/VisitEditModal';
 import AppDialog from '../components/AppDialog';
 import ComplianceLogModal from '../components/ComplianceLogModal';
 import { getSettings } from '../db/settings';
-import { getBusinessDateString, getBusinessDayStart } from '../utils/dateUtils';
+import { getBusinessDateString } from '../utils/dateUtils';
+import { calculateServiceTotals } from '../utils/revenueUtils';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const fmt = (secs) => { 
@@ -57,6 +57,7 @@ export default function History() {
   // Custom date range state
   const [customStartDate, setCustomStartDate] = useState('');
   const [customEndDate,   setCustomEndDate]   = useState('');
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
 
   useEffect(() => {
     setSettings(getSettings());
@@ -165,7 +166,8 @@ export default function History() {
     visits:   historyLog.filter(j => j.status !== 'skipped').length,
     revenue:  historyLog.reduce((s, j) => s + (j.priceEarned || 0), 0),
     totalSecs: historyLog.reduce((s, j) => s + (j.durationSecs || 0), 0),
-  }), [historyLog]);
+    serviceBreakdown: calculateServiceTotals(historyLog, allCustomers || [], settings?.defaultServices || [])
+  }), [historyLog, allCustomers, settings]);
 
   // ── Service name lookup ───────────────────────────────────────────────────
   const getServiceNames = (job) => {
@@ -197,7 +199,7 @@ export default function History() {
     let dateStr = 'unknown date';
     try {
       if (job.exitTime) dateStr = new Date(job.exitTime).toLocaleDateString();
-    } catch(e) {}
+    } catch { /* keep the 'unknown date' fallback */ }
     
     setDialog({
       type: 'danger',
@@ -245,27 +247,15 @@ export default function History() {
   };
 
   // ── Status filter pill style helper ───────────────────────────────────────
-  const statusPillStyle = (value) => ({
+  const pillStyle = (isActive) => ({
     padding: '0.3rem 0.7rem',
     fontSize: '0.75rem',
     fontWeight: 600,
     borderRadius: '999px',
     cursor: 'pointer',
-    border: statusFilter === value ? '1px solid var(--color-primary)' : '1px solid var(--color-border)',
-    background: statusFilter === value ? 'rgba(16,185,129,0.12)' : 'var(--color-bg-card)',
-    color: statusFilter === value ? 'var(--color-primary)' : 'var(--color-text-muted)',
-    transition: 'all 0.15s',
-  });
-
-  const timePillStyle = (value) => ({
-    padding: '0.3rem 0.7rem',
-    fontSize: '0.75rem',
-    fontWeight: 600,
-    borderRadius: '999px',
-    cursor: 'pointer',
-    border: timeFilter === value ? '1px solid var(--color-primary)' : '1px solid var(--color-border)',
-    background: timeFilter === value ? 'rgba(16,185,129,0.12)' : 'var(--color-bg-card)',
-    color: timeFilter === value ? 'var(--color-primary)' : 'var(--color-text-muted)',
+    border: isActive ? '1px solid var(--color-primary)' : '1px solid var(--color-border)',
+    background: isActive ? 'rgba(16,185,129,0.12)' : 'var(--color-bg-card)',
+    color: isActive ? 'var(--color-primary)' : 'var(--color-text-muted)',
     transition: 'all 0.15s',
   });
 
@@ -279,16 +269,11 @@ export default function History() {
   const renderCalendar = () => {
     const year = calendarMonth.getFullYear();
     const month = calendarMonth.getMonth();
-    
-    // First day of month
     const firstDay = new Date(year, month, 1).getDay();
-    // Days in month
     const daysInMonth = new Date(year, month + 1, 0).getDate();
 
-    // Map job revenue by date string YYYY-MM-DD
     const dayStats = {};
     historyLog.forEach(job => {
-      // Create local date string safely
       const d = new Date(job.exitTime);
       const k = `${d.getFullYear()}-${(d.getMonth()+1).toString().padStart(2, '0')}-${d.getDate().toString().padStart(2, '0')}`;
       if (!dayStats[k]) dayStats[k] = { revenue: 0, count: 0 };
@@ -298,7 +283,7 @@ export default function History() {
 
     const days = [];
     for (let i = 0; i < firstDay; i++) {
-      days.push(<div key={`empty-${i}`} style={{ padding: '0.5rem', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)' }} />);
+      days.push(<div key={`empty-${i}`} style={{ padding: '0.5rem', background: 'transparent' }} />);
     }
     
     for (let d = 1; d <= daysInMonth; d++) {
@@ -336,13 +321,13 @@ export default function History() {
     }
 
     return (
-      <div className="glass-card" style={{ padding: '1rem', marginTop: '1rem', marginBottom: '2rem' }}>
+      <div style={{ padding: '1rem', background: 'var(--color-bg-main)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
           <button className="btn btn-secondary" style={{ padding: '0.4rem 0.8rem' }} onClick={() => setCalendarMonth(new Date(year, month - 1, 1))}>Prev</button>
-          <h2 style={{ fontSize: '1.2rem', margin: 0 }}>{calendarMonth.toLocaleDateString([], { month: 'long', year: 'numeric' })}</h2>
+          <h2 style={{ fontSize: '1.2rem', margin: 0, textTransform: 'uppercase', letterSpacing: '1px' }}>{calendarMonth.toLocaleDateString([], { month: 'long', year: 'numeric' })}</h2>
           <button className="btn btn-secondary" style={{ padding: '0.4rem 0.8rem' }} onClick={() => setCalendarMonth(new Date(year, month + 1, 1))}>Next</button>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '4px', textAlign: 'center', fontWeight: 700, fontSize: '0.75rem', color: 'var(--color-text-muted)', marginBottom: '0.5rem' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '4px', textAlign: 'center', fontWeight: 700, fontSize: '0.75rem', color: 'var(--color-text-muted)', marginBottom: '0.5rem', textTransform: 'uppercase' }}>
           <div>Sun</div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '4px' }}>
@@ -353,7 +338,7 @@ export default function History() {
   };
 
   return (
-    <div className="animate-fade-in" style={{ maxWidth: '800px', margin: '0 auto' }}>
+    <div className="animate-fade-in" style={{ maxWidth: '1200px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '2rem' }}>
       <AppDialog dialog={dialog} onClose={() => setDialog(null)} />
       {showDayReview && <DayReviewModal onClose={() => setShowDayReview(false)} />}
       {activeEpaJob && (
@@ -367,299 +352,380 @@ export default function History() {
         />
       )}
 
-      {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.2rem' }}>
-        <h1 className="page-title" style={{ margin: 0 }}>Job History</h1>
-        <div style={{ display: 'flex', gap: '0.6rem' }}>
-          <button className="btn btn-secondary" onClick={() => setViewMode(v => v === 'list' ? 'calendar' : 'list')} style={{ padding: '0.4rem 0.6rem' }}>
-            {viewMode === 'list' ? <Calendar size={18} /> : <List size={18} />}
-          </button>
-          <button className="btn btn-secondary" onClick={() => setShowDayReview(true)} style={{ padding: '0.4rem 0.8rem' }}>
-            <ClipboardList size={16} /> Review
-          </button>
-          <button className="btn btn-secondary" onClick={exportCSV} disabled={historyLog.length === 0} style={{ padding: '0.4rem 0.8rem' }}>
-            <Download size={16} /> CSV
-          </button>
-        </div>
-      </div>
-
-      {/* Summary Bar */}
-      {historyLog.length > 0 && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '1rem', marginBottom: '1.5rem' }}>
-          <div className="glass-card" style={{ padding: '1.2rem', textAlign: 'center', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-            <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px', marginBottom: '0.3rem', fontWeight: 700 }}>Total Visits</div>
-            <div style={{ fontWeight: 800, fontSize: '1.6rem', color: 'var(--color-text-main)', lineHeight: 1 }}>{totals.visits}</div>
-          </div>
-          <div className="glass-card" style={{ padding: '1.2rem', textAlign: 'center', display: 'flex', flexDirection: 'column', justifyContent: 'center', borderBottom: '3px solid var(--color-primary)' }}>
-            <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px', marginBottom: '0.3rem', fontWeight: 700 }}>Total Revenue</div>
-            <div style={{ fontWeight: 800, fontSize: '1.6rem', color: 'var(--color-primary)', lineHeight: 1 }}>${totals.revenue.toFixed(2)}</div>
-          </div>
-          <div className="glass-card" style={{ padding: '1.2rem', textAlign: 'center', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-            <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px', marginBottom: '0.3rem', fontWeight: 700 }}>Time in Field</div>
-            <div style={{ fontWeight: 800, fontSize: '1.6rem', color: 'var(--color-text-main)', lineHeight: 1 }}>{fmt(totals.totalSecs)}</div>
-          </div>
-        </div>
-      )}
-
-      {/* Time Filters */}
-      <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '1.2rem', flexWrap: 'wrap' }}>
-        <button style={timePillStyle('today')} onClick={() => setTimeFilter('today')}>Today</button>
-        <button style={timePillStyle('yesterday')} onClick={() => setTimeFilter('yesterday')}>Yesterday</button>
-        <button style={timePillStyle('week')} onClick={() => setTimeFilter('week')}>This Week</button>
-        <button style={timePillStyle('month')} onClick={() => setTimeFilter('month')}>This Month</button>
-        <button style={timePillStyle('all')} onClick={() => setTimeFilter('all')}>All Time</button>
-        <button style={timePillStyle('custom')} onClick={() => setTimeFilter('custom')}>Custom</button>
-      </div>
-
-      {/* Filters */}
-      <div style={{ display: 'flex', gap: '1rem', marginBottom: '0.6rem', flexWrap: 'wrap' }}>
-        <div style={{ flex: 1, minWidth: '140px' }}>
-          <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem' }}>Customer</label>
-          <select className="input-field" style={{ width: '100%', padding: '0.5rem' }} value={customerFilter} onChange={e => setCustomerFilter(e.target.value)}>
-            <option value="all">All Customers</option>
-            {allCustomers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        </div>
-        <div style={{ flex: 1, minWidth: '140px' }}>
-          <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem' }}>Service</label>
-          <select className="input-field" style={{ width: '100%', padding: '0.5rem' }} value={serviceFilter} onChange={e => setServiceFilter(e.target.value)}>
-            <option value="all">All Services</option>
-            {uniqueServiceNames.map(name => <option key={name} value={name}>{name}</option>)}
-          </select>
-        </div>
-      </div>
-
-      {/* Custom Date Range */}
-      {timeFilter === 'custom' && (
-        <div style={{ display: 'flex', gap: '1rem', marginBottom: '0.6rem', flexWrap: 'wrap' }}>
-          <div style={{ flex: 1, minWidth: '140px' }}>
-            <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem' }}>Start Date</label>
-            <input
-              type="date"
-              className="input-field"
-              style={{ width: '100%', padding: '0.5rem' }}
-              value={customStartDate}
-              onChange={e => setCustomStartDate(e.target.value)}
-            />
-          </div>
-          <div style={{ flex: 1, minWidth: '140px' }}>
-            <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem' }}>End Date</label>
-            <input
-              type="date"
-              className="input-field"
-              style={{ width: '100%', padding: '0.5rem' }}
-              value={customEndDate}
-              onChange={e => setCustomEndDate(e.target.value)}
-            />
+      <div className="no-print">
+        {/* Sleek Dashboard Header */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', borderBottom: '2px solid var(--color-border)', paddingBottom: '1rem', flexWrap: 'wrap', gap: '1rem' }}>
+          <h1 className="page-title" style={{ margin: 0, fontSize: '2rem' }}>Job History</h1>
+          <div style={{ display: 'flex', gap: '0.8rem', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', overflow: 'hidden' }}>
+              <button 
+                onClick={() => setViewMode('list')}
+                style={{ padding: '0.5rem 1rem', background: viewMode === 'list' ? 'var(--color-bg-main)' : 'transparent', border: 'none', color: viewMode === 'list' ? 'var(--color-primary)' : 'var(--color-text-muted)', fontWeight: 600, fontSize: '0.85rem', cursor: 'pointer', transition: 'all 0.15s' }}
+              >
+                List
+              </button>
+              <button 
+                onClick={() => setViewMode('calendar')}
+                style={{ padding: '0.5rem 1rem', background: viewMode === 'calendar' ? 'var(--color-bg-main)' : 'transparent', border: 'none', color: viewMode === 'calendar' ? 'var(--color-primary)' : 'var(--color-text-muted)', fontWeight: 600, fontSize: '0.85rem', cursor: 'pointer', transition: 'all 0.15s' }}
+              >
+                Calendar
+              </button>
+            </div>
+            
+            <button className="btn btn-secondary" onClick={() => setShowDayReview(true)} style={{ padding: '0.5rem 1rem', fontSize: '0.85rem', fontWeight: 600 }}>
+              Review Day
+            </button>
+            <button className="btn btn-secondary" onClick={() => window.print()} disabled={historyLog.length === 0} style={{ padding: '0.5rem 1rem', fontSize: '0.85rem', fontWeight: 600 }}>
+              Print PDF
+            </button>
+            <button className="btn btn-secondary" onClick={exportCSV} disabled={historyLog.length === 0} style={{ padding: '0.5rem 1rem', fontSize: '0.85rem', fontWeight: 600 }}>
+              Export CSV
+            </button>
           </div>
         </div>
-      )}
 
-      {/* Status Filter Pills */}
-      <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '1.2rem', flexWrap: 'wrap' }}>
-        <button style={statusPillStyle('all')} onClick={() => setStatusFilter('all')}>All</button>
-        <button style={statusPillStyle('completed')} onClick={() => setStatusFilter('completed')}>Completed</button>
-        <button style={statusPillStyle('skipped')} onClick={() => setStatusFilter('skipped')}>Skipped</button>
-      </div>
-
-      {/* Empty State */}
-      {historyLog.length === 0 && viewMode === 'list' && (
-        <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: '3rem' }}>
-          <FileText size={48} style={{ opacity: 0.4, marginBottom: '1rem', display: 'inline-block' }} />
-          <p style={{ margin: 0 }}>No jobs match this filter.</p>
-        </div>
-      )}
-
-      {/* Calendar View */}
-      {viewMode === 'calendar' && renderCalendar()}
-
-      {/* Grouped Days (paginated) */}
-      {viewMode === 'list' && paginatedDays.map(([dateStr, jobs]) => {
-        const dayRevenue = jobs.reduce((s, j) => s + (j.priceEarned || 0), 0);
-        const dayVisits  = jobs.filter(j => j.status !== 'skipped').length;
-
-        return (
-          <div key={dateStr} style={{ marginBottom: '1.5rem' }}>
-            {/* Day Header */}
-            <div style={{ 
-              position: 'sticky', 
-              top: 0, 
-              zIndex: 10, 
-              background: 'var(--glass-bg)', 
-              backdropFilter: 'blur(12px)',
-              WebkitBackdropFilter: 'blur(12px)',
-              paddingTop: '1rem',
-              display: 'flex', 
-              justifyContent: 'space-between', 
-              alignItems: 'baseline', 
-              marginBottom: '0.6rem', 
-              paddingBottom: '0.4rem', 
-              borderBottom: '1px solid var(--color-border)' 
-            }}>
-              <span style={{ fontWeight: 700, fontSize: '0.95rem', color: 'var(--color-text-main)' }}>
-                {dayLabel(dateStr)}
-              </span>
-              <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
-                {dayVisits} job{dayVisits !== 1 ? 's' : ''} · <span style={{ color: 'var(--color-primary)', fontWeight: 600 }}>${dayRevenue.toFixed(2)}</span>
-              </span>
+        {/* Mobile-First Dashboard Layout */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem', marginTop: '2rem' }}>
+          
+          {/* FILTERS SECTION */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            
+            {/* Horizontal Scrollable Time Filters */}
+            <div style={{ display: 'flex', gap: '0.5rem', overflowX: 'auto', paddingBottom: '0.5rem', WebkitOverflowScrolling: 'touch', scrollbarWidth: 'none', msOverflowStyle: 'none' }}>
+              <button style={{ ...pillStyle(timeFilter === 'today'), whiteSpace: 'nowrap', flexShrink: 0 }} onClick={() => setTimeFilter('today')}>Today</button>
+              <button style={{ ...pillStyle(timeFilter === 'yesterday'), whiteSpace: 'nowrap', flexShrink: 0 }} onClick={() => setTimeFilter('yesterday')}>Yesterday</button>
+              <button style={{ ...pillStyle(timeFilter === 'week'), whiteSpace: 'nowrap', flexShrink: 0 }} onClick={() => setTimeFilter('week')}>This Week</button>
+              <button style={{ ...pillStyle(timeFilter === 'month'), whiteSpace: 'nowrap', flexShrink: 0 }} onClick={() => setTimeFilter('month')}>This Month</button>
+              <button style={{ ...pillStyle(timeFilter === 'all'), whiteSpace: 'nowrap', flexShrink: 0 }} onClick={() => setTimeFilter('all')}>All Time</button>
+              <button style={{ ...pillStyle(timeFilter === 'custom'), whiteSpace: 'nowrap', flexShrink: 0 }} onClick={() => setTimeFilter('custom')}>Custom</button>
+              <button style={{ ...pillStyle(showAdvancedFilters), whiteSpace: 'nowrap', flexShrink: 0, marginLeft: 'auto', background: showAdvancedFilters ? 'var(--color-bg-main)' : 'transparent', border: '1px dashed var(--color-border)' }} onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}>
+                {showAdvancedFilters ? 'Hide Filters' : 'More Filters'}
+              </button>
             </div>
 
-            {/* Job Cards */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
-              {jobs.map(job => {
-                const colors       = STATUS_COLORS[job.status] || STATUS_COLORS.completed;
-                const serviceNames = getServiceNames(job);
-                const isEditing    = false; // Handled by VisitEditModal now
-                const activeServices = job.custObj?.services?.filter(s => s.active) || [];
+            {timeFilter === 'custom' && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '1rem', background: 'var(--color-bg-card)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
+                <div>
+                  <label className="input-label" style={{ display: 'block', marginBottom: '0.3rem', fontSize: '0.75rem' }}>Start Date</label>
+                  <input type="date" className="input-field" style={{ width: '100%', padding: '0.4rem' }} value={customStartDate} onChange={e => setCustomStartDate(e.target.value)} />
+                </div>
+                <div>
+                  <label className="input-label" style={{ display: 'block', marginBottom: '0.3rem', fontSize: '0.75rem' }}>End Date</label>
+                  <input type="date" className="input-field" style={{ width: '100%', padding: '0.4rem' }} value={customEndDate} onChange={e => setCustomEndDate(e.target.value)} />
+                </div>
+              </div>
+            )}
 
-                return (
-                  <div key={job.id} className="glass-card" style={{ borderLeft: `4px solid ${colors.border}`, background: 'var(--color-bg-card)', padding: '1.2rem', boxShadow: 'var(--shadow-sm)' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.8rem' }}>
-                      {/* Left: Info */}
-                      <div>
-                        <div style={{ fontWeight: 800, fontSize: '1.1rem', color: 'var(--color-text-main)' }}>{job.custName}</div>
-                        <div style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.3rem' }}>
-                          <Clock size={14} />
-                          <span style={{ fontWeight: 600 }}>{new Date(job.exitTime).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span> • 
-                          {job.entryTime
-                            ? `${fmtTime(job.entryTime)} → ${fmtTime(job.exitTime)}`
-                            : fmtTime(job.exitTime)
-                          }
-                        </div>
-                      </div>
-
-                      {/* Right: Price + Status */}
-                      <div style={{ textAlign: 'right' }}>
-                        {(() => {
-                          let priceColor = job.status === 'skipped' ? 'var(--color-text-muted)' : 'var(--color-primary)';
-                          if (job.status !== 'skipped' && settings) {
-                            const totalMinutes = ((job.durationSecs || 0) + (job.driveTimeSecs || 0)) / 60;
-                            if (totalMinutes > 0) {
-                              const targetCharge = (totalMinutes / 60) * settings.targetHourlyRate;
-                              if (job.priceEarned < targetCharge) {
-                                const underpaidTarget = (totalMinutes / 60) * settings.rateUnderpaidThreshold;
-                                priceColor = (job.priceEarned < underpaidTarget) ? '#ef4444' : '#f59e0b';
-                              }
-                            }
-                          }
-                          return (
-                            <div style={{ fontWeight: 800, color: priceColor, fontSize: '1.3rem' }}>
-                              ${job.priceEarned.toFixed(2)}
-                            </div>
-                          );
-                        })()}
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.4rem' }}>
-                          <span style={{ fontSize: '0.75rem', padding: '3px 10px', borderRadius: '999px', backgroundColor: colors.bg, color: colors.border, textTransform: 'capitalize', fontWeight: 700 }}>
-                            {job.status}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Services & Weather */}
-                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
-                      {serviceNames.map(name => (
-                        <span key={name} style={{ padding: '4px 12px', fontSize: '0.8rem', borderRadius: '999px', background: 'rgba(16,185,129,0.1)', color: 'var(--color-primary)', fontWeight: 600 }}>
-                          {name}
-                        </span>
-                      ))}
-                      {job.addOns?.map(addon => (
-                        <span key={addon.id} style={{ padding: '4px 12px', fontSize: '0.8rem', borderRadius: '999px', background: 'rgba(59,130,246,0.1)', color: '#3b82f6', fontWeight: 600 }}>
-                          + {addon.name}
-                        </span>
-                      ))}
-                      {job.weather && (
-                        <span style={{ fontSize: '0.8rem', padding: '4px 12px', borderRadius: '999px', background: 'var(--color-bg-main)', border: '1px solid var(--color-border)', color: 'var(--color-text-muted)' }}>
-                          {job.weather.temp}°F
-                        </span>
-                      )}
-                      {serviceNames.some(n => n?.toLowerCase().match(/(fertilizer|weed|spray|chem)/)) && (
-                        <button 
-                          onClick={() => setActiveEpaJob(job)}
-                          style={{ fontSize: '0.75rem', padding: '0.2rem 0.6rem', background: 'var(--color-primary-light)', color: 'var(--color-primary)', border: 'none', borderRadius: '999px', cursor: 'pointer', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.3rem' }}
-                        >
-                          <ClipboardList size={14} />
-                          {job.complianceLog ? 'View EPA Log' : 'Add EPA Log'}
-                        </button>
-                      )}
-                    </div>
-
-                    {/* Note */}
-                    {job.note && (
-                      <div style={{ padding: '0.8rem 1rem', background: 'rgba(245,158,11,0.05)', borderLeft: '3px solid #f59e0b', borderRadius: 'var(--radius-sm)', fontSize: '0.9rem', color: 'var(--color-text-main)', marginBottom: '1rem' }}>
-                        {job.note}
-                      </div>
-                    )}
-
-                    {/* Bottom Row: Breakdown & Actions */}
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', borderTop: '1px solid var(--color-border)', paddingTop: '1rem', flexWrap: 'wrap', gap: '1rem' }}>
-                      
-                      {/* Time & Target Breakdown */}
-                      {settings && job.status !== 'skipped' ? (
-                        <div style={{ display: 'flex', gap: '1.5rem', fontSize: '0.8rem', color: 'var(--color-text-main)', background: 'var(--color-bg-main)', padding: '0.6rem 1rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
-                          <div style={{ display: 'flex', flexDirection: 'column' }}>
-                            <span style={{ color: 'var(--color-text-muted)', fontSize: '0.7rem', textTransform: 'uppercase', fontWeight: 600 }}>Drive</span>
-                            <span style={{ fontWeight: 600, marginTop: '2px' }}>{fmt(job.driveTimeSecs || 0)}</span>
-                            <span style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>${(((job.driveTimeSecs || 0) / 3600) * settings.targetHourlyRate).toFixed(2)}</span>
-                          </div>
-                          <div style={{ display: 'flex', flexDirection: 'column' }}>
-                            <span style={{ color: 'var(--color-text-muted)', fontSize: '0.7rem', textTransform: 'uppercase', fontWeight: 600 }}>Job</span>
-                            <span style={{ fontWeight: 600, marginTop: '2px' }}>{fmt(job.durationSecs || 0)}</span>
-                            <span style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>${(((job.durationSecs || 0) / 3600) * settings.targetHourlyRate).toFixed(2)}</span>
-                          </div>
-                          <div style={{ width: '1px', background: 'var(--color-border)', margin: '0.2rem 0' }} />
-                          <div style={{ display: 'flex', flexDirection: 'column' }}>
-                            <span style={{ color: 'var(--color-text-muted)', fontSize: '0.7rem', textTransform: 'uppercase', fontWeight: 600 }}>Total</span>
-                            <span style={{ fontWeight: 800, color: 'var(--color-text-main)', marginTop: '2px' }}>{fmt((job.driveTimeSecs || 0) + (job.durationSecs || 0))}</span>
-                            <span style={{ fontWeight: 800, color: 'var(--color-text-main)', marginTop: '2px' }}>${((((job.driveTimeSecs || 0) + (job.durationSecs || 0)) / 3600) * settings.targetHourlyRate).toFixed(2)}</span>
-                          </div>
-                        </div>
-                      ) : <div />} {/* Empty div to maintain flex space-between if no breakdown */}
-
-                      {/* Actions */}
-                      {!isEditing && (
-                        <div style={{ display: 'flex', gap: '0.5rem' }}>
-                          {job.status !== 'skipped' && (
-                            <button className="btn btn-secondary" style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }} onClick={() => handleEditClick(job)}>
-                              <Edit2 size={14} /> Edit
-                            </button>
-                          )}
-                          <button className="btn btn-secondary" style={{ padding: '0.5rem 1rem', fontSize: '0.85rem', color: '#ef4444', borderColor: 'rgba(239,68,68,0.3)' }} onClick={() => handleDelete(job)}>
-                            <Trash2 size={14} /> Delete
-                          </button>
-                        </div>
-                      )}
-                    </div>
+            {/* Collapsible Advanced Filters */}
+            {showAdvancedFilters && (
+              <div className="animate-fade-in" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1.5rem', background: 'var(--color-bg-card)', padding: '1.2rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+                <div>
+                  <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '1px' }}>Customer</label>
+                  <select className="input-field" style={{ width: '100%', padding: '0.5rem' }} value={customerFilter} onChange={e => setCustomerFilter(e.target.value)}>
+                    <option value="all">All Customers</option>
+                    {allCustomers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '1px' }}>Service</label>
+                  <select className="input-field" style={{ width: '100%', padding: '0.5rem' }} value={serviceFilter} onChange={e => setServiceFilter(e.target.value)}>
+                    <option value="all">All Services</option>
+                    {uniqueServiceNames.map(name => <option key={name} value={name}>{name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '1px' }}>Status</label>
+                  <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                    <button style={pillStyle(statusFilter === 'all')} onClick={() => setStatusFilter('all')}>All</button>
+                    <button style={pillStyle(statusFilter === 'completed')} onClick={() => setStatusFilter('completed')}>Completed</button>
+                    <button style={pillStyle(statusFilter === 'skipped')} onClick={() => setStatusFilter('skipped')}>Skipped</button>
                   </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* MAIN CONTENT */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+            
+            {/* Summary Bar */}
+            {historyLog.length > 0 && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '1rem', marginBottom: '2rem' }}>
+                <div style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', padding: '1.2rem', textAlign: 'center', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+                  <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px', marginBottom: '0.3rem', fontWeight: 700 }}>Total Visits</div>
+                  <div style={{ fontWeight: 800, fontSize: '1.6rem', color: 'var(--color-text-main)', lineHeight: 1 }}>{totals.visits}</div>
+                </div>
+                <div style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-primary)', borderBottom: '4px solid var(--color-primary)', borderRadius: 'var(--radius-md)', padding: '1.2rem', textAlign: 'center', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+                  <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px', marginBottom: '0.3rem', fontWeight: 700 }}>Total Revenue</div>
+                  <div style={{ fontWeight: 800, fontSize: '1.6rem', color: 'var(--color-primary)', lineHeight: 1, marginBottom: '0.5rem' }}>${totals.revenue.toFixed(2)}</div>
+                  {Object.keys(totals.serviceBreakdown || {}).length > 0 && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', borderTop: '1px solid rgba(16,185,129,0.2)', paddingTop: '0.5rem', marginTop: '0.2rem' }}>
+                      {Object.entries(totals.serviceBreakdown).sort((a, b) => b[1] - a[1]).map(([sId, amt]) => {
+                        const sName = settings?.defaultServices?.find(s => s.id === sId)?.name || sId;
+                        return (
+                          <div key={sId} style={{ fontSize: '0.75rem', display: 'flex', justifyContent: 'space-between', color: 'var(--color-text-main)' }}>
+                            <span style={{ opacity: 0.8 }}>{sName}</span>
+                            <span style={{ fontWeight: 600 }}>${amt.toFixed(2)}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+                <div style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', padding: '1.2rem', textAlign: 'center', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+                  <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px', marginBottom: '0.3rem', fontWeight: 700 }}>Time in Field</div>
+                  <div style={{ fontWeight: 800, fontSize: '1.6rem', color: 'var(--color-text-main)', lineHeight: 1 }}>{fmt(totals.totalSecs)}</div>
+                </div>
+              </div>
+            )}
+
+            {/* Empty State */}
+            {historyLog.length === 0 && viewMode === 'list' && (
+              <div style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: '4rem 2rem', border: '1px dashed var(--color-border)', borderRadius: 'var(--radius-md)' }}>
+                <p style={{ margin: 0, fontSize: '1.1rem', fontWeight: 600 }}>No jobs match these filters.</p>
+                <p style={{ fontSize: '0.9rem', opacity: 0.7, marginTop: '0.5rem' }}>Try adjusting your time range or customer selection.</p>
+              </div>
+            )}
+
+            {/* Calendar View */}
+            {viewMode === 'calendar' && renderCalendar()}
+
+            {/* Grouped Days (List View) */}
+            {viewMode === 'list' && paginatedDays.map(([dateStr, jobs]) => {
+              const dayRevenue = jobs.reduce((s, j) => s + (j.priceEarned || 0), 0);
+              const dayVisits  = jobs.filter(j => j.status !== 'skipped').length;
+
+              return (
+                <div key={dateStr} style={{ marginBottom: '2.5rem' }}>
+                  {/* Sleek Day Header */}
+                  <div style={{ 
+                    position: 'sticky', 
+                    top: 0, 
+                    zIndex: 10, 
+                    background: 'var(--color-bg-main)', 
+                    paddingTop: '1rem',
+                    display: 'flex', 
+                    justifyContent: 'space-between', 
+                    alignItems: 'baseline', 
+                    marginBottom: '1rem', 
+                    paddingBottom: '0.5rem', 
+                    borderBottom: '2px solid var(--color-border)' 
+                  }}>
+                    <span style={{ fontWeight: 800, fontSize: '1.1rem', color: 'var(--color-text-main)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                      {dayLabel(dateStr)}
+                    </span>
+                    <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>
+                      {dayVisits} job{dayVisits !== 1 ? 's' : ''} <span style={{ margin: '0 0.5rem' }}>•</span> <span style={{ color: 'var(--color-primary)' }}>${dayRevenue.toFixed(2)}</span>
+                    </span>
+                  </div>
+
+                  {/* Job Tickets List */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
+                    {jobs.map(job => {
+                      const colors       = STATUS_COLORS[job.status] || STATUS_COLORS.completed;
+                      const serviceNames = getServiceNames(job);
+                      
+                      let priceColor = job.status === 'skipped' ? 'var(--color-text-muted)' : 'var(--color-text-main)';
+                      if (job.status !== 'skipped' && settings) {
+                        const totalMinutes = ((job.durationSecs || 0) + (job.driveTimeSecs || 0)) / 60;
+                        if (totalMinutes > 0) {
+                          const targetCharge = (totalMinutes / 60) * settings.targetHourlyRate;
+                          if (job.priceEarned < targetCharge) {
+                            const underpaidTarget = (totalMinutes / 60) * settings.rateUnderpaidThreshold;
+                            priceColor = (job.priceEarned < underpaidTarget) ? '#ef4444' : '#f59e0b';
+                          }
+                        }
+                      }
+
+                      return (
+                        <div key={job.id} style={{ 
+                          display: 'flex', 
+                          flexDirection: 'column',
+                          background: 'var(--color-bg-card)', 
+                          border: '1px solid var(--color-border)', 
+                          borderLeft: `4px solid ${colors.border}`, 
+                          padding: '1.2rem', 
+                          borderRadius: 'var(--radius-sm)',
+                          boxShadow: 'var(--shadow-sm)'
+                        }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '1rem' }}>
+                            
+                            {/* Left: Info */}
+                            <div style={{ flex: '1 1 300px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.4rem' }}>
+                                <span style={{ fontWeight: 800, fontSize: '1.1rem', color: 'var(--color-text-main)' }}>{job.custName}</span>
+                                <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>
+                                  {job.entryTime ? `${fmtTime(job.entryTime)} → ${fmtTime(job.exitTime)}` : fmtTime(job.exitTime)}
+                                </span>
+                              </div>
+                              
+                              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                                {serviceNames.map(name => (
+                                  <span key={name} style={{ padding: '0.1rem 0.6rem', fontSize: '0.75rem', borderRadius: '999px', background: 'var(--color-bg-main)', border: '1px solid var(--color-border)', color: 'var(--color-text-main)', fontWeight: 600 }}>
+                                    {name}
+                                  </span>
+                                ))}
+                                {job.addOns?.map(addon => (
+                                  <span key={addon.id} style={{ padding: '0.1rem 0.6rem', fontSize: '0.75rem', borderRadius: '999px', background: 'var(--color-bg-main)', border: '1px solid var(--color-border)', color: 'var(--color-text-main)', fontWeight: 600 }}>
+                                    + {addon.name}
+                                  </span>
+                                ))}
+                                {job.weather && (
+                                  <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', fontWeight: 600, marginLeft: '0.4rem' }}>
+                                    {job.weather.temp}°F
+                                  </span>
+                                )}
+                              </div>
+                              
+                              {/* Sleek inline breakdown */}
+                              {settings && job.status !== 'skipped' && (
+                                <div style={{ display: 'flex', gap: '0.6rem', marginTop: '1rem', flexWrap: 'wrap' }}>
+                                  
+                                  {/* Drive Box */}
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.3rem 0.6rem', background: 'var(--color-bg-main)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)' }}>
+                                    <span style={{ fontSize: '0.65rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', fontWeight: 800, letterSpacing: '0.5px' }}>Drive</span>
+                                    <span style={{ fontSize: '0.75rem', color: 'var(--color-text-main)', fontWeight: 600 }}>{fmt(job.driveTimeSecs || 0)}</span>
+                                    <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>•</span>
+                                    <span style={{ fontSize: '0.75rem', color: 'var(--color-text-main)', fontWeight: 800 }}>${(((job.driveTimeSecs || 0) / 3600) * settings.targetHourlyRate).toFixed(2)}</span>
+                                  </div>
+
+                                  {/* Job Box */}
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.3rem 0.6rem', background: 'var(--color-bg-main)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)' }}>
+                                    <span style={{ fontSize: '0.65rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', fontWeight: 800, letterSpacing: '0.5px' }}>Job</span>
+                                    <span style={{ fontSize: '0.75rem', color: 'var(--color-text-main)', fontWeight: 600 }}>{fmt(job.durationSecs || 0)}</span>
+                                    <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>•</span>
+                                    <span style={{ fontSize: '0.75rem', color: 'var(--color-text-main)', fontWeight: 800 }}>${(((job.durationSecs || 0) / 3600) * settings.targetHourlyRate).toFixed(2)}</span>
+                                  </div>
+
+                                  {/* Total Box */}
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.3rem 0.6rem', background: 'rgba(16,185,129,0.05)', border: '1px solid rgba(16,185,129,0.2)', borderRadius: 'var(--radius-sm)' }}>
+                                    <span style={{ fontSize: '0.65rem', textTransform: 'uppercase', color: 'var(--color-primary)', fontWeight: 800, letterSpacing: '0.5px' }}>Total</span>
+                                    <span style={{ fontSize: '0.75rem', color: 'var(--color-text-main)', fontWeight: 600 }}>{fmt((job.driveTimeSecs || 0) + (job.durationSecs || 0))}</span>
+                                    <span style={{ fontSize: '0.75rem', color: 'rgba(16,185,129,0.3)' }}>•</span>
+                                    <span style={{ fontSize: '0.75rem', color: 'var(--color-primary)', fontWeight: 800 }}>${((((job.driveTimeSecs || 0) + (job.durationSecs || 0)) / 3600) * settings.targetHourlyRate).toFixed(2)}</span>
+                                  </div>
+
+                                </div>
+                              )}
+                              
+                              {/* Note */}
+                              {job.note && (
+                                <div style={{ padding: '0.6rem 0.8rem', background: 'rgba(245,158,11,0.05)', borderLeft: '2px solid #f59e0b', borderRadius: 'var(--radius-sm)', fontSize: '0.85rem', color: 'var(--color-text-main)', marginTop: '0.8rem' }}>
+                                  {job.note}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Right: Revenue, Status, Actions */}
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', minWidth: '120px' }}>
+                              <div style={{ fontWeight: 800, color: priceColor, fontSize: '1.4rem', lineHeight: 1, marginBottom: '0.4rem' }}>
+                                ${job.priceEarned.toFixed(2)}
+                              </div>
+                              
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+                                {serviceNames.some(n => n?.toLowerCase().match(/(fertilizer|weed|spray|chem)/)) && (
+                                  <button 
+                                    onClick={() => setActiveEpaJob(job)}
+                                    style={{ fontSize: '0.7rem', padding: '0.1rem 0.5rem', background: 'transparent', color: 'var(--color-primary)', border: '1px solid var(--color-primary)', borderRadius: '999px', cursor: 'pointer', fontWeight: 700, textTransform: 'uppercase' }}
+                                  >
+                                    {job.complianceLog ? 'EPA' : '+ EPA'}
+                                  </button>
+                                )}
+                                <span style={{ fontSize: '0.7rem', padding: '0.1rem 0.6rem', borderRadius: '999px', backgroundColor: colors.bg, color: colors.border, textTransform: 'uppercase', fontWeight: 800, letterSpacing: '0.5px' }}>
+                                  {job.status}
+                                </span>
+                              </div>
+
+                              <div style={{ display: 'flex', gap: '0.6rem', fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                                {job.status !== 'skipped' && (
+                                  <button 
+                                    onClick={() => handleEditClick(job)}
+                                    style={{ background: 'transparent', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', color: 'var(--color-text-main)', cursor: 'pointer', padding: '0.3rem 0.8rem', transition: 'all 0.15s' }}
+                                    onMouseOver={e => { e.target.style.background = 'var(--color-bg-main)'; e.target.style.borderColor = 'var(--color-text-muted)'; }}
+                                    onMouseOut={e => { e.target.style.background = 'transparent'; e.target.style.borderColor = 'var(--color-border)'; }}
+                                  >
+                                    Edit
+                                  </button>
+                                )}
+                                <button 
+                                  onClick={() => handleDelete(job)}
+                                  style={{ background: 'transparent', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', color: 'var(--color-text-main)', cursor: 'pointer', padding: '0.3rem 0.8rem', transition: 'all 0.15s' }}
+                                  onMouseOver={e => { e.target.style.background = 'rgba(239,68,68,0.1)'; e.target.style.color = '#ef4444'; e.target.style.borderColor = 'rgba(239,68,68,0.3)'; }}
+                                  onMouseOut={e => { e.target.style.background = 'transparent'; e.target.style.color = 'var(--color-text-main)'; e.target.style.borderColor = 'var(--color-border)'; }}
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </div>
+
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+
+            {/* Pagination Button */}
+            {viewMode === 'list' && hasMore && (
+              <div style={{ textAlign: 'center', marginTop: '1rem', marginBottom: '2rem' }}>
+                <button
+                  className="btn btn-secondary"
+                  style={{ padding: '0.6rem 2rem', fontSize: '0.85rem', fontWeight: 600 }}
+                  onClick={() => setCurrentPage(p => p + 1)}
+                >
+                  Show More ({totalVisibleJobs} of {historyLog.length})
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {editingJob && (
+          <VisitEditModal
+            job={editingJob}
+            customer={allCustomers.find(c => c.id === editingJob.customerId)}
+            defaultServices={settings?.defaultServices}
+            onClose={() => setEditingJob(null)}
+            onSave={handleSaveEdit}
+          />
+        )}
+      </div>
+
+      {/* ── PDF Print Report (Hidden outside of print) ── */}
+      <div className="print-only">
+        <div className="print-header">
+          <h1>Service Report</h1>
+          <p>{timeFilter === 'all' ? 'All Time' : new Date().toLocaleDateString()}</p>
+        </div>
+        
+        {Object.entries(
+          historyLog.reduce((acc, job) => {
+            if (!acc[job.custName]) acc[job.custName] = [];
+            acc[job.custName].push(job);
+            return acc;
+          }, {})
+        ).sort((a, b) => a[0].localeCompare(b[0])).map(([custName, jobs]) => (
+          <div key={custName} className="print-customer-section" style={{ borderBottom: '1px solid #ccc', paddingBottom: '0.8rem', marginBottom: '1rem', pageBreakInside: 'avoid' }}>
+            <strong style={{ fontSize: '1.1rem', display: 'block', marginBottom: '0.3rem' }}>{custName}</strong>
+            <div style={{ fontSize: '0.95rem', lineHeight: '1.4' }}>
+              {jobs.slice().sort((a, b) => a.exitTime - b.exitTime).map(job => {
+                const date = new Date(job.exitTime).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' });
+                const svcs = job.status === 'skipped' 
+                  ? 'Skipped' 
+                  : [getServiceNames(job).join(', '), job.addOns?.map(a => '+' + a.name).join(', ')].filter(Boolean).join(' ');
+                
+                return (
+                  <span key={job.id} style={{ display: 'inline-block', marginRight: '1rem', whiteSpace: 'nowrap', color: job.status === 'skipped' ? '#999' : 'inherit' }}>
+                    <strong>{date}:</strong> {svcs}
+                  </span>
                 );
               })}
             </div>
           </div>
-        );
-      })}
-
-      {/* Show More Pagination Button */}
-      {viewMode === 'list' && hasMore && (
-        <div style={{ textAlign: 'center', marginTop: '1rem', marginBottom: '1.5rem' }}>
-          <button
-            className="btn btn-secondary"
-            style={{ padding: '0.6rem 2rem', fontSize: '0.85rem', fontWeight: 600 }}
-            onClick={() => setCurrentPage(p => p + 1)}
-          >
-            Show More ({totalVisibleJobs} of {historyLog.length})
-          </button>
-        </div>
-      )}
-
-      {editingJob && (
-        <VisitEditModal
-          job={editingJob}
-          customer={allCustomers.find(c => c.id === editingJob.customerId)}
-          defaultServices={settings?.defaultServices}
-          onClose={() => setEditingJob(null)}
-          onSave={handleSaveEdit}
-        />
-      )}
+        ))}
+      </div>
     </div>
   );
 }

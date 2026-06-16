@@ -4,6 +4,7 @@ import { db } from '../db/db';
 import { Link, useNavigate } from 'react-router-dom';
 import DayReviewModal from '../components/DayReviewModal';
 import { getBusinessDayStart, getDaysSince } from '../utils/dateUtils';
+import { getVisitRevenueBreakdown, calculateServiceTotals } from '../utils/revenueUtils';
 import { getSettings } from '../db/settings';
 import { Plus, Sunrise, Sun, Moon, Settings as SettingsIcon, Map as MapIcon, Route as RouteIcon, ClipboardList, Thermometer, CloudSun, CloudRain, Cloud, Users, AlertTriangle, TrendingUp, CheckCircle } from 'lucide-react';
 
@@ -216,8 +217,10 @@ export default function Dashboard() {
   const stats = useMemo(() => {
     const revenue = todayVisits.reduce((sum, v) => sum + (v.priceEarned || 0), 0);
     const duration = todayVisits.reduce((sum, v) => sum + (v.durationSecs || 0), 0);
-    return { visits: todayVisits.length, revenue, duration };
-  }, [todayVisits]);
+    const currentSettings = getSettings();
+    const serviceBreakdown = calculateServiceTotals(todayVisits, allCustomers || [], currentSettings?.defaultServices || []);
+    return { visits: todayVisits.length, revenue, duration, serviceBreakdown, settings: currentSettings };
+  }, [todayVisits, allCustomers]);
 
   // Weekly earnings data (last 7 days)
   const weeklyData = useMemo(() => {
@@ -376,6 +379,7 @@ export default function Dashboard() {
         </div>
       )}
 
+
       {/* Header */}
       <div style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem' }}>
@@ -452,8 +456,22 @@ export default function Dashboard() {
       <h3 style={{ margin: '0 0 0.8rem 0', color: 'var(--color-text-main)', fontSize: '1rem', fontWeight: 600 }}>Today's Overview</h3>
       <div className="glass-card" style={{ display: 'flex', justifyContent: 'space-between', padding: '1rem', marginBottom: '1.5rem' }}>
         <div style={{ textAlign: 'center', flex: 1 }}>
-          <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px', marginBottom: '0.2rem' }}>Revenue</div>
-          <div style={{ fontWeight: 700, fontSize: '1.1rem', color: 'var(--color-primary)' }}>${stats.revenue.toFixed(0)}</div>
+          <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px', marginBottom: '0.2rem' }}>Total Revenue</div>
+          <div style={{ fontWeight: 700, fontSize: '1.1rem', color: 'var(--color-primary)', marginBottom: '0.4rem' }}>${stats.revenue.toFixed(0)}</div>
+          
+          {Object.keys(stats.serviceBreakdown || {}).length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', alignItems: 'center' }}>
+              {Object.entries(stats.serviceBreakdown).sort((a, b) => b[1] - a[1]).map(([sId, amt]) => {
+                const sName = stats.settings?.defaultServices?.find(s => s.id === sId)?.name || sId;
+                return (
+                  <div key={sId} style={{ fontSize: '0.75rem', display: 'flex', justifyContent: 'space-between', width: '100%', maxWidth: '120px' }}>
+                    <span style={{ color: 'var(--color-text-muted)' }}>{sName}</span>
+                    <span style={{ color: 'var(--color-text-main)', fontWeight: 600 }}>${amt.toFixed(0)}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
         <div style={{ width: '1px', background: 'var(--color-border)', margin: '0 0.5rem' }} />
         <div style={{ textAlign: 'center', flex: 1 }}>

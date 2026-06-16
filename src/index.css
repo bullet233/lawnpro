@@ -97,6 +97,14 @@ body {
   transition: all var(--transition-fast);
   border: none;
   font-size: 0.95rem;
+  outline: none;
+}
+
+.btn:focus-visible,
+.btn-icon:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
 }
 
 .btn:hover {
@@ -196,6 +204,16 @@ body {
   padding-bottom: 5rem; /* Space for bottom nav */
   margin: 0 auto;
   width: 100%;
+}
+
+.page-container.live-mode {
+  padding: 0;
+  padding-bottom: 64px; /* Space for the bottom nav */
+  height: 100vh;
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  flex-direction: column;
 }
 
 .page-title {
@@ -436,3 +454,59 @@ body.sun-mode .sun-toggle {
   box-shadow: 0 0 12px rgba(251,191,36,0.5);
 }
 
+/* ── Print Styles (PDF Reports) ─────────────────────────────────────────── */
+@media print {
+  body { background: white !important; color: black !important; }
+  .bottom-nav, .sun-toggle, .btn, .tab-bar, select, input[type='date'], .no-print {
+    display: none !important;
+  }
+  
+  .glass-card, .card {
+    box-shadow: none !important;
+    border: none !important;
+    backdrop-filter: none !important;
+    background: transparent !important;
+    padding: 0 !important;
+  }
+
+  .print-only {
+    display: block !important;
+  }
+
+  .print-customer-section {
+    page-break-inside: avoid;
+    margin-bottom: 2.5rem;
+  }
+
+  .print-header {
+    text-align: center;
+    margin-bottom: 2rem;
+    padding-bottom: 1rem;
+    border-bottom: 2px solid #000;
+  }
+
+  .print-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 0.5rem;
+    font-size: 0.9rem;
+  }
+  
+  .print-table th, .print-table td {
+    text-align: left;
+    padding: 0.5rem;
+    border-bottom: 1px solid #ccc;
+  }
+  
+  .print-table th {
+    font-weight: 700;
+    color: #333;
+    border-bottom: 2px solid #000;
+  }
+}
+
+@media screen {
+  .print-only {
+    display: none !important;
+  }
+}

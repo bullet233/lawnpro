@@ -1,13 +1,16 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { CheckCircle, AlertCircle, Info } from 'lucide-react';
 
 export default function Toast() {
   const [toasts, setToasts] = useState([]);
+  const nextIdRef = useRef(0);
 
   useEffect(() => {
     const handleToast = (e) => {
       const { message, type } = e.detail;
-      const id = Date.now();
+      // Monotonic counter (not Date.now()) so toasts fired in the same millisecond
+      // get unique keys and don't collide / get removed together.
+      const id = nextIdRef.current++;
       setToasts(prev => [...prev, { id, message, type }]);
 
       setTimeout(() => {

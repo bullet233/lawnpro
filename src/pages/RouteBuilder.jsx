@@ -1,13 +1,14 @@
 import { useState, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/db';
-import { GoogleMap, Polyline } from '@react-google-maps/api';
+import { GoogleMap, Polyline, Marker } from '@react-google-maps/api';
 import { useMapStatus } from '../components/MapProvider';
 import { Plus, Save, Trash2, ChevronDown, ChevronUp, BookMarked, FolderOpen, GripVertical, Shuffle, Map as MapIcon, Calendar, Route as RouteIcon } from 'lucide-react';
 import AppDialog from '../components/AppDialog';
 import { trackApiCall } from '../utils/apiTracker';
 import WeeklyScheduler from '../components/WeeklyScheduler';
 import { calculateTieredMatrix, parseLawnSizeToSqFt } from '../utils/matrix';
+import { getSettings } from '../db/settings';
 
 const mapContainerStyle = { width: '100%', height: '300px', borderRadius: 'var(--radius-md)', marginTop: '1rem' };
 
@@ -15,7 +16,7 @@ export default function RouteBuilder() {
   const customers   = useLiveQuery(() => db.customers.toArray(), []);
   const templates   = useLiveQuery(() => db.routes.where({ isTemplate: 1 }).toArray(), []);
   const allVisits   = useLiveQuery(() => db.visits.toArray(), []);
-  const settings    = useLiveQuery(() => db.settings.get('config'), []) || {};
+  const settings    = getSettings();
 
   const tieredMatrixData = useMemo(() => calculateTieredMatrix(allVisits, customers), [allVisits, customers]);
 
@@ -55,9 +56,20 @@ export default function RouteBuilder() {
 
   // ── Stop management ──────────────────────────────────────────────────────────
   const addStop = (customer) => {
-    const defaultIds = customer.services
-      ? customer.services.filter(s => s.active).slice(0, 1).map(s => s.id)
-      : [];
+    let defaultIds = [];
+    if (customer.services) {
+      if (customerTab === 'fertilizer') {
+        const fertService = customer.services.find(s => s.active && s.name && s.name.toLowerCase().includes('fertil'));
+        if (fertService) defaultIds = [fertService.id];
+      } else if (customerTab === 'mowing') {
+        const mowService = customer.services.find(s => s.active && s.name && s.name.toLowerCase().includes('mow'));
+        if (mowService) defaultIds = [mowService.id];
+      }
+      
+      if (defaultIds.length === 0) {
+        defaultIds = customer.services.filter(s => s.active).slice(0, 1).map(s => s.id);
+      }
+    }
     setSelectedStops(prev => [...prev, { customer, plannedServiceIds: defaultIds, expanded: false }]);
   };
 
@@ -393,376 +405,317 @@ export default function RouteBuilder() {
       )}
 
       {activeTab === 'build' && (
-        <>
-      {templates && templates.length > 0 && (
-        <div className="glass-card" style={{ marginBottom: '1.5rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }} onClick={() => setShowTemplates(!showTemplates)}>
-            <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <BookMarked size={18} color="var(--color-primary)" /> Saved Templates ({templates.length})
-            </h3>
-            {showTemplates ? <ChevronUp size={20} color="var(--color-text-muted)" /> : <ChevronDown size={20} color="var(--color-text-muted)" />}
-          </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', alignItems: 'start' }}>
           
-          {showTemplates && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '1rem', borderTop: '1px solid var(--color-border)', paddingTop: '1rem' }}>
-              {templates.map(t => (
-                <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', padding: '0.6rem 0.8rem', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{t.name}</div>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>
-                      {t.stops?.length ?? 0} stop{t.stops?.length !== 1 ? 's' : ''}
-                    </div>
-                  </div>
-                  <button
-                    className="btn btn-secondary"
-                    style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}
-                    onClick={(e) => { e.stopPropagation(); handleLoadTemplate(t); }}
-                  >
-                    <FolderOpen size={14} /> Load
-                  </button>
-                  <button
-                    className="btn-icon"
-                    style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: '4px' }}
-                    onClick={(e) => { e.stopPropagation(); handleDeleteTemplate(t); }}
-                  >
-                    <Trash2 size={15} />
-                  </button>
+          {/* COLUMN 1: Templates & Available Clients */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+            
+            {/* Templates Accordion */}
+            {templates && templates.length > 0 && (
+              <div className="glass-card">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }} onClick={() => setShowTemplates(!showTemplates)}>
+                  <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.05rem' }}>
+                    <BookMarked size={16} color="var(--color-primary)" /> Saved Templates ({templates.length})
+                  </h3>
+                  {showTemplates ? <ChevronUp size={18} color="var(--color-text-muted)" /> : <ChevronDown size={18} color="var(--color-text-muted)" />}
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+                
+                {showTemplates && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '1rem', borderTop: '1px solid var(--color-border)', paddingTop: '1rem' }}>
+                    {templates.map(t => (
+                      <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', padding: '0.6rem 0.8rem', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{t.name}</div>
+                          <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>
+                            {t.stops?.length ?? 0} stop{t.stops?.length !== 1 ? 's' : ''}
+                          </div>
+                        </div>
+                        <button
+                          className="btn btn-secondary"
+                          style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}
+                          onClick={(e) => { e.stopPropagation(); handleLoadTemplate(t); }}
+                        >
+                          <FolderOpen size={14} /> Load
+                        </button>
+                        <button
+                          className="btn-icon"
+                          style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: '4px' }}
+                          onClick={(e) => { e.stopPropagation(); handleDeleteTemplate(t); }}
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(350px, 1fr))', gap: '1.5rem', alignItems: 'start' }}>
-        
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-          <div className="glass-card">
-            <label className="input-label" style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 600 }}>
-              Route Name <span style={{ fontWeight: 400, color: 'var(--color-text-muted)' }}>(optional)</span>
-            </label>
+            {/* Add Clients Panel */}
+            <div className="glass-card" style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 240px)', minHeight: '400px' }}>
+              <h3 style={{ margin: '0 0 1rem 0', fontSize: '1.1rem' }}>Available Clients</h3>
+              
+              <div style={{ display: 'flex', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-md)', padding: '0.25rem', marginBottom: '1rem' }}>
+                {['all', 'mowing', 'fertilizer'].map(tab => (
+                  <button 
+                    key={tab}
+                    onClick={() => setCustomerTab(tab)}
+                    style={{ 
+                      flex: 1,
+                      background: customerTab === tab ? 'var(--color-primary)' : 'transparent', 
+                      color: customerTab === tab ? 'white' : 'var(--color-text-muted)',
+                      border: 'none', borderRadius: 'var(--radius-sm)', padding: '0.4rem', fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer', textTransform: 'capitalize',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    {tab}
+                  </button>
+                ))}
+              </div>
+              
+              <input
+                type="text"
+                className="input-field"
+                placeholder="Search name or address..."
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                style={{ width: '100%', marginBottom: '0.8rem', borderRadius: 'var(--radius-sm)' }}
+              />
+              
+              <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '0.4rem', paddingRight: '0.2rem' }}>
+                {(() => {
+                  const q = searchQuery.toLowerCase().trim();
+                  const filtered = q 
+                    ? availableCustomers.filter(c => c.name.toLowerCase().includes(q) || (c.address || '').toLowerCase().includes(q))
+                    : availableCustomers.filter(c => {
+                        if (customerTab === 'mowing') return !c.services || c.services.find(s => s.active && s.name && s.name.toLowerCase().includes('mow'));
+                        if (customerTab === 'fertilizer') return c.services && c.services.find(s => s.active && s.name && s.name.toLowerCase().includes('fertil'));
+                        return true;
+                    });
+                    
+                  if (filtered.length === 0) return <p style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem', textAlign: 'center', marginTop: '1rem' }}>{q ? 'No matching clients.' : 'All clients added or none available.'}</p>;
+                  
+                  return filtered.map(c => (
+                    <div key={c.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.6rem 0.8rem', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', background: 'var(--color-bg-main)', transition: 'border-color 0.15s' }}>
+                      <div style={{ overflow: 'hidden' }}>
+                        <div style={{ fontWeight: 600, fontSize: '0.95rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</div>
+                        <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.address}</div>
+                      </div>
+                      <button className="btn-icon" style={{ background: 'var(--color-primary-light)', color: 'var(--color-primary)', border: 'none', cursor: 'pointer', borderRadius: '50%', padding: '0.3rem', flexShrink: 0, marginLeft: '0.5rem' }} onClick={() => { addStop(c); setSearchQuery(''); }}>
+                        <Plus size={16} strokeWidth={3} />
+                      </button>
+                    </div>
+                  ));
+                })()}
+              </div>
+            </div>
+          </div>
+
+          {/* COLUMN 2: Active Route */}
+          <div className="glass-card" style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 240px)', minHeight: '400px' }}>
             <input
               type="text"
-              className="input-field"
-              placeholder="e.g. Monday Westside, Friday Loop"
+              placeholder="Route Name (optional)"
               value={routeName}
               onChange={e => setRouteName(e.target.value)}
-              style={{ width: '100%' }}
+              style={{ width: '100%', fontSize: '1.15rem', fontWeight: 700, border: 'none', background: 'transparent', borderBottom: '2px solid var(--color-border)', borderRadius: 0, padding: '0.5rem 0', marginBottom: '1rem', color: 'var(--color-text-main)', outline: 'none' }}
             />
-          </div>
 
-          <div className="glass-card" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem' }}>
-              <h3 style={{ margin: 0 }}>Add Clients</h3>
-              <div style={{ display: 'flex', gap: '0.5rem', background: 'var(--color-bg-main)', padding: '0.2rem', borderRadius: 'var(--radius-md)', overflowX: 'auto' }}>
-                <button 
-                  onClick={() => setCustomerTab('all')}
-                  style={{ 
-                    background: customerTab === 'all' ? 'var(--color-primary)' : 'transparent', 
-                    color: customerTab === 'all' ? 'white' : 'var(--color-text-muted)',
-                    border: 'none', borderRadius: 'var(--radius-sm)', padding: '0.3rem 0.6rem', fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap'
-                  }}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+              <span style={{ fontWeight: 600, color: 'var(--color-text-muted)', fontSize: '0.9rem', textTransform: 'uppercase', letterSpacing: '0.5px' }}>{selectedStops.length} Stops</span>
+              {selectedStops.length >= 3 && (
+                <button
+                  className="btn btn-secondary"
+                  style={{ fontSize: '0.8rem', padding: '0.3rem 0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 600, borderRadius: 'var(--radius-full)' }}
+                  onClick={handleOptimizeRoute}
                 >
-                  🌍 All
+                  <Shuffle size={14} /> Optimize Order
                 </button>
-                <button 
-                  onClick={() => setCustomerTab('mowing')}
-                  style={{ 
-                    background: customerTab === 'mowing' ? 'var(--color-primary)' : 'transparent', 
-                    color: customerTab === 'mowing' ? 'white' : 'var(--color-text-muted)',
-                    border: 'none', borderRadius: 'var(--radius-sm)', padding: '0.3rem 0.6rem', fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap'
-                  }}
-                >
-                  🌾 Mowing
-                </button>
-                <button 
-                  onClick={() => setCustomerTab('fertilizer')}
-                  style={{ 
-                    background: customerTab === 'fertilizer' ? 'var(--color-primary)' : 'transparent', 
-                    color: customerTab === 'fertilizer' ? 'white' : 'var(--color-text-muted)',
-                    border: 'none', borderRadius: 'var(--radius-sm)', padding: '0.3rem 0.6rem', fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap'
-                  }}
-                >
-                  🧪 Fertilizer
-                </button>
-              </div>
-            </div>
-            
-            <input
-              type="text"
-              className="input-field"
-              placeholder="🔍 Search by name or address..."
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-              style={{ width: '100%', marginBottom: '0.8rem' }}
-            />
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '500px', overflowY: 'auto', paddingRight: '0.2rem' }}>
-              {(() => {
-                const q = searchQuery.toLowerCase().trim();
-                const filtered = q 
-                  ? availableCustomers.filter(c => c.name.toLowerCase().includes(q) || (c.address || '').toLowerCase().includes(q))
-                  : availableCustomers.filter(c => {
-                      if (customerTab === 'mowing') return !c.services || c.services.find(s => s.active && s.name && s.name.toLowerCase().includes('mow'));
-                      if (customerTab === 'fertilizer') return c.services && c.services.find(s => s.active && s.name && s.name.toLowerCase().includes('fertil'));
-                      return true;
-                  });
-                  
-                if (filtered.length === 0) return <p style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>{q ? 'No matching clients.' : 'All clients added or none available.'}</p>;
-                return filtered.map(c => (
-                  <div key={c.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.6rem 0.8rem', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', background: 'var(--color-bg-main)' }}>
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{c.name}</div>
-                      <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>{c.address}</div>
-                    </div>
-                    <button className="btn-icon" style={{ background: 'var(--color-primary-light)', color: 'var(--color-primary)', border: 'none', cursor: 'pointer' }} onClick={() => { addStop(c); setSearchQuery(''); }}>
-                      <Plus size={18} />
-                    </button>
-                  </div>
-                ));
-              })()}
-            </div>
-          </div>
-        </div>
-
-        <div className="glass-card" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.2rem' }}>
-            <h3 style={{ margin: 0, fontSize: '1.2rem' }}>
-              {routeName.trim() ? `"${routeName.trim()}"` : "Today's Route"}
-            </h3>
-            {selectedStops.length >= 3 && (
-              <button
-                className="btn btn-secondary"
-                style={{ fontSize: '0.8rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 600 }}
-                onClick={handleOptimizeRoute}
-              >
-                <Shuffle size={14} /> Optimize Order
-              </button>
-            )}
-          </div>
-          
-          <div
-            style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', flex: 1, minHeight: '300px', overflowY: 'auto', maxHeight: '60vh', paddingRight: '0.4rem' }}
-            onTouchMove={handleTouchMove}
-            onTouchEnd={handleTouchEnd}
-          >
-            {selectedStops.length === 0 && (
-              <div style={{ textAlign: 'center', color: 'var(--color-text-muted)', marginTop: '2rem', padding: '2rem' }}>
-                <p>No stops added yet.</p>
-                <p style={{ fontSize: '0.85rem' }}>Add clients from the left panel to build your route.</p>
-              </div>
-            )}
-
-            {selectedStops.map((stop, index) => {
-              const activeServices = stop.customer.services?.filter(s => s.active) || [];
-              const plannedTotal = activeServices
-                .filter(s => stop.plannedServiceIds.includes(s.id))
-                .reduce((sum, s) => sum + s.price, 0);
-
-              return (
-                <div
-                  key={stop.customer.id}
-                  ref={el => stopItemRefs.current[index] = el}
-                  draggable
-                  onDragStart={e => handleDragStart(e, index)}
-                  onDragOver={e  => handleDragOver(e, index)}
-                  onDrop={e      => handleDrop(e, index)}
-                  onDragEnd={handleDragEnd}
-                  style={{
-                    background: 'var(--color-bg-card)',
-                    borderRadius: 'var(--radius-md)',
-                    border: `1px solid ${dragOverIndex === index ? 'var(--color-primary)' : 'var(--color-border)'}`,
-                    boxShadow: 'var(--shadow-sm)',
-                    overflow: 'hidden',
-                    opacity: dragIndex === index ? 0.5 : 1,
-                    transition: 'border-color 0.15s, opacity 0.15s',
-                    cursor: 'grab'
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.8rem 1rem' }}>
-                    {/* Grip Handle */}
-                    <div onTouchStart={e => handleTouchStart(e, index)} style={{ color: 'var(--color-text-muted)', cursor: 'grab', padding: '0 4px', touchAction: 'none' }}>
-                      <GripVertical size={18} />
-                    </div>
-                    <div style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--color-text-muted)', minWidth: '22px' }}>{index + 1}</div>
-                    <div style={{ flex: 1, cursor: 'pointer' }} onClick={() => toggleExpanded(index)}>
-                      <strong style={{ fontSize: '1.05rem', color: 'var(--color-text-main)' }}>{stop.customer.name}</strong>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', marginTop: '0.2rem' }}>
-                        {stop.plannedServiceIds.length > 0
-                          ? <span style={{ color: 'var(--color-primary)', fontWeight: 600 }}>${plannedTotal.toFixed(2)}</span>
-                          : 'No services selected'}
-                        {stop.plannedServiceIds.length > 0 && ` — ${stop.plannedServiceIds.length} service${stop.plannedServiceIds.length > 1 ? 's' : ''}`}
-                      </div>
-                    </div>
-
-                    <button className="btn-icon" onClick={() => toggleExpanded(index)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)' }}>
-                      {stop.expanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
-                    </button>
-                    <button className="btn-icon" onClick={() => removeStop(index)} style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer' }}>
-                      <Trash2 size={18} />
-                    </button>
-                  </div>
-
-                  {stop.expanded && (
-                    <div style={{ padding: '1rem', borderTop: '1px solid var(--color-border)', background: 'var(--color-bg-main)', display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
-                      <div style={{ fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase', color: 'var(--color-text-muted)', marginBottom: '0.3rem', letterSpacing: '0.5px' }}>
-                        Services for today's visit:
-                      </div>
-                      {activeServices.length === 0 && (
-                        <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>No active services on this client's profile.</span>
-                      )}
-                      {activeServices.map(svc => (
-                        <label key={svc.id} style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', cursor: 'pointer', fontSize: '0.95rem' }}>
-                          <input
-                            type="checkbox"
-                            checked={stop.plannedServiceIds.includes(svc.id)}
-                            onChange={() => toggleService(index, svc.id)}
-                            style={{ width: '20px', height: '20px', cursor: 'pointer' }}
-                          />
-                          <span style={{ fontWeight: 500 }}>{svc.name}</span>
-                          <span style={{ marginLeft: 'auto', color: 'var(--color-primary)', fontWeight: 700 }}>${svc.price.toFixed(2)}</span>
-                        </label>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Route Preview Map */}
-          {selectedStops.length > 1 && (
-            <div style={{ marginTop: '1.5rem', borderTop: '1px solid var(--color-border)', paddingTop: '1.5rem' }}>
-              <button 
-                className="btn btn-secondary" 
-                style={{ width: '100%', marginBottom: showMap ? '1rem' : '0', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', fontWeight: 600 }}
-                onClick={() => setShowMap(!showMap)}
-              >
-                <MapIcon size={18} /> {showMap ? 'Hide Route Map' : 'Preview Route on Map'}
-              </button>
-              {showMap && routePath.length > 1 && (
-                isLoaded && !loadError ? (
-                  <GoogleMap 
-                    mapContainerStyle={mapContainerStyle} 
-                    center={routePath[0]} 
-                    zoom={12}
-                    onLoad={() => trackApiCall('mapLoad')}
-                  >
-                    <Polyline
-                      path={routePath}
-                      options={{ strokeColor: '#3b82f6', strokeOpacity: 0.8, strokeWeight: 4 }}
-                    />
-                  </GoogleMap>
-                ) : (
-                  <div style={{ ...mapContainerStyle, background: '#e5e7eb', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--color-text-muted)' }}>
-                    <MapIcon size={40} style={{ opacity: 0.5, marginBottom: '0.8rem' }} />
-                    <div style={{ fontSize: '1rem', fontWeight: 600 }}>Map Preview Unavailable Offline</div>
-                  </div>
-                )
               )}
             </div>
-          )}
-
-          {/* Action Buttons */}
-          <div style={{ display: 'flex', gap: '0.8rem', marginTop: '1.5rem', paddingTop: '1.5rem', borderTop: '1px solid var(--color-border)' }}>
-            <button
-              className="btn btn-secondary"
-              style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem', fontSize: '0.95rem', fontWeight: 700 }}
-              onClick={handleSaveTemplate}
-              disabled={selectedStops.length === 0}
+            
+            <div
+              style={{ flex: 1, overflowY: 'auto', paddingRight: '0.4rem', display: 'flex', flexDirection: 'column', gap: '0.6rem' }}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
             >
-              <BookMarked size={18} /> Save Template
-            </button>
-            <button
-              className="btn btn-primary"
-              style={{ flex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem', fontSize: '1.05rem' }}
-              onClick={handleSaveRoute}
-              disabled={selectedStops.length === 0}
-            >
-              <Save size={20} /> Save Active Route
-            </button>
-          </div>
-          {/* Route Summary Footer */}
-          {selectedStops.length > 0 && (
-            <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--color-border)' }}>
-              {(() => {
-                let totalRev = 0;
-                let totalDriveSecs = 0;
-                let totalMowSecs = 0;
-                let missingDrive = false;
-                
-                // Compute pace based on history, fallback to 250
-                let globalPace = 250;
-                if (allVisits.length > 0 && customers.length > 0) {
-                  let tSecs = 0;
-                  let tSqFt = 0;
-                  allVisits.forEach(v => {
-                    if (v.status !== 'completed' || !v.durationSecs || v.durationSecs < 60) return;
-                    const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.includes('s1') || v.appliedServices.some(s => typeof s === 'string' && s.toLowerCase().includes('mow'));
-                    if (!isMow) return;
-                    const cust = customers.find(c => c.id === v.customerId);
-                    if (!cust || !cust.lawnSize) return;
-                    const sqft = parseLawnSizeToSqFt(cust.lawnSize);
-                    if (sqft) {
-                      tSecs += v.durationSecs;
-                      tSqFt += sqft;
-                    }
-                  });
-                  if (tSecs > 0) globalPace = Math.max(10, Math.round(tSqFt / (tSecs / 60)));
-                }
+              {selectedStops.length === 0 && (
+                <div style={{ textAlign: 'center', color: 'var(--color-text-muted)', marginTop: '2rem', padding: '2rem' }}>
+                  <RouteIcon size={32} style={{ opacity: 0.3, marginBottom: '1rem' }} />
+                  <p style={{ margin: 0, fontWeight: 500 }}>Route is empty.</p>
+                  <p style={{ fontSize: '0.85rem', marginTop: '0.5rem' }}>Select clients from the left to begin.</p>
+                </div>
+              )}
 
-                selectedStops.forEach(s => {
-                  const activeServices = s.customer.services?.filter(srv => srv.active) || [];
-                  const plannedTotal = activeServices
-                    .filter(srv => s.plannedServiceIds.includes(srv.id))
-                    .reduce((sum, srv) => sum + srv.price, 0);
-                  totalRev += plannedTotal;
-
-                  if (s.plannedDriveTimeSecs != null) totalDriveSecs += s.plannedDriveTimeSecs;
-                  else missingDrive = true;
-
-                  // Mow time estimation
-                  let avgDuration = 900;
-                  const histVisits = allVisits.filter(v => v.customerId === s.customer.id && v.status === 'completed' && v.durationSecs);
-                  if (histVisits.length > 0) {
-                     avgDuration = histVisits.reduce((acc, v) => acc + v.durationSecs, 0) / histVisits.length;
-                  } else if (s.customer.lawnSize) {
-                     const sqft = parseLawnSizeToSqFt(s.customer.lawnSize);
-                     if (sqft) {
-                       avgDuration = Math.max(600, Math.round((sqft / globalPace) * 60));
-                     }
-                  }
-                  totalMowSecs += avgDuration;
-                });
-
-                const totalTimeMins = Math.round((totalDriveSecs + totalMowSecs) / 60);
-                const hours = Math.floor(totalTimeMins / 60);
-                const mins = totalTimeMins % 60;
-                const timeString = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+              {selectedStops.map((stop, index) => {
+                const activeServices = stop.customer.services?.filter(s => s.active) || [];
+                const plannedTotal = activeServices
+                  .filter(s => stop.plannedServiceIds.includes(s.id))
+                  .reduce((sum, s) => sum + s.price, 0);
 
                 return (
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--color-bg-main)', padding: '0.8rem 1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
-                    <div>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Route Summary</div>
-                      <div style={{ fontWeight: 600 }}>{selectedStops.length} Stops</div>
-                    </div>
-                    <div style={{ textAlign: 'center' }}>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Est. Time</div>
-                      <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.3rem', justifyContent: 'center' }}>
-                        {timeString} {missingDrive && <span style={{ color: '#f59e0b', fontSize: '0.85rem' }} title="Re-optimize to include drive time">⚠️</span>}
+                  <div
+                    key={stop.customer.id}
+                    ref={el => stopItemRefs.current[index] = el}
+                    draggable
+                    onDragStart={e => handleDragStart(e, index)}
+                    onDragOver={e  => handleDragOver(e, index)}
+                    onDrop={e      => handleDrop(e, index)}
+                    onDragEnd={handleDragEnd}
+                    style={{
+                      background: 'var(--color-bg-main)',
+                      borderRadius: 'var(--radius-sm)',
+                      border: `1px solid ${dragOverIndex === index ? 'var(--color-primary)' : 'var(--color-border)'}`,
+                      borderLeft: `4px solid var(--color-primary)`,
+                      boxShadow: 'var(--shadow-sm)',
+                      overflow: 'hidden',
+                      opacity: dragIndex === index ? 0.5 : 1,
+                      transition: 'border-color 0.15s, opacity 0.15s',
+                      cursor: 'grab'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.8rem' }}>
+                      <div onTouchStart={e => handleTouchStart(e, index)} style={{ color: 'var(--color-text-muted)', cursor: 'grab', padding: '0 4px', touchAction: 'none' }}>
+                        <GripVertical size={16} />
                       </div>
+                      <div style={{ fontSize: '0.8rem', fontWeight: 800, color: 'var(--color-text-muted)', minWidth: '18px', textAlign: 'center' }}>{index + 1}</div>
+                      <div style={{ flex: 1, cursor: 'pointer', overflow: 'hidden' }} onClick={() => toggleExpanded(index)}>
+                        <strong style={{ fontSize: '1rem', color: 'var(--color-text-main)', display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{stop.customer.name}</strong>
+                        <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', marginTop: '0.1rem' }}>
+                          {stop.plannedServiceIds.length > 0
+                            ? <span style={{ color: 'var(--color-primary)', fontWeight: 600 }}>${plannedTotal.toFixed(2)}</span>
+                            : 'No services'}
+                          {stop.plannedServiceIds.length > 0 && ` — ${stop.plannedServiceIds.length} svc`}
+                        </div>
+                      </div>
+
+                      <button className="btn-icon" onClick={() => toggleExpanded(index)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)', padding: '4px' }}>
+                        {stop.expanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+                      </button>
+                      <button className="btn-icon" onClick={() => removeStop(index)} style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: '4px' }}>
+                        <Trash2 size={16} />
+                      </button>
                     </div>
-                    <div style={{ textAlign: 'right' }}>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Revenue</div>
-                      <div style={{ fontWeight: 800, color: 'var(--color-primary)' }}>${totalRev.toFixed(2)}</div>
-                    </div>
+
+                    {stop.expanded && (
+                      <div style={{ padding: '0.8rem', borderTop: '1px solid var(--color-border)', background: 'var(--color-bg-card)', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                        <div style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px' }}>
+                          Selected Services:
+                        </div>
+                        {activeServices.length === 0 && (
+                          <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>No active services.</span>
+                        )}
+                        {activeServices.map(svc => (
+                          <label key={svc.id} style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', cursor: 'pointer', fontSize: '0.9rem' }}>
+                            <input
+                              type="checkbox"
+                              checked={stop.plannedServiceIds.includes(svc.id)}
+                              onChange={() => toggleService(index, svc.id)}
+                              style={{ width: '16px', height: '16px', cursor: 'pointer', accentColor: 'var(--color-primary)' }}
+                            />
+                            <span style={{ fontWeight: 500 }}>{svc.name}</span>
+                            <span style={{ marginLeft: 'auto', color: 'var(--color-primary)', fontWeight: 600 }}>${svc.price.toFixed(2)}</span>
+                          </label>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 );
-              })()}
+              })}
             </div>
-          )}
+
+            {/* Route Summary & Actions */}
+            {selectedStops.length > 0 && (
+              <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--color-border)', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                {(() => {
+                  let totalRev = 0;
+                  let totalDriveSecs = 0;
+                  let totalMowSecs = 0;
+                  let missingDrive = false;
+                  
+                  let globalPace = 250;
+                  if (allVisits.length > 0 && customers.length > 0) {
+                    let tSecs = 0;
+                    let tSqFt = 0;
+                    allVisits.forEach(v => {
+                      if (v.status !== 'completed' || !v.durationSecs || v.durationSecs < 60) return;
+                      const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.includes('s1') || v.appliedServices.some(s => typeof s === 'string' && s.toLowerCase().includes('mow'));
+                      if (!isMow) return;
+                      const cust = customers.find(c => c.id === v.customerId);
+                      if (!cust || !cust.lawnSize) return;
+                      const sqft = parseLawnSizeToSqFt(cust.lawnSize);
+                      if (sqft) {
+                        tSecs += v.durationSecs;
+                        tSqFt += sqft;
+                      }
+                    });
+                    if (tSecs > 0) globalPace = Math.max(10, Math.round(tSqFt / (tSecs / 60)));
+                  }
+
+                  selectedStops.forEach(s => {
+                    const activeServices = s.customer.services?.filter(srv => srv.active) || [];
+                    const plannedTotal = activeServices
+                      .filter(srv => s.plannedServiceIds.includes(srv.id))
+                      .reduce((sum, srv) => sum + srv.price, 0);
+                    totalRev += plannedTotal;
+
+                    if (s.plannedDriveTimeSecs != null) totalDriveSecs += s.plannedDriveTimeSecs;
+                    else missingDrive = true;
+
+                    let avgDuration = 900;
+                    const histVisits = allVisits.filter(v => v.customerId === s.customer.id && v.status === 'completed' && v.durationSecs);
+                    if (histVisits.length > 0) {
+                       avgDuration = histVisits.reduce((acc, v) => acc + v.durationSecs, 0) / histVisits.length;
+                    } else if (s.customer.lawnSize) {
+                       const sqft = parseLawnSizeToSqFt(s.customer.lawnSize);
+                       if (sqft) {
+                         avgDuration = Math.max(600, Math.round((sqft / globalPace) * 60));
+                       }
+                    }
+                    totalMowSecs += avgDuration;
+                  });
+
+                  const totalTimeMins = Math.round((totalDriveSecs + totalMowSecs) / 60);
+                  const hours = Math.floor(totalTimeMins / 60);
+                  const mins = totalTimeMins % 60;
+                  const timeString = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+
+                  return (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--color-bg-main)', padding: '0.8rem 1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
+                      <div style={{ textAlign: 'center' }}>
+                        <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Est. Time</div>
+                        <div style={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.3rem', justifyContent: 'center' }}>
+                          {timeString} {missingDrive && <span style={{ color: '#f59e0b', fontSize: '0.85rem' }} title="Re-optimize to include drive time">⚠️</span>}
+                        </div>
+                      </div>
+                      <div style={{ textAlign: 'center' }}>
+                        <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Revenue</div>
+                        <div style={{ fontWeight: 800, color: 'var(--color-primary)', fontSize: '1.1rem' }}>${totalRev.toFixed(2)}</div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                <div style={{ display: 'flex', gap: '0.8rem' }}>
+                  <button
+                    className="btn btn-secondary"
+                    style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem', fontSize: '0.9rem', fontWeight: 600 }}
+                    onClick={handleSaveTemplate}
+                  >
+                    Save Template
+                  </button>
+                  <button
+                    className="btn btn-primary"
+                    style={{ flex: 1.5, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem', fontSize: '1rem', fontWeight: 700 }}
+                    onClick={handleSaveRoute}
+                  >
+                    Save Route
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
-      </div>
-      </>
       )}
     </div>
   );

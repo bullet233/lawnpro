@@ -103,9 +103,10 @@ export default function DayReviewModal({ onClose }) {
     // Seed edits with existing data
     const initial = {};
     todayVisits.forEach(v => {
-      initial[v.id] = { 
-        appliedServices: v.appliedServices || [], 
+      initial[v.id] = {
+        appliedServices: v.appliedServices || [],
         priceEarned: v.priceEarned || 0,
+        addOns: v.addOns || [],
         complianceLog: v.complianceLog || null
       };
     });
@@ -119,9 +120,12 @@ export default function DayReviewModal({ onClose }) {
       const newIds = isChecked
         ? current.appliedServices.filter(id => id !== svc.id)
         : [...current.appliedServices, svc.id];
+      // Keep any add-on revenue when recomputing the base-service total so toggling
+      // a service doesn't erase add-on charges from the visit.
+      const addOnTotal = Array.isArray(current.addOns) ? current.addOns.reduce((sum, a) => sum + (a.price || 0), 0) : 0;
       const newPrice = custServices
         .filter(s => newIds.includes(s.id))
-        .reduce((sum, s) => sum + s.price, 0);
+        .reduce((sum, s) => sum + s.price, 0) + addOnTotal;
       return { ...prev, [visitId]: { ...current, appliedServices: newIds, priceEarned: newPrice } };
     });
   };

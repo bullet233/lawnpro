@@ -61,12 +61,13 @@ export function calculateTieredMatrix(allVisits, allCustomers) {
   });
 
   // Fallback logic for empty buckets (borrow from closest non-empty bucket)
+  const originalPace = [...bucketPace];
   for (let i = 0; i < bucketPace.length; i++) {
     if (bucketPace[i] === 0) {
       let nearestLeft = 0;
       let nearestRight = 0;
-      for (let l = i - 1; l >= 0; l--) { if (bucketPace[l] > 0) { nearestLeft = bucketPace[l]; break; } }
-      for (let r = i + 1; r < bucketPace.length; r++) { if (bucketPace[r] > 0) { nearestRight = bucketPace[r]; break; } }
+      for (let l = i - 1; l >= 0; l--) { if (originalPace[l] > 0) { nearestLeft = originalPace[l]; break; } }
+      for (let r = i + 1; r < originalPace.length; r++) { if (originalPace[r] > 0) { nearestRight = originalPace[r]; break; } }
       
       if (nearestLeft > 0 && nearestRight > 0) {
         bucketPace[i] = (nearestLeft + nearestRight) / 2;

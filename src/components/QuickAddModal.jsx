@@ -41,7 +41,14 @@ export default function QuickAddModal({ onClose, onAdd, allCustomers, currentPos
       propertyNotes: '',
       geofence: generateGeofence(currentPosition.lat, currentPosition.lng),
       services: [
-        { id: crypto.randomUUID(), name: serviceName.trim() || 'Mowing', price: Number(servicePrice) || 0, active: true },
+        {
+          // Match the app's service-id taxonomy (s1 for mowing, s_* for custom)
+          // so revenue-by-service and due-detection can recognize it.
+          id: (serviceName.trim() || 'Mowing').toLowerCase() === 'mowing' ? 's1' : 's_' + Date.now(),
+          name: serviceName.trim() || 'Mowing',
+          price: Number(servicePrice) || 0,
+          active: true
+        },
       ],
       createdAt: Date.now()
     };

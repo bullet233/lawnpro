@@ -44,7 +44,10 @@ function ScatterPlot({ data, width = 340, height = 280 }) {
   const sumY = data.reduce((s, d) => s + d.mins, 0);
   const sumXY = data.reduce((s, d) => s + d.sqft * d.mins, 0);
   const sumX2 = data.reduce((s, d) => s + d.sqft * d.sqft, 0);
-  const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+  // Guard against a zero denominator (fewer than 2 distinct sqft values),
+  // which would otherwise produce a NaN slope and a broken trend line.
+  const denom = n * sumX2 - sumX * sumX;
+  const slope = denom === 0 ? 0 : (n * sumXY - sumX * sumY) / denom;
   const intercept = (sumY - slope * sumX) / n;
 
   const trendX1 = 0;
@@ -315,8 +318,15 @@ function BucketHistoryModal({ bucket, minSqft, allVisits, allCustomers, onClose,
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export default function Analytics() {
-  const allVisits = useLiveQuery(() => db.visits.toArray(), []) || [];
-  const allCustomers = useLiveQuery(() => db.customers.toArray(), []) || [];
+  const allVisitsRaw = useLiveQuery(() => db.visits.toArray(), []) || [];
+  const allCustomersRaw = useLiveQuery(() => db.customers.toArray(), []) || [];
+  
+  const { allVisits, allCustomers } = useMemo(() => {
+    const custs = allCustomersRaw.filter(c => !c.excludeFromAnalytics);
+    const validIds = new Set(custs.map(c => c.id));
+    const visits = allVisitsRaw.filter(v => validIds.has(v.customerId));
+    return { allCustomers: custs, allVisits: visits };
+  }, [allVisitsRaw, allCustomersRaw]);
   const allFuelLogs = useLiveQuery(() => db.fuelLogs.toArray(), []) || [];
   const [activeTab, setActiveTab] = useState('overview'); // overview, bidding, expenses
   const [settings, setSettings] = useState(null);
@@ -347,7 +357,7 @@ export default function Analytics() {
     const observer = new ResizeObserver((entries) => {
       if (entries[0]) {
         const w = entries[0].contentRect.width - 32; // minus padding
-        setChartWidth(Math.max(300, w));
+        setChartWidth(Math.max(250, w));
       }
     });
     
@@ -691,156 +701,158 @@ export default function Analytics() {
 
       {/* OVERVIEW TAB */}
       {activeTab === 'overview' && (
-        <>
-          {/* Efficiency & Pace Card */}
-          <div className="glass-card" style={{ padding: '1.2rem', marginBottom: '1.5rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
-          <TrendingUp size={18} color="var(--color-primary)" />
-          <h2 style={{ fontSize: '1.1rem', margin: 0 }}>Efficiency & True Pace</h2>
-        </div>
-        
-        {paceMetrics && paceMetrics.allTimePace > 0 ? (
-          <div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
-              <div style={{ background: 'var(--color-bg-main)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)', textAlign: 'center' }}>
-                <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px', marginBottom: '0.3rem' }}>
-                  All-Time Pace
-                </div>
-                <div style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--color-text-main)' }}>
-                  {paceMetrics.allTimePace}
-                </div>
-                <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>sq ft / min</div>
-              </div>
-
-              <div style={{ background: 'var(--color-bg-main)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)', textAlign: 'center' }}>
-                <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px', marginBottom: '0.3rem' }}>
-                  Last 30 Days
-                </div>
-                <div style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--color-primary)' }}>
-                  {paceMetrics.recentPace > 0 ? paceMetrics.recentPace : '-'}
-                </div>
-                <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>sq ft / min</div>
-              </div>
-            </div>
-
-            {paceMetrics.recentPace > 0 && paceMetrics.previousPace > 0 && (
-              <div style={{ 
-                background: paceMetrics.recentPace > paceMetrics.previousPace ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', 
-                border: `1px solid ${paceMetrics.recentPace > paceMetrics.previousPace ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)'}`,
-                padding: '0.8rem', 
-                borderRadius: 'var(--radius-sm)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '0.5rem',
-                color: paceMetrics.recentPace > paceMetrics.previousPace ? '#10b981' : '#ef4444',
-                fontWeight: 600,
-                fontSize: '0.9rem'
-              }}>
-                {paceMetrics.recentPace > paceMetrics.previousPace ? <ArrowUp size={16} /> : <ArrowDown size={16} />}
-                {paceMetrics.recentPace > paceMetrics.previousPace ? 'Cutting faster than previous month' : 'Cutting slower than previous month'}
-                <span style={{ color: 'var(--color-text-main)' }}>
-                  ({paceMetrics.previousPace} sq ft/min prev)
-                </span>
-              </div>
-            )}
-          </div>
-        ) : (
-          <div style={{ padding: '2rem 1rem', textAlign: 'center', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', border: '1px dashed var(--color-border)' }}>
-            <div style={{ fontSize: '1.5rem', marginBottom: '0.4rem' }}>⏱️</div>
-            <div style={{ fontWeight: 600 }}>Not enough data yet</div>
-            <div style={{ fontSize: '0.82rem', color: 'var(--color-text-muted)', marginTop: '0.3rem' }}>
-              Complete some jobs for clients with lawn sizes to see your True Pace.
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Per-Customer $/Hour Ranking */}
-      <div className="glass-card" style={{ padding: '1.2rem', marginBottom: '1.5rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
-          <DollarSign size={18} color="var(--color-primary)" />
-          <h2 style={{ fontSize: '1.1rem', margin: 0 }}>Client Profitability</h2>
-        </div>
-        <p style={{ fontSize: '0.82rem', color: 'var(--color-text-muted)', marginBottom: '1rem', marginTop: '0.2rem' }}>
-          Your real $/hr per client based on actual job times and prices.{targetRate > 0 ? ` Target: $${targetRate}/hr.` : ''}
-        </p>
-
-        {profitabilityData.length > 0 ? (
-          (() => {
-            const topPerformers = profitabilityData.filter(c => targetRate === 0 || c.hourlyRate >= targetRate);
-            const needsAttention = profitabilityData.filter(c => targetRate > 0 && c.hourlyRate < targetRate);
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem', marginTop: '1rem' }}>
             
-            const renderClient = (client, i) => {
-              const isAboveTarget = targetRate > 0 && client.hourlyRate >= targetRate;
-              const isBelowTarget = targetRate > 0 && client.hourlyRate < targetRate;
-              const pctOfTarget = targetRate > 0 ? Math.round((client.hourlyRate / targetRate) * 100) : null;
+            {/* Efficiency & Pace Box */}
+            <div>
+              <h2 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--color-text-muted)', marginBottom: '1rem', marginTop: 0, fontWeight: 700 }}>Efficiency & True Pace</h2>
               
-              let rateColor = 'var(--color-text-main)';
-              let rateBg = 'var(--color-bg-main)';
-              if (targetRate > 0) {
-                if (client.hourlyRate >= targetRate * 1.15) { rateColor = '#059669'; rateBg = 'rgba(16,185,129,0.08)'; }
-                else if (client.hourlyRate >= targetRate) { rateColor = '#10b981'; rateBg = 'rgba(16,185,129,0.05)'; }
-                else if (client.hourlyRate >= targetRate * 0.8) { rateColor = '#d97706'; rateBg = 'rgba(245,158,11,0.06)'; }
-                else { rateColor = '#ef4444'; rateBg = 'rgba(239,68,68,0.06)'; }
-              }
+              {paceMetrics && paceMetrics.allTimePace > 0 ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '1rem' }}>
+                    
+                    <div style={{ padding: '1rem', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)' }}>
+                      <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px', marginBottom: '0.5rem', fontWeight: 700 }}>
+                        All-Time
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.4rem', flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--color-text-main)', lineHeight: 1 }}>
+                          {paceMetrics.allTimePace}
+                        </span>
+                        <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>sqft/m</span>
+                      </div>
+                    </div>
 
-              return (
-                <div key={client.id} style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', padding: '0.7rem 0.8rem', background: rateBg, borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--color-text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{client.name}</div>
-                    <div style={{ fontSize: '0.72rem', color: 'var(--color-text-muted)', marginTop: '1px' }}>
-                      ~{client.avgMins}m cut{client.avgDriveMins > 0 ? ` + ~${client.avgDriveMins}m drive` : ''} · ${client.avgPrice}/visit · {client.visitCount} visit{client.visitCount !== 1 ? 's' : ''}
+                    <div style={{ padding: '1rem', background: 'var(--color-bg-card)', border: '1px solid var(--color-primary)', borderBottom: '4px solid var(--color-primary)', borderRadius: 'var(--radius-md)' }}>
+                      <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--color-primary)', letterSpacing: '0.5px', marginBottom: '0.5rem', fontWeight: 800 }}>
+                        Last 30 Days
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.4rem', flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--color-text-main)', lineHeight: 1 }}>
+                          {paceMetrics.recentPace > 0 ? paceMetrics.recentPace : '-'}
+                        </span>
+                        <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>sqft/m</span>
+                      </div>
                     </div>
+
                   </div>
-                  <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                    <div style={{ fontSize: '1.15rem', fontWeight: 800, color: rateColor, fontVariantNumeric: 'tabular-nums' }}>
-                      ${client.hourlyRate}/hr
+
+                  {paceMetrics.recentPace > 0 && paceMetrics.previousPace > 0 && (
+                    <div style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 600 }}>
+                      {paceMetrics.recentPace > paceMetrics.previousPace ? (
+                        <span style={{ color: '#10b981', display: 'flex', alignItems: 'center', gap: '4px' }}><ArrowUp size={14} /> Faster than prev 30 days</span>
+                      ) : (
+                        <span style={{ color: '#ef4444', display: 'flex', alignItems: 'center', gap: '4px' }}><ArrowDown size={14} /> Slower than prev 30 days</span>
+                      )}
+                      <span style={{ opacity: 0.5 }}>•</span>
+                      <span>{paceMetrics.previousPace} sqft/m prev</span>
                     </div>
-                    {pctOfTarget !== null && (
-                      <div style={{ fontSize: '0.68rem', color: rateColor, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '2px' }}>
-                        {isAboveTarget ? <ArrowUp size={10} /> : <ArrowDown size={10} />}
-                        {pctOfTarget}%
+                  )}
+                </div>
+              ) : (
+                <div style={{ padding: '2rem', textAlign: 'center', border: '1px dashed var(--color-border)', borderRadius: 'var(--radius-md)', color: 'var(--color-text-muted)' }}>
+                  <p style={{ margin: 0, fontWeight: 600 }}>No Pace Data</p>
+                  <p style={{ fontSize: '0.85rem', marginTop: '0.4rem' }}>Complete jobs with recorded times to see metrics.</p>
+                </div>
+              )}
+            </div>
+
+            {/* Scatter Plot Chart (Moved from Bidding) */}
+            <div ref={containerRef}>
+              <h2 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--color-text-muted)', marginBottom: '1rem', marginTop: 0, fontWeight: 700 }}>Historical Efficiency</h2>
+              <div style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', padding: '1.2rem' }}>
+                <p style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', marginBottom: '1.5rem', marginTop: 0 }}>
+                  Each dot is a customer. Tap a dot to see who it is. The dashed line is your trend.
+                </p>
+                {scatterData.length > 0 ? (
+                  <div style={{ display: 'flex', justifyContent: 'center' }}>
+                    <ScatterPlot data={scatterData} width={chartWidth} height={280} />
+                  </div>
+                ) : (
+                  <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                    <p style={{ margin: 0, fontWeight: 600 }}>Not enough data</p>
+                    <p style={{ fontSize: '0.85rem', marginTop: '0.4rem' }}>Complete jobs for customers with known lawn sizes.</p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+          {/* Client Profitability Leaderboard */}
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '1rem' }}>
+              <h2 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--color-text-muted)', margin: 0, fontWeight: 700 }}>Client Leaderboard</h2>
+              {targetRate > 0 && <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--color-text-muted)' }}>Target: ${targetRate}/hr</span>}
+            </div>
+
+            {profitabilityData.length > 0 ? (
+              (() => {
+                const topPerformers = profitabilityData.filter(c => targetRate === 0 || c.hourlyRate >= targetRate);
+                const needsAttention = profitabilityData.filter(c => targetRate > 0 && c.hourlyRate < targetRate);
+                
+                const renderClient = (client) => {
+                  const isAboveTarget = targetRate > 0 && client.hourlyRate >= targetRate;
+                  const pctOfTarget = targetRate > 0 ? Math.round((client.hourlyRate / targetRate) * 100) : null;
+                  
+                  let rateColor = 'var(--color-text-main)';
+                  if (targetRate > 0) {
+                    if (client.hourlyRate >= targetRate * 1.15) rateColor = '#10b981';
+                    else if (client.hourlyRate >= targetRate) rateColor = 'var(--color-text-main)';
+                    else if (client.hourlyRate >= targetRate * 0.8) rateColor = '#f59e0b';
+                    else rateColor = '#ef4444';
+                  }
+
+                  return (
+                    <div key={client.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.8rem 0', borderBottom: '1px solid var(--color-border)', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      <div style={{ minWidth: 0, flex: 1, paddingRight: '1rem' }}>
+                        <div style={{ fontWeight: 700, fontSize: '0.95rem', color: 'var(--color-text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {client.name}
+                        </div>
+                        <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', fontWeight: 600, marginTop: '2px' }}>
+                          ~{client.avgMins}m • ${client.avgPrice}/visit
+                        </div>
+                      </div>
+                      <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                        <div style={{ fontSize: '1.2rem', fontWeight: 800, color: rateColor, fontVariantNumeric: 'tabular-nums', lineHeight: 1 }}>
+                          ${client.hourlyRate}
+                          <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginLeft: '2px' }}>/hr</span>
+                        </div>
+                        {pctOfTarget !== null && (
+                          <div style={{ fontSize: '0.7rem', fontWeight: 700, color: isAboveTarget ? '#10b981' : '#ef4444', marginTop: '4px' }}>
+                            {pctOfTarget}% of target
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                };
+
+                return (
+                  <div style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', padding: '0 1.2rem' }}>
+                    {topPerformers.length > 0 && (
+                      <div style={{ paddingBottom: '0.5rem' }}>
+                        {needsAttention.length > 0 && <div style={{ fontSize: '0.7rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '1px', color: '#10b981', paddingTop: '1.2rem', paddingBottom: '0.4rem', borderBottom: '1px solid var(--color-border)' }}>Meeting Target</div>}
+                        {topPerformers.map(renderClient)}
+                      </div>
+                    )}
+                    
+                    {needsAttention.length > 0 && (
+                      <div style={{ paddingBottom: '0.5rem' }}>
+                        <div style={{ fontSize: '0.7rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '1px', color: '#ef4444', paddingTop: '1.2rem', paddingBottom: '0.4rem', borderBottom: '1px solid var(--color-border)' }}>Needs Attention</div>
+                        {needsAttention.map(renderClient)}
                       </div>
                     )}
                   </div>
-                </div>
-              );
-            };
-
-            return (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.2rem' }}>
-                {topPerformers.length > 0 && (
-                  <div>
-                    {targetRate > 0 && <h3 style={{ fontSize: '0.8rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px', marginBottom: '0.5rem', marginTop: 0 }}>🏆 Meeting Target</h3>}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
-                      {topPerformers.map(renderClient)}
-                    </div>
-                  </div>
-                )}
-                
-                {needsAttention.length > 0 && (
-                  <div>
-                    <h3 style={{ fontSize: '0.8rem', textTransform: 'uppercase', color: '#ef4444', letterSpacing: '0.5px', marginBottom: '0.5rem', marginTop: 0 }}>⚠️ Needs Attention</h3>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
-                      {needsAttention.map(renderClient)}
-                    </div>
-                  </div>
-                )}
+                );
+              })()
+            ) : (
+              <div style={{ padding: '2rem', textAlign: 'center', border: '1px dashed var(--color-border)', borderRadius: 'var(--radius-md)', color: 'var(--color-text-muted)' }}>
+                <p style={{ margin: 0, fontWeight: 600 }}>No Profitability Data</p>
+                <p style={{ fontSize: '0.85rem', marginTop: '0.4rem' }}>Complete jobs with prices to build your leaderboard.</p>
               </div>
-            );
-          })()
-        ) : (
-          <div style={{ padding: '2rem 1rem', textAlign: 'center', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', border: '1px dashed var(--color-border)' }}>
-            <div style={{ fontSize: '1.5rem', marginBottom: '0.4rem' }}>💰</div>
-            <div style={{ fontWeight: 600 }}>Not enough data yet</div>
-            <div style={{ fontSize: '0.82rem', color: 'var(--color-text-muted)', marginTop: '0.3rem' }}>
-              Complete some jobs with prices to see your per-client profitability ranking.
-            </div>
+            )}
           </div>
-        )}
-      </div>
-        </>
+
+        </div>
       )}
 
       {/* EXPENSES TAB */}
@@ -971,17 +983,17 @@ export default function Analytics() {
               Instant quotes powered by your historical Matrix math (${settings?.targetHourlyRate || 0}/hr).
             </p>
 
-            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.8rem' }}>
+            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.8rem', flexWrap: 'wrap' }}>
               <input
                 type="text"
                 className="input-field"
-                placeholder="Lawn size (e.g. 8500)"
+                placeholder="Lawn size (e.g. 8500 or 1/4 acre)"
                 value={targetSqFt}
                 onChange={e => setTargetSqFt(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && handleCalculateBid()}
-                style={{ flex: 1 }}
+                style={{ flex: '1 1 150px' }}
               />
-              <div style={{ position: 'relative', flex: 1.5 }}>
+              <div style={{ position: 'relative', flex: '1.5 1 200px' }}>
                 <MapPin size={16} color="var(--color-text-muted)" style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', zIndex: 1 }} />
                 <Autocomplete onLoad={onAutocompleteLoad} onPlaceChanged={onPlaceChanged}>
                   <input
@@ -996,28 +1008,26 @@ export default function Analytics() {
                 </Autocomplete>
               </div>
             </div>
-            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.8rem' }}>
+            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.8rem', flexWrap: 'wrap' }}>
               <input
                 type="number"
                 className="input-field"
                 placeholder="Obstacles"
                 value={targetObstacles}
                 onChange={e => setTargetObstacles(e.target.value)}
-                style={{ width: '100px' }}
+                style={{ width: '100px', flexGrow: 1 }}
               />
-            </div>
-            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
               <select
                 className="input-field"
                 value={targetTerrain}
                 onChange={e => setTargetTerrain(e.target.value)}
-                style={{ flex: 1, padding: '0.5rem' }}
+                style={{ flex: '1 1 120px', padding: '0.5rem' }}
               >
                 <option value="flat">Flat</option>
                 <option value="moderate">Moderate Hills</option>
                 <option value="hilly">Hilly / Steep</option>
               </select>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', whiteSpace: 'nowrap', cursor: 'pointer' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', whiteSpace: 'nowrap', cursor: 'pointer', flexGrow: 1 }}>
                 <input 
                   type="checkbox" 
                   checked={targetFenced} 
@@ -1026,7 +1036,7 @@ export default function Analytics() {
                 />
                 Fenced
               </label>
-              <button className="btn btn-primary" onClick={handleCalculateBid} disabled={isCalculating}>
+              <button className="btn btn-primary" onClick={handleCalculateBid} disabled={isCalculating} style={{ flex: '1 1 100%' }}>
                 {isCalculating ? 'Loading...' : 'Quote'}
               </button>
             </div>
@@ -1175,27 +1185,7 @@ export default function Analytics() {
             )}
           </div>
 
-      {/* Scatter Plot Card */}
-      <div className="glass-card" style={{ padding: '1.2rem' }} ref={containerRef}>
-        <h2 style={{ fontSize: '1.1rem', margin: '0 0 0.5rem 0' }}>Historical Efficiency</h2>
-        <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', marginBottom: '1.5rem' }}>
-          Each dot is a customer. Tap a dot to see who it is. The dashed line is your trend.
-        </p>
 
-        {scatterData.length > 0 ? (
-          <div style={{ display: 'flex', justifyContent: 'center' }}>
-            <ScatterPlot data={scatterData} width={chartWidth} height={300} />
-          </div>
-        ) : (
-          <div style={{ padding: '3rem 1rem', textAlign: 'center', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', border: '1px dashed var(--color-border)' }}>
-            <div style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>📊</div>
-            <div style={{ fontWeight: 600 }}>Not enough data yet</div>
-            <div style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', marginTop: '0.4rem' }}>
-              Complete some jobs for customers who have a "Lawn Size" on their profile to see the chart.
-            </div>
-          </div>
-        )}
-      </div>
         </>
       )}
 

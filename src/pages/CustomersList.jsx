@@ -1,7 +1,7 @@
 import { useState, useRef, useMemo } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/db';
-import { Plus, ChevronRight, Upload, CheckCircle, AlertTriangle, Search, ArrowUpDown, Save, Users } from 'lucide-react';
+import { Plus, ChevronRight, Upload, CheckCircle, AlertTriangle, Search, ArrowUpDown, Save, Users, Download } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import AppDialog from '../components/AppDialog';
 import { trackApiCall } from '../utils/apiTracker';
@@ -36,12 +36,16 @@ const DEFAULT_SERVICES = [
   { id: 's4', name: 'Fall Clean-up', price: 150, active: false }
 ];
 
-const geocodeAddress = (address) => {
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Geocode an address into a small rectangular geofence. Retries with exponential
+// backoff on OVER_QUERY_LIMIT so bulk imports don't silently lose later rows to throttling.
+const geocodeAddress = (address, attempt = 0) => {
   return new Promise((resolve) => {
     if (!window.google?.maps) return resolve(null);
     const geocoder = new window.google.maps.Geocoder();
     trackApiCall('geocode');
-    geocoder.geocode({ address }, (results, status) => {
+    geocoder.geocode({ address }, async (results, status) => {
       if (status === 'OK' && results[0]?.geometry?.location) {
         const lat = results[0].geometry.location.lat();
         const lng = results[0].geometry.location.lng();
@@ -53,6 +57,10 @@ const geocodeAddress = (address) => {
           { lat: lat - latOffset, lng: lng + lngOffset },
           { lat: lat - latOffset, lng: lng - lngOffset },
         ]);
+      } else if (status === 'OVER_QUERY_LIMIT' && attempt < 4) {
+        // Back off (0.5s, 1s, 2s, 4s) and retry rather than dropping the address.
+        await sleep(500 * Math.pow(2, attempt));
+        resolve(await geocodeAddress(address, attempt + 1));
       } else {
         resolve(null);
       }
@@ -80,8 +88,10 @@ const parseCSV = (text) => {
       phone: get('phone'),
       email: get('email'),
       lawnSize: get('lawnsize') || get('lawn') || get('lawnarea') || '',
+      fertilizer: get('fertilizer') || get('fert') || get('fertilizing') || '',
+      mowing: get('mowing') || get('mow') || '',
     };
-  }).filter(r => r.name && r.address);
+  });
 };
 
 export default function CustomersList() {
@@ -97,6 +107,7 @@ export default function CustomersList() {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState('name'); // name | lastVisit | revenue | overdue
   const [showInactive, setShowInactive] = useState(false);
+  const [showFertOnly, setShowFertOnly] = useState(false);
   const [viewMode, setViewMode] = useState('cards'); // 'cards' | 'table'
   const [pendingEdits, setPendingEdits] = useState({}); // Local state for table edits
 
@@ -206,6 +217,11 @@ export default function CustomersList() {
       list = list.filter(c => c.status !== 'inactive');
     }
 
+    // Filter by Fertilizer Program
+    if (showFertOnly) {
+      list = list.filter(c => c.services && c.services.find(s => s.id === 's3')?.active);
+    }
+
     // Search filter
     const q = searchQuery.toLowerCase().trim();
     if (q) {
@@ -232,13 +248,42 @@ export default function CustomersList() {
     });
 
     return list;
-  }, [customers, visitStats, searchQuery, sortBy, showInactive, outlierCustomers]);
+  }, [customers, visitStats, searchQuery, sortBy, showInactive, showFertOnly, outlierCustomers]);
 
   const handleToggleStatus = async (e, custId, currentStatus) => {
     e.preventDefault();
     e.stopPropagation();
     const newStatus = currentStatus === 'inactive' ? 'active' : 'inactive';
     await db.customers.update(custId, { status: newStatus });
+  };
+
+  const handleToggleFertilizer = async (e, c) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const newServices = [...(c.services || DEFAULT_SERVICES)];
+    const fertIdx = newServices.findIndex(s => s.id === 's3');
+    
+    if (fertIdx >= 0) {
+      newServices[fertIdx].active = !newServices[fertIdx].active;
+    } else {
+      newServices.push({ id: 's3', name: 'Fertilizer', price: 75, active: true });
+    }
+    
+    await db.customers.update(c.id, { services: newServices });
+  };
+
+  const handleDownloadTemplate = () => {
+    const header = "Name,Address,Phone,Email,LawnSize,Mowing,Fertilizer\n";
+    const example = "John Doe,123 Main St Austin TX,555-0199,john@example.com,5000,no,yes\n";
+    const blob = new Blob([header + example], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'Customer_Import_Template.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const handleFileChange = async (e) => {
@@ -265,10 +310,15 @@ export default function CustomersList() {
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
+      
+      if (!row.name || !row.address) {
+        warnings.push(`Row ${i+2}: Missing Name or Address (Skipped)`);
+        continue;
+      }
+
       setImportProgress(`Geocoding ${i + 1} of ${rows.length}: ${row.name}...`);
 
       const isDupe = existing.some(c =>
-        c.name?.toLowerCase().trim() === row.name.toLowerCase().trim() &&
         c.address?.toLowerCase().trim() === row.address.toLowerCase().trim()
       );
 
@@ -278,9 +328,27 @@ export default function CustomersList() {
       }
 
       const geofence = await geocodeAddress(row.address);
-      
+      // Throttle between geocode calls to stay under the Geocoder's rate limit.
+      await sleep(150);
+
       if (!geofence) warnings.push(`${row.name}: Address not found on map`);
       if (!row.lawnSize) warnings.push(`${row.name}: Missing lawn size`);
+
+      const isFertilizer = row.fertilizer && ['yes', 'y', 'true', 'on', '1'].includes(row.fertilizer.toLowerCase());
+      
+      // Mowing is active by default unless explicitly turned off in the CSV
+      let isMowing = true;
+      if (row.mowing && ['no', 'n', 'false', 'off', '0'].includes(row.mowing.toLowerCase())) {
+        isMowing = false;
+      } else if (row.mowing && ['yes', 'y', 'true', 'on', '1'].includes(row.mowing.toLowerCase())) {
+        isMowing = true;
+      }
+
+      const rowServices = DEFAULT_SERVICES.map(s => {
+        if (s.id === 's1') return { ...s, active: isMowing };
+        if (s.id === 's3' && isFertilizer) return { ...s, active: true };
+        return s;
+      });
 
       await db.customers.add({
         name: row.name,
@@ -289,7 +357,7 @@ export default function CustomersList() {
         email: row.email,
         lawnSize: row.lawnSize,
         geofence: geofence || null,
-        services: DEFAULT_SERVICES,
+        services: rowServices,
         createdAt: Date.now(),
       });
       added.push(row.name);
@@ -420,11 +488,14 @@ export default function CustomersList() {
           <button className="btn btn-secondary" onClick={() => setViewMode(viewMode === 'cards' ? 'table' : 'cards')}>
             {viewMode === 'cards' ? 'Table View' : 'Card View'}
           </button>
+          <button className="btn btn-secondary" onClick={handleDownloadTemplate} title="Download CSV Template">
+            <Download size={16} /> Template
+          </button>
           <input ref={fileRef} type="file" accept=".csv" style={{ display: 'none' }} onChange={handleFileChange} />
           <button className="btn btn-secondary" onClick={() => fileRef.current?.click()}>
-            <Upload size={16} /> CSV
+            <Upload size={16} /> Import
           </button>
-          <button className="btn btn-primary" onClick={() => navigate('/customers/new')}>
+          <button className="btn btn-primary" onClick={() => navigate(showFertOnly ? '/customers/new?service=s3' : '/customers/new')}>
             <Plus size={18} /> New
           </button>
         </div>
@@ -463,6 +534,18 @@ export default function CustomersList() {
             {s === 'overdue' && 'Overdue'}
           </button>
         ))}
+        <button
+          onClick={() => setShowFertOnly(!showFertOnly)}
+          style={{
+            padding: '0.4rem 0.8rem', fontSize: '0.8rem', fontWeight: 600,
+            borderRadius: '999px', cursor: 'pointer', transition: 'all 0.15s',
+            border: showFertOnly ? '1px solid var(--color-secondary)' : '1px solid var(--color-border)',
+            background: showFertOnly ? 'rgba(59,130,246,0.1)' : 'var(--color-bg-main)',
+            color: showFertOnly ? 'var(--color-secondary)' : 'var(--color-text-main)'
+          }}
+        >
+          Fertilizer Only
+        </button>
         <div style={{ flex: 1 }} />
         {inactiveCount > 0 && (
           <button
@@ -493,7 +576,7 @@ export default function CustomersList() {
               {searchQuery ? 'Try adjusting your search terms or filters.' : 'Add your first customer manually or import a CSV roster to get started building your route.'}
             </p>
             {!searchQuery && (
-              <button className="btn btn-primary" onClick={() => navigate('/customers/new')}>
+              <button className="btn btn-primary" onClick={() => navigate(showFertOnly ? '/customers/new?service=s3' : '/customers/new')}>
                 <Plus size={18} /> Add Customer
               </button>
             )}
@@ -519,30 +602,31 @@ export default function CustomersList() {
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer',
                   borderLeft: `4px solid ${borderColor}`,
                   opacity: isInactive ? 0.6 : 1,
-                  padding: '1.2rem',
+                  padding: '0.8rem 1rem',
                   transition: 'transform 0.2s ease, box-shadow 0.2s ease'
                 }}
                 onMouseOver={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = 'var(--shadow-md)'; }}
                 onMouseOut={(e) => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'var(--shadow-sm)'; }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flex: 1, minWidth: 0, paddingRight: '1rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', flex: 1, minWidth: 0, paddingRight: '0.5rem' }}>
                     <Avatar name={c.name} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', marginBottom: '0.3rem' }}>
-                        <h3 style={{ margin: 0, color: 'var(--color-text-main)', fontSize: '1.15rem', fontWeight: 800 }}>{c.name}</h3>
-                        {isInactive && <span className="pill-tag neutral">INACTIVE</span>}
-                        {overduePill}
-                        {c.isOutlier && <span className="pill-tag danger"><AlertTriangle size={12} /> BAD GPS</span>}
-                        {c.address === 'Added from field' && <span className="pill-tag warning"><AlertTriangle size={12} /> MISSING INFO</span>}
+                    <div style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.2rem', overflowX: 'auto', scrollbarWidth: 'none', whiteSpace: 'nowrap' }}>
+                        <h3 style={{ margin: 0, color: 'var(--color-text-main)', fontSize: '1.05rem', fontWeight: 800, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</h3>
+                        {isInactive && <span className="pill-tag neutral" style={{ flexShrink: 0 }}>INACTIVE</span>}
+                        {overduePill && <span style={{ flexShrink: 0 }}>{overduePill}</span>}
+                        {c.isOutlier && <span className="pill-tag danger" style={{ flexShrink: 0 }}><AlertTriangle size={12} /> BAD GPS</span>}
+                        {(!c.address || c.address === 'Added from field') && <span className="pill-tag warning" style={{ flexShrink: 0 }}><AlertTriangle size={12} /> MISSING ADDRESS</span>}
+                        {!c.lawnSize && <span className="pill-tag warning" style={{ flexShrink: 0 }}><AlertTriangle size={12} /> MISSING LAWN SIZE</span>}
                       </div>
-                      <p style={{ margin: '0 0 0.5rem 0', color: 'var(--color-text-muted)', fontSize: '0.9rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.address}</p>
+                      <p style={{ margin: '0 0 0.4rem 0', color: 'var(--color-text-muted)', fontSize: '0.85rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.address}</p>
                       
-                      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'nowrap', overflowX: 'auto', scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch', paddingBottom: '2px' }}>
                         {c.stats && c.stats.count > 0 ? (
                           <>
-                            <span className="pill-tag neutral">{c.stats.count} visit{c.stats.count !== 1 ? 's' : ''}</span>
-                            <span className="pill-tag success">${c.stats.revenue.toFixed(0)} earned</span>
-                            <span className="pill-tag neutral">Last: {new Date(c.stats.lastExit).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
+                            <span className="pill-tag neutral" style={{ whiteSpace: 'nowrap', flexShrink: 0 }}>{c.stats.count} visit{c.stats.count !== 1 ? 's' : ''}</span>
+                            <span className="pill-tag success" style={{ whiteSpace: 'nowrap', flexShrink: 0 }}>${c.stats.revenue.toFixed(0)} earned</span>
+                            <span className="pill-tag neutral" style={{ whiteSpace: 'nowrap', flexShrink: 0 }}>Last: {new Date(c.stats.lastExit).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
                           </>
                         ) : (
                           <span className="pill-tag neutral">No visits yet</span>
@@ -551,6 +635,18 @@ export default function CustomersList() {
                     </div>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexShrink: 0 }}>
+                    <button
+                      onClick={(e) => handleToggleFertilizer(e, c)}
+                      className="btn"
+                      style={{ 
+                        padding: '0.4rem 0.8rem', fontSize: '0.75rem', fontWeight: 700, zIndex: 2,
+                        background: c.services?.find(s => s.id === 's3')?.active ? 'rgba(16,185,129,0.1)' : 'transparent',
+                        color: c.services?.find(s => s.id === 's3')?.active ? 'var(--color-primary)' : 'var(--color-text-muted)',
+                        border: c.services?.find(s => s.id === 's3')?.active ? '1px solid var(--color-primary)' : '1px solid var(--color-border)'
+                      }}
+                    >
+                      FERT
+                    </button>
                     <button
                       onClick={(e) => handleToggleStatus(e, c.id, c.status)}
                       className={`btn ${isInactive ? 'btn-primary' : 'btn-secondary'}`}
@@ -573,12 +669,14 @@ export default function CustomersList() {
                   <th style={{ padding: '0.8rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Address</th>
                   <th style={{ padding: '0.8rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Lawn Size (sqft)</th>
                   <th style={{ padding: '0.8rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Mowing Price</th>
+                  <th style={{ padding: '0.8rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600, textAlign: 'center' }}>Fertilizer</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredCustomers.map(c => {
                   const mowService = c.services?.find(s => s.id === 's1');
                   const dbPrice = mowService?.price || 0;
+                  const isFert = c.services?.find(s => s.id === 's3')?.active;
                   
                   const pending = pendingEdits[c.id] || {};
                   const currentName = pending.name !== undefined ? pending.name : c.name;
@@ -625,7 +723,7 @@ export default function CustomersList() {
                           style={{ width: '100%', padding: '0.4rem', border: 'none', background: 'transparent', color: 'var(--color-text-main)' }}
                         />
                       </td>
-                      <td style={{ padding: '0.4rem', background: currentPrice === 0 || currentPrice === '' ? 'rgba(245,158,11,0.1)' : 'transparent' }}>
+                      <td style={{ padding: '0.4rem', borderRight: '1px solid var(--color-border)', background: currentPrice === 0 || currentPrice === '' ? 'rgba(245,158,11,0.1)' : 'transparent' }}>
                         <div style={{ display: 'flex', alignItems: 'center' }}>
                           <span style={{ color: 'var(--color-text-muted)', paddingLeft: '0.4rem', fontWeight: 600 }}>$</span>
                           <input 
@@ -635,6 +733,23 @@ export default function CustomersList() {
                             style={{ width: '100%', padding: '0.4rem', border: 'none', background: 'transparent', color: 'var(--color-text-main)', fontWeight: 600 }}
                           />
                         </div>
+                      </td>
+                      <td style={{ padding: '0.4rem', textAlign: 'center' }}>
+                        <button
+                          onClick={(e) => handleToggleFertilizer(e, c)}
+                          style={{
+                            background: isFert ? 'var(--color-primary)' : 'var(--color-bg-card)',
+                            border: isFert ? '1px solid var(--color-primary)' : '1px solid var(--color-border)',
+                            color: isFert ? '#fff' : 'var(--color-text-muted)',
+                            borderRadius: 'var(--radius-full)',
+                            padding: '0.3rem 0.8rem',
+                            fontSize: '0.75rem',
+                            fontWeight: 700,
+                            cursor: 'pointer'
+                          }}
+                        >
+                          {isFert ? 'ON' : 'OFF'}
+                        </button>
                       </td>
                     </tr>
                   );

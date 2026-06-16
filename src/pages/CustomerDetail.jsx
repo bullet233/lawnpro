@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { db } from '../db/db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { MapPin, Save, ArrowLeft, Trash2, BarChart3, Clock, DollarSign, Calendar, Hash, Edit2 } from 'lucide-react';
@@ -15,6 +15,8 @@ export default function CustomerDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const isNew = id === 'new';
+  const [searchParams] = useSearchParams();
+  const defaultServiceParam = searchParams.get('service');
   
   const customer = useLiveQuery(() => 
     isNew ? null : db.customers.get(Number(id))
@@ -42,7 +44,16 @@ export default function CustomerDetail() {
 
   const [formData, setFormData] = useState({ name: '', address: '', phone: '', email: '', lawnSize: '', obstacleCount: '', terrain: 'flat', fencedBackyard: false, propertyNotes: '', serviceInterval: 7, mowingInterval: 7, fertilizerInterval: 30, fertilizerRounds: 6, specialApplications: '' });
   const [geofence, setGeofence] = useState(null);
-  const [services, setServices] = useState(defaultServices);
+  const [services, setServices] = useState(() => {
+    const globalDefaults = getSettings().defaultServices || defaultServices;
+    if (isNew && defaultServiceParam) {
+      return globalDefaults.map(s => ({
+        ...s,
+        active: s.id === defaultServiceParam
+      }));
+    }
+    return globalDefaults;
+  });
   const [autocomplete, setAutocomplete] = useState(null);
   const [activeTab, setActiveTab] = useState('details');
   const [dialog, setDialog] = useState(null);
@@ -71,7 +82,8 @@ export default function CustomerDetail() {
         mowingInterval: customer.mowingInterval || customer.serviceInterval || 7,
         fertilizerInterval: customer.fertilizerInterval || 30,
         fertilizerRounds: customer.fertilizerRounds || 6,
-        specialApplications: customer.specialApplications || ''
+        specialApplications: customer.specialApplications || '',
+        excludeFromAnalytics: customer.excludeFromAnalytics || false
       };
       setFormData(fd);
       initialDataRef.current = JSON.stringify(fd);
@@ -214,13 +226,70 @@ export default function CustomerDetail() {
       geofence: finalGeofence,
       services 
     };
+
+    const saveToDb = async () => {
+      if (isNew) {
+        dataToSave.createdAt = Date.now();
+        await db.customers.add(dataToSave);
+      } else {
+        await db.customers.update(Number(id), dataToSave);
+      }
+    };
+
     if (isNew) {
-      dataToSave.createdAt = Date.now();
-      await db.customers.add(dataToSave);
-    } else {
-      await db.customers.update(Number(id), dataToSave);
+      await saveToDb();
+      navigate('/customers');
+      return;
     }
-    navigate('/customers');
+
+    const changedServices = [];
+    services.forEach(s => {
+      const initS = initialData.services?.find(is => is.id === s.id);
+      if (initS && initS.price !== s.price) {
+        changedServices.push(s);
+      }
+    });
+
+    if (changedServices.length > 0) {
+      setDialog({
+        type: 'confirm',
+        title: 'Update Past Visits?',
+        message: `You updated prices for: ${changedServices.map(s => s.name).join(', ')}. Would you like to retroactively apply these new prices to all past visits to correct your historical revenue charts? (This will NOT modify any EPA compliance logs).`,
+        confirmLabel: 'Apply to Past Visits',
+        cancelLabel: 'No, Just Save Profile',
+        onConfirm: async () => {
+          await saveToDb();
+          const custId = Number(id);
+          const pastVisits = await db.visits.where({ customerId: custId }).toArray();
+          for (const v of pastVisits) {
+            let newPriceEarned = 0;
+            if (v.appliedServices && Array.isArray(v.appliedServices) && v.appliedServices.length > 0) {
+              for (const sId of v.appliedServices) {
+                const s = services.find(srv => srv.id === sId);
+                if (s) {
+                  newPriceEarned += s.price;
+                }
+              }
+              // Preserve any add-on revenue so retroactively re-pricing base services
+              // doesn't silently erase add-on charges from past visits.
+              const addOnTotal = Array.isArray(v.addOns) ? v.addOns.reduce((sum, a) => sum + (a.price || 0), 0) : 0;
+              newPriceEarned += addOnTotal;
+              if (newPriceEarned > 0 && newPriceEarned !== v.priceEarned) {
+                await db.visits.update(v.id, { priceEarned: newPriceEarned });
+              }
+            }
+          }
+          navigate('/customers');
+        },
+        onCancel: async () => {
+          await saveToDb();
+          navigate('/customers');
+        }
+      });
+    } else {
+      await saveToDb();
+      navigate('/customers');
+    }
   };
 
   const handleDelete = () => {
@@ -421,6 +490,21 @@ export default function CustomerDetail() {
                 />
                 <span className="input-label" style={{ margin: 0 }}>🚧 Fenced Backyard (gate access needed)</span>
               </label>
+            </div>
+
+            <div className="input-group">
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                <input 
+                  type="checkbox" 
+                  checked={formData.excludeFromAnalytics} 
+                  onChange={e => setFormData({ ...formData, excludeFromAnalytics: e.target.checked })}
+                  style={{ width: '18px', height: '18px' }}
+                />
+                <span className="input-label" style={{ margin: 0 }}>🚫 Exclude from Analytics</span>
+              </label>
+              <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginTop: '0.3rem' }}>
+                Check this if this property has unusual pricing, size, or difficulty that throws off your overall metrics.
+              </div>
             </div>
 
             <div className="input-group">
@@ -701,27 +785,12 @@ export default function CustomerDetail() {
         })()}
 
         {activeTab === 'location' && (
-          <div className="card animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <h2 style={{ margin: 0, fontSize: '1.1rem' }}>Property Boundary</h2>
-              <button 
-                className="btn btn-secondary" 
-                style={{ fontSize: '0.8rem', padding: '0.4rem 0.8rem' }}
-                onClick={() => setGeofence([])}
-              >
-                Clear Fence
-              </button>
-            </div>
-            <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', margin: 0 }}>
-              Draw the property line to track exactly how long you spend on site automatically.
-            </p>
-            <div style={{ height: '400px', width: '100%', borderRadius: 'var(--radius-md)', overflow: 'hidden', border: '1px solid var(--color-border)' }}>
-              <GeofenceEditor 
-                initialPolygon={geofence} 
-                onSave={(poly) => setGeofence(poly)} 
-                address={formData.address}
-              />
-            </div>
+          <div className="animate-fade-in">
+            <GeofenceEditor 
+              initialPolygon={geofence} 
+              onSave={(poly) => setGeofence(poly)} 
+              address={formData.address}
+            />
           </div>
         )}
 
@@ -796,6 +865,19 @@ export default function CustomerDetail() {
         <button className="btn btn-primary" onClick={handleSave} style={{ width: '100%', padding: '1rem', fontSize: '1rem' }}>
           <Save size={20} /> {isDirty ? '● Save Client Profile' : 'Save Client Profile'}
         </button>
+      )}
+
+      {editingJob && (
+        <VisitEditModal
+          job={editingJob}
+          customer={customer}
+          defaultServices={settings?.defaultServices}
+          onClose={() => setEditingJob(null)}
+          onSave={async (updates) => {
+            await db.visits.update(editingJob.id, updates);
+            setEditingJob(null);
+          }}
+        />
       )}
     </div>
   );
