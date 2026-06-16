@@ -12,6 +12,7 @@ import LiveTimerPanel from '../components/livemap/LiveTimerPanel';
 import PendingArrivalAlert from '../components/livemap/PendingArrivalAlert';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/db';
+import { GeofenceEngine } from '../engine/GeofenceEngine';
 import { GoogleMap, Marker, Polygon } from '@react-google-maps/api';
 import { useMapStatus } from '../components/MapProvider';
 import { CheckCircle, Navigation, MapPin, FastForward, CloudRain, ChevronUp, ChevronDown, SkipForward, Sun, CloudSun, Cloud, CloudDrizzle, CloudSnow, CloudLightning, X, Play, Pause, FileText, Map as MapIcon, ClipboardList, AlertTriangle } from 'lucide-react';
@@ -341,6 +342,72 @@ export default function LiveMap() {
   };
 
   // 4. Job Timers & Driveby Detection
+  
+  // --- GEOFENCE TRACKING ENGINE ---
+  const engineRef = useRef(null);
+  if (!engineRef.current) {
+    engineRef.current = new GeofenceEngine({
+      enterDebounceMs: 8000,
+      exitDebounceMs: 15000,
+      drivebyThresholdSecs: getSettings().drivebyThresholdSecs || 45,
+      onEnter: (customer) => {
+        if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+        startTimer();
+        activeGeofenceIdRef.current = customer.id;
+        setActiveGeofence(customer);
+        setPendingArrival(null);
+      },
+      onPendingEnter: (customer, remainingSecs) => {
+        if (!customer) {
+          setPendingArrival(null);
+        } else {
+          setPendingArrival({ name: customer.name, secondsLeft: remainingSecs });
+        }
+      },
+      onExit: (customer, durationSecs) => {
+        // The engine calls this, but we can just use our existing handleExitGeofence
+        handleExitGeofence();
+      },
+      onDriveBy: (customer, durationSecs) => {
+        // In our current setup, handleExitGeofence handles driveby detection internally.
+        // We just call it.
+        handleExitGeofence();
+      },
+      onOpportunityFound: (customer) => {
+        if (customer) {
+          setNearbyOpportunity(customer);
+        } else {
+          setNearbyOpportunity(null);
+        }
+      }
+    });
+  }
+
+  // Update engine context
+  useEffect(() => {
+    if (engineRef.current && activeRoute) {
+      engineRef.current.setContext({
+        routeStops: activeRoute.expandedStops || [],
+        allCustomers: allCustomers || [],
+        routeVisits: routeVisits || [],
+        dismissedOpportunities: dismissedOpportunitiesRef.current,
+        anchorGeofence: anchorGeofenceRef.current,
+        isJobPaused: timerState === 'paused'
+      });
+    }
+  }, [activeRoute, allCustomers, routeVisits, timerState]);
+
+  // Feed position to engine
+  useEffect(() => {
+    if (!activeRoute || !position) return;
+    engineRef.current.updateLocation({
+      lat: position.lat,
+      lng: position.lng,
+      accuracy: accuracy,
+      timestamp: Date.now()
+    });
+  }, [position, activeRoute, accuracy]);
+
   const handleExitGeofence = () => {
     // Use timerStateRef (not timerState) to avoid stale closure from watchPosition
     const finalDuration = Math.floor(
