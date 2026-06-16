@@ -983,6 +983,19 @@ export default function Settings() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
             <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-primary)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.2.0</h3>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>June 2026</span>
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '1.2rem', color: 'var(--color-text-main)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <li><strong>Live Map Architecture Rescue:</strong> Completely decoupled the monolithic map controller, safely moving background timers and GPS tracking into custom hooks to eliminate memory leaks and stale closures.</li>
+                <li><strong>Fixed Real-Time Map Triggers:</strong> "Nearby Opportunities" and Auto-Checkout now perfectly read your real-time GPS coordinates rather than where you were hours ago.</li>
+                <li><strong>Advanced Chemical Notices:</strong> Added support for rich, multi-line instructions for EPA chemicals across Settings and Compliance logs.</li>
+                <li><strong>Drive Time Analytics Integrity:</strong> You can now track exactly where drive times originated (GPS Live Timer vs. Manual Override vs. Wall-clock fallback) ensuring clean analytics data.</li>
+              </ul>
+            </div>
+            
+            <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-border)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
                 <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.1.0</h3>
                 <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>June 2026</span>
               </div>
