@@ -181,11 +181,40 @@ export default function DayReviewModal({ onClose }) {
       });
     }
 
+    // Calculate mower hours, excluding pure fertilizer/weed control jobs
+    let totalMowerSecs = 0;
+    let nonFertilizerJobsCount = 0;
+    
+    todayVisits.forEach(v => {
+      const cust = allCustomers.find(c => c.id === v.customerId);
+      const applied = edits[v.id]?.appliedServices || v.appliedServices || [];
+      
+      let isOnlyFertilizer = true;
+      if (applied.length === 0) isOnlyFertilizer = false;
+      
+      applied.forEach(svcId => {
+        const svcDef = cust?.services?.find(s => s.id === svcId);
+        if (svcDef && svcDef.category !== 'Fertilizer' && svcDef.category !== 'Weed Control') {
+          isOnlyFertilizer = false;
+        }
+      });
+      
+      if (!isOnlyFertilizer) {
+        totalMowerSecs += (v.durationSecs || 0);
+        nonFertilizerJobsCount++;
+      }
+    });
+
+    // If the entire day was ONLY fertilizer jobs, skip logging fuel entirely.
+    if (nonFertilizerJobsCount === 0 && todayVisits.length > 0) {
+      onClose();
+      return;
+    }
+
     // Save fuel log
     const miles = parseFloat(truckMiles);
     const settings = getSettings();
-    const totalSecs = todayVisits.reduce((sum, v) => sum + (v.durationSecs || 0), 0);
-    const mowerHours = totalSecs / 3600;
+    const mowerHours = totalMowerSecs / 3600;
     const todayDate = new Date().toLocaleDateString('en-CA');
 
     if (!isNaN(miles)) {
