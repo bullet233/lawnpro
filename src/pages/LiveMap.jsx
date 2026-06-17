@@ -420,6 +420,7 @@ export default function LiveMap() {
       accumulatedTimeRef.current + 
       (timerStateRef.current === 'running' && lastResumeTimeRef.current ? (Date.now() - lastResumeTimeRef.current) / 1000 : 0)
     );
+    const entryTime = jobStartRef.current;
     const completedCustId = activeGeofenceIdRef.current;
     const completedCust = allCustomersRef.current.find(c => c.id === completedCustId);
 
@@ -433,9 +434,9 @@ export default function LiveMap() {
     const threshold = getSettings().drivebyThresholdSecs || 45;
 
     if (finalDuration < threshold && completedCust) {
-      setDrivebyPrompt({ customer: completedCust, duration: finalDuration, entry: jobStartRef.current, driveTime: capturedDriveTimeSecsRef.current });
+      setDrivebyPrompt({ customer: completedCust, duration: finalDuration, entry: entryTime, driveTime: capturedDriveTimeSecsRef.current });
     } else if (completedCust) {
-      logVisit(completedCust, finalDuration, jobStartRef.current, 'completed', liveNoteRef.current, capturedDriveTimeSecsRef.current);
+      logVisit(completedCust, finalDuration, entryTime, 'completed', liveNoteRef.current, capturedDriveTimeSecsRef.current);
       setLiveNote('');
     }
   };
@@ -451,6 +452,7 @@ export default function LiveMap() {
       accumulatedTimeRef.current + 
       (timerStateRef.current === 'running' && lastResumeTimeRef.current ? (Date.now() - lastResumeTimeRef.current) / 1000 : 0)
     );
+    const entryTime = jobStartRef.current;
     const completedCust = activeGeofence;
     
     activeGeofenceIdRef.current = null;
@@ -460,7 +462,7 @@ export default function LiveMap() {
     potentialEnterRef.current = null;
     potentialExitRef.current = null;
     
-    logVisit(completedCust, finalDuration, jobStartRef.current, 'completed', liveNote);
+    logVisit(completedCust, finalDuration, entryTime, 'completed', liveNote);
     setLiveNote('');
   };
 
