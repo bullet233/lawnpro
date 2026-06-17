@@ -447,6 +447,13 @@ export default function LiveMap() {
     setActiveEpaJob(null);
   };
 
+  const finishActiveRoute = async () => {
+    if (!activeRoute) return;
+    await db.routes.update(activeRoute.id, { status: 'completed' });
+    resetDriveTimer(false);
+    setShowDayReview(true);
+  };
+
   const handleManualDone = () => {
     const finalDuration = Math.floor(
       accumulatedTimeRef.current + 
