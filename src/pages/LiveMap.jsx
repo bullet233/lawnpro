@@ -429,9 +429,7 @@ export default function LiveMap() {
     resetJobTimer();
     potentialEnterRef.current = null;
     potentialExitRef.current = null;
-    lastDriveResumeTimeRef.current = Date.now();
-    isDrivingPausedRef.current = false;
-
+    
     const threshold = getSettings().drivebyThresholdSecs || 45;
 
     if (finalDuration < threshold && completedCust) {
@@ -461,18 +459,12 @@ export default function LiveMap() {
     resetJobTimer();
     potentialEnterRef.current = null;
     potentialExitRef.current = null;
-    accumulatedDriveTimeRef.current = 0;
-    lastDriveResumeTimeRef.current = Date.now();
-    isDrivingPausedRef.current = false;
     
     logVisit(completedCust, finalDuration, jobStartRef.current, 'completed', liveNote);
     setLiveNote('');
   };
 
   const logVisit = async (customer, durationSecs, entryTime, status, note = '', overrideDriveTimeSecs = null) => {
-    accumulatedDriveTimeRef.current = 0;
-    lastDriveResumeTimeRef.current = Date.now();
-    isDrivingPausedRef.current = false;
     const route = activeRouteRef.current;
     let priceEarned = 0;
     let appliedServices = [];
