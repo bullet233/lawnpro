@@ -595,11 +595,22 @@ export default function CustomerDetail() {
           const visitCount = completed.length;
           const totalRevenue = customerVisits.reduce((s, v) => s + (v.priceEarned || 0), 0);
           
-          // Last mowed
+          // Distinguish visits
           const sortedByDate = [...completed].sort((a, b) => b.exitTime - a.exitTime);
-          const lastVisit = sortedByDate[0];
-          const lastMowedDate = lastVisit ? new Date(lastVisit.exitTime) : null;
-          const daysSince = lastMowedDate ? getDaysSince(lastMowedDate.getTime()) : null;
+          const globalDefaults = settings?.defaultServices || [];
+          const mowingServiceIds = globalDefaults.filter(s => s.category === 'Mowing' || s.id === 's1').map(s => s.id);
+          const fertServiceIds = globalDefaults.filter(s => s.category === 'Fertilizer' || s.id === 's3').map(s => s.id);
+
+          const mowVisits = sortedByDate.filter(v => !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id)));
+          const fertVisits = sortedByDate.filter(v => v.appliedServices && v.appliedServices.some(id => fertServiceIds.includes(id)));
+
+          const lastMowVisit = mowVisits[0];
+          const lastMowedDate = lastMowVisit ? new Date(lastMowVisit.exitTime) : null;
+          const daysSinceMow = lastMowedDate ? getDaysSince(lastMowedDate.getTime()) : null;
+
+          const lastFertVisit = fertVisits[0];
+          const lastFertDate = lastFertVisit ? new Date(lastFertVisit.exitTime) : null;
+          const daysSinceFert = lastFertDate ? getDaysSince(lastFertDate.getTime()) : null;
 
           // Avg $/hr
           const totalSecs = completed.reduce((s, v) => s + (v.durationSecs || 0) + (v.driveTimeSecs || 0), 0);
@@ -685,20 +696,40 @@ export default function CustomerDetail() {
                   </div>
 
                   {/* Last Mowed */}
-                  <div style={{ background: 'var(--color-bg-main)', padding: '0.8rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                      <Calendar size={15} color="var(--color-text-muted)" />
-                      <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>Last Mowed</span>
-                    </div>
-                    <div style={{ textAlign: 'right' }}>
-                      <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>
-                        {lastMowedDate.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
+                  {lastMowedDate && (
+                    <div style={{ background: 'var(--color-bg-main)', padding: '0.8rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                        <Calendar size={15} color="var(--color-text-muted)" />
+                        <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>Last Mowed</span>
                       </div>
-                      <div style={{ fontSize: '0.75rem', color: daysSince <= 7 ? 'var(--color-primary)' : daysSince <= 14 ? '#f59e0b' : '#ef4444', fontWeight: 600 }}>
-                        {daysSince === 0 ? 'Today' : daysSince === 1 ? 'Yesterday' : `${daysSince} days ago`}
+                      <div style={{ textAlign: 'right' }}>
+                        <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>
+                          {lastMowedDate.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
+                        </div>
+                        <div style={{ fontSize: '0.75rem', color: daysSinceMow <= (formData.mowingInterval || 7) ? 'var(--color-primary)' : daysSinceMow <= (formData.mowingInterval || 7) + 3 ? '#f59e0b' : '#ef4444', fontWeight: 600 }}>
+                          {daysSinceMow === 0 ? 'Today' : daysSinceMow === 1 ? 'Yesterday' : `${daysSinceMow} days ago`}
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  )}
+
+                  {/* Last Fertilized */}
+                  {lastFertDate && (
+                    <div style={{ background: 'var(--color-bg-main)', padding: '0.8rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                        <Calendar size={15} color="var(--color-text-muted)" />
+                        <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>Last Fertilized</span>
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>
+                          {lastFertDate.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
+                        </div>
+                        <div style={{ fontSize: '0.75rem', color: daysSinceFert <= (formData.fertilizerInterval || 30) ? 'var(--color-primary)' : daysSinceFert <= (formData.fertilizerInterval || 30) + 7 ? '#f59e0b' : '#ef4444', fontWeight: 600 }}>
+                          {daysSinceFert === 0 ? 'Today' : daysSinceFert === 1 ? 'Yesterday' : `${daysSinceFert} days ago`}
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Per-Service Avg Times */}
                   {serviceAvgs.length > 0 && (

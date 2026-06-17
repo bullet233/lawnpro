@@ -700,14 +700,15 @@ export default function History() {
           <p>{timeFilter === 'all' ? 'All Time' : new Date().toLocaleDateString()}</p>
         </div>
         
-        {Object.entries(
+        {Object.values(
           historyLog.reduce((acc, job) => {
-            if (!acc[job.custName]) acc[job.custName] = [];
-            acc[job.custName].push(job);
+            const key = job.customerId ?? `name:${job.custName}`;
+            if (!acc[key]) acc[key] = { custName: job.custName, jobs: [] };
+            acc[key].jobs.push(job);
             return acc;
           }, {})
-        ).sort((a, b) => a[0].localeCompare(b[0])).map(([custName, jobs]) => (
-          <div key={custName} className="print-customer-section" style={{ borderBottom: '1px solid #ccc', paddingBottom: '0.8rem', marginBottom: '1rem', pageBreakInside: 'avoid' }}>
+        ).sort((a, b) => a.custName.localeCompare(b.custName)).map(({ custName, jobs }, gi) => (
+          <div key={jobs[0].customerId ?? `name-${gi}`} className="print-customer-section" style={{ borderBottom: '1px solid #ccc', paddingBottom: '0.8rem', marginBottom: '1rem', pageBreakInside: 'avoid' }}>
             <strong style={{ fontSize: '1.1rem', display: 'block', marginBottom: '0.3rem' }}>{custName}</strong>
             <div style={{ fontSize: '0.95rem', lineHeight: '1.4' }}>
               {jobs.slice().sort((a, b) => a.exitTime - b.exitTime).map(job => {

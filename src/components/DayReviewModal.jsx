@@ -78,6 +78,8 @@ export default function DayReviewModal({ onClose }) {
             } else {
                if (todayRoute && todayRoute.plannedDistanceMiles) {
                  setTruckMiles(todayRoute.plannedDistanceMiles.toString());
+               } else {
+                 setTruckMiles('0.0');
                }
             }
             setIsCalculatingMiles(false);

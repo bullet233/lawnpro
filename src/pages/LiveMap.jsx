@@ -148,6 +148,12 @@ export default function LiveMap() {
     activeRouteRef.current = activeRoute;
   }, [activeRoute]);
 
+  // Reset dismissed opportunities when switching to a different route so
+  // dismissals don't accumulate permanently across routes.
+  useEffect(() => {
+    dismissedOpportunitiesRef.current.clear();
+  }, [activeRoute?.id]);
+
   useEffect(() => {
     timerStateRef.current = timerState;
   }, [timerState]);
@@ -580,15 +586,15 @@ export default function LiveMap() {
           // Retry in 5 seconds if user is actively typing
           completionTimerRef.current = setTimeout(async () => {
             // Save note on final auto-dismiss so typed text is never lost
-            const currentNote = panelNoteRef.current.trim();
-            if (currentNote && completionPanel?.visitId) {
-              await db.visits.update(completionPanel.visitId, { note: currentNote });
+            const currentNote = (panelNoteRef.current || '').trim();
+            if (currentNote && visitId) {
+              await db.visits.update(visitId, { note: currentNote });
             }
             setCompletionPanel(null);
           }, 5000);
         } else {
           // Save note on auto-dismiss so typed text is never lost
-          const currentNote = panelNoteRef.current.trim();
+          const currentNote = (panelNoteRef.current || '').trim();
           if (currentNote && visitId) {
             await db.visits.update(visitId, { note: currentNote });
           }

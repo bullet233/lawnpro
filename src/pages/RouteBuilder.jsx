@@ -656,7 +656,7 @@ export default function RouteBuilder() {
                     const activeServices = s.customer.services?.filter(srv => srv.active) || [];
                     const plannedTotal = activeServices
                       .filter(srv => s.plannedServiceIds.includes(srv.id))
-                      .reduce((sum, srv) => sum + srv.price, 0);
+                      .reduce((sum, srv) => sum + (srv.price || 0), 0);
                     totalRev += plannedTotal;
 
                     if (s.plannedDriveTimeSecs != null) totalDriveSecs += s.plannedDriveTimeSecs;

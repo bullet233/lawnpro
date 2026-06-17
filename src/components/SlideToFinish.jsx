@@ -36,7 +36,7 @@ export default function SlideToFinish({ onComplete }) {
         SLIDE TO FINISH JOB
       </div>
       <div 
-        style={{ position: 'absolute', left: `calc(${progress * 100}% - ${progress * 44}px - 4px)`, top: '4px', width: '44px', height: '44px', borderRadius: '50%', background: '#10b981', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ffffff', transition: progress === 0 ? 'left 0.3s' : 'none', cursor: 'grab', zIndex: 2, boxShadow: '0 2px 8px rgba(16,185,129,0.4)' }}
+        style={{ position: 'absolute', left: `calc(4px + ${progress} * (100% - 52px))`, top: '4px', width: '44px', height: '44px', borderRadius: '50%', background: '#10b981', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ffffff', transition: progress === 0 ? 'left 0.3s' : 'none', cursor: 'grab', zIndex: 2, boxShadow: '0 2px 8px rgba(16,185,129,0.4)' }}
       >
         <FastForward size={22} fill="currentColor" />
       </div>

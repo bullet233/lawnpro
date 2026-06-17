@@ -4,6 +4,7 @@ export function useWeatherTracker(positionRef) {
   const [weather, setWeather] = useState(null);
   const weatherRef = useRef(null);
   const weatherTimerRef = useRef(null);
+  const weatherInitTimeoutRef = useRef(null);
 
   const fetchWeather = async (lat, lng) => {
     try {
@@ -27,7 +28,7 @@ export function useWeatherTracker(positionRef) {
     // We start polling once we have a position ref
     if (!weatherTimerRef.current) {
       // Small timeout to allow positionRef to populate initially
-      setTimeout(() => {
+      weatherInitTimeoutRef.current = setTimeout(() => {
         if (positionRef.current) {
           fetchWeather(positionRef.current.lat, positionRef.current.lng);
         }
@@ -41,6 +42,10 @@ export function useWeatherTracker(positionRef) {
     }
 
     return () => {
+      if (weatherInitTimeoutRef.current) {
+        clearTimeout(weatherInitTimeoutRef.current);
+        weatherInitTimeoutRef.current = null;
+      }
       if (weatherTimerRef.current) {
         clearInterval(weatherTimerRef.current);
         weatherTimerRef.current = null;

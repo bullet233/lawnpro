@@ -26,7 +26,7 @@ export function useDriveTimer() {
         const isStale = savedAt && (Date.now() - savedAt) > 12 * 60 * 60 * 1000;
 
         if (!isPaused && !isStale && lastResume && savedAt) {
-          accumulatedDriveTimeRef.current = accumulated + (Date.now() - savedAt) / 1000;
+          accumulatedDriveTimeRef.current = (accumulated || 0) + (Date.now() - savedAt) / 1000;
           lastDriveResumeTimeRef.current = Date.now();
           isDrivingPausedRef.current = false;
           setIsDrivingPaused(false);

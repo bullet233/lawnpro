@@ -4,6 +4,7 @@ import { db } from '../db/db';
 import { Plus, ChevronRight, Upload, CheckCircle, AlertTriangle, Search, ArrowUpDown, Save, Users, Download } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import AppDialog from '../components/AppDialog';
+import { getSettings } from '../db/settings';
 import { trackApiCall } from '../utils/apiTracker';
 import { getDaysSince } from '../utils/dateUtils';
 
@@ -115,6 +116,11 @@ export default function CustomersList() {
   const visitStats = useMemo(() => {
     if (!allVisits) return {};
     const stats = {};
+    const settings = getSettings();
+    const defaultServices = settings.defaultServices || [];
+    const mowingServiceIds = defaultServices.filter(s => s.category === 'Mowing' || s.id === 's1').map(s => s.id);
+    const fertServiceIds = defaultServices.filter(s => s.category === 'Fertilizer' || s.id === 's3').map(s => s.id);
+
     for (const v of allVisits) {
       if (v.status === 'skipped') continue;
       if (!stats[v.customerId]) stats[v.customerId] = { count: 0, lastExit: 0, lastMow: 0, lastFert: 0, firstExit: Infinity, revenue: 0 };
@@ -124,8 +130,8 @@ export default function CustomersList() {
       if (v.exitTime > s.lastExit) s.lastExit = v.exitTime;
       if (v.exitTime < s.firstExit) s.firstExit = v.exitTime;
       
-      const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.includes('s1') || v.appliedServices.some(sv => typeof sv === 'string' && sv.toLowerCase().includes('mow'));
-      const isFert = v.appliedServices && v.appliedServices.includes('s3');
+      const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id));
+      const isFert = v.appliedServices && v.appliedServices.some(id => fertServiceIds.includes(id));
       
       if (isMow && v.exitTime > s.lastMow) s.lastMow = v.exitTime;
       if (isFert && v.exitTime > s.lastFert) s.lastFert = v.exitTime;
