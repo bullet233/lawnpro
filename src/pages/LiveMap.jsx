@@ -1189,6 +1189,7 @@ export default function LiveMap() {
         isRouteListOpen={isRouteListOpen}
         setIsRouteListOpen={setIsRouteListOpen}
         progressInfo={progressInfo}
+        onAddUnplanned={() => setShowQuickAdd(true)}
         onStartJob={(stop) => {
           if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
           activeGeofenceIdRef.current = stop.id;
