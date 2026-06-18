@@ -266,7 +266,7 @@ export default function CustomersList() {
   const handleToggleFertilizer = async (e, c) => {
     e.preventDefault();
     e.stopPropagation();
-    const newServices = [...(c.services || DEFAULT_SERVICES)];
+    const newServices = JSON.parse(JSON.stringify(c.services || DEFAULT_SERVICES));
     const fertIdx = newServices.findIndex(s => s.id === 's3');
     
     if (fertIdx >= 0) {
@@ -468,7 +468,7 @@ export default function CustomersList() {
                     if (edits.lawnSize !== undefined) updates.lawnSize = edits.lawnSize;
                     
                     if (edits.price !== undefined) {
-                      const newServices = [...(c.services || DEFAULT_SERVICES)];
+                      const newServices = JSON.parse(JSON.stringify(c.services || DEFAULT_SERVICES));
                       const idx = newServices.findIndex(s => s.id === 's1');
                       if (idx >= 0) newServices[idx].price = Number(edits.price);
                       else newServices.push({ id: 's1', name: 'Mowing', price: Number(edits.price), active: true });
