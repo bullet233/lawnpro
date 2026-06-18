@@ -7,6 +7,8 @@ export function calculateTieredMatrix(allVisits, allCustomers) {
   if (!allVisits || !allCustomers || allVisits.length === 0 || allCustomers.length === 0) return null;
 
   const settings = getSettings();
+  const defaultServices = settings.defaultServices || [];
+  const mowingServiceIds = defaultServices.filter(s => s.category === 'Mowing' || s.id === 's1').map(s => s.id);
 
   const buckets = [
     { maxSqft: 2500, label: '0 - 2.5k' },
@@ -24,7 +26,7 @@ export function calculateTieredMatrix(allVisits, allCustomers) {
 
   allVisits.forEach(v => {
     if (v.status !== 'completed' || !v.durationSecs || v.durationSecs < 60) return;
-    const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.includes('s1') || v.appliedServices.some(s => typeof s === 'string' && s.toLowerCase().includes('mow'));
+    const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id));
     if (!isMow) return;
     
     const cust = allCustomers.find(c => c.id === v.customerId);
