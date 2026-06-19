@@ -247,8 +247,20 @@ export default function LiveMap() {
     
     activeRoute.expandedStops.forEach(s => {
        if (getStopStatus(s.id) === 'pending') {
+          const normalizedStop = activeRoute.normalizedStops?.find(n => n.customerId === s.id);
+          const plannedIds = normalizedStop?.plannedServiceIds || [];
+          
+          const settings = getSettings();
+          const defaultServices = settings.defaultServices || [];
+          const isPlannedMow = plannedIds.length === 0 || plannedIds.some(id => defaultServices.find(ds => ds.id === id)?.category === 'Mowing' || id === 's1');
+
           // Find historical visits for this customer to calculate average time
-          const histVisits = allVisits.filter(v => v.customerId === s.id && v.status === 'completed' && v.durationSecs);
+          const histVisits = allVisits.filter(v => {
+            if (v.customerId !== s.id || v.status !== 'completed' || !v.durationSecs) return false;
+            const isHistMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => defaultServices.find(ds => ds.id === id)?.category === 'Mowing' || id === 's1');
+            return isPlannedMow === isHistMow;
+          });
+
           let avgDuration = 900; // Default 15 mins
           if (histVisits.length > 0) {
              const sum = histVisits.reduce((acc, v) => acc + v.durationSecs, 0);
@@ -257,7 +269,7 @@ export default function LiveMap() {
              const cust = allCustomers.find(c => c.id === s.id);
              if (cust && cust.lawnSize) {
                 const sqft = parseLawnSizeToSqFt(cust.lawnSize);
-                if (sqft) avgDuration = Math.max(600, Math.round((sqft / globalPace) * 60));
+                if (sqft) avgDuration = Math.max(isPlannedMow ? 600 : 300, Math.round((sqft / globalPace) * 60));
              }
           }
           

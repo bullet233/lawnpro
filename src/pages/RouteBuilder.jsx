@@ -663,13 +663,20 @@ export default function RouteBuilder() {
                     else missingDrive = true;
 
                     let avgDuration = 900;
-                    const histVisits = allVisits.filter(v => v.customerId === s.customer.id && v.status === 'completed' && v.durationSecs);
+                    const isPlannedMow = !s.plannedServiceIds || s.plannedServiceIds.length === 0 || s.plannedServiceIds.some(id => settings?.defaultServices?.find(ds => ds.id === id)?.category === 'Mowing' || id === 's1');
+
+                    const histVisits = allVisits.filter(v => {
+                      if (v.customerId !== s.customer.id || v.status !== 'completed' || !v.durationSecs) return false;
+                      const isHistMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => settings?.defaultServices?.find(ds => ds.id === id)?.category === 'Mowing' || id === 's1');
+                      return isPlannedMow === isHistMow;
+                    });
+
                     if (histVisits.length > 0) {
                        avgDuration = histVisits.reduce((acc, v) => acc + v.durationSecs, 0) / histVisits.length;
                     } else if (s.customer.lawnSize) {
                        const sqft = parseLawnSizeToSqFt(s.customer.lawnSize);
                        if (sqft) {
-                         avgDuration = Math.max(600, Math.round((sqft / globalPace) * 60));
+                         avgDuration = Math.max(isPlannedMow ? 600 : 300, Math.round((sqft / globalPace) * 60));
                        }
                     }
                     totalMowSecs += avgDuration;

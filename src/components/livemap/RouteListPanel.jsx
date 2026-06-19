@@ -1,5 +1,6 @@
 import { CheckCircle, SkipForward, Navigation, ChevronUp, ChevronDown } from 'lucide-react';
 import { parseLawnSizeToSqFt } from '../../utils/parseLawnSize';
+import { getSettings } from '../../db/settings';
 
 export default function RouteListPanel({
   activeRoute,
@@ -99,14 +100,25 @@ export default function RouteListPanel({
                       <span>{stop.address}</span>
                       {status === 'pending' && (() => {
                          let estMins = 15;
-                         const histVisits = allVisits.filter(v => v.customerId === stop.id && v.status === 'completed' && v.durationSecs);
+                         const normalizedStop = activeRoute.normalizedStops?.find(n => n.customerId === stop.id);
+                         const plannedIds = normalizedStop?.plannedServiceIds || [];
+                         
+                         const settings = getSettings();
+                         const defaultServices = settings.defaultServices || [];
+                         const isPlannedMow = plannedIds.length === 0 || plannedIds.some(id => defaultServices.find(s => s.id === id)?.category === 'Mowing' || id === 's1');
+
+                         const histVisits = allVisits.filter(v => {
+                           if (v.customerId !== stop.id || v.status !== 'completed' || !v.durationSecs) return false;
+                           const isHistMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => defaultServices.find(s => s.id === id)?.category === 'Mowing' || id === 's1');
+                           return isPlannedMow === isHistMow;
+                         });
+
                          if (histVisits.length > 0) {
                            estMins = Math.round((histVisits.reduce((acc, v) => acc + v.durationSecs, 0) / histVisits.length) / 60);
                          } else if (stop.lawnSize) {
                            const sqft = parseLawnSizeToSqFt(stop.lawnSize);
-                           if (sqft) estMins = Math.max(10, Math.round(sqft / globalPace));
+                           if (sqft) estMins = Math.max(isPlannedMow ? 10 : 5, Math.round(sqft / globalPace));
                          }
-                         const normalizedStop = activeRoute.normalizedStops?.find(n => n.customerId === stop.id);
                          const driveMins = normalizedStop?.plannedDriveTimeSecs ? Math.round(normalizedStop.plannedDriveTimeSecs / 60) : null;
                          return (
                            <span style={{ fontWeight: 600, color: 'var(--color-primary)', whiteSpace: 'nowrap' }}>
