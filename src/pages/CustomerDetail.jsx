@@ -638,7 +638,7 @@ export default function CustomerDetail() {
           });
 
           // Overall avg blade & drive time
-          const avgBladeSecs = visitCount > 0 ? completed.reduce((s, v) => s + v.durationSecs, 0) / visitCount : 0;
+          const avgBladeSecs = mowVisits.length > 0 ? mowVisits.reduce((s, v) => s + v.durationSecs, 0) / mowVisits.length : 0;
           const avgDriveSecs = visitCount > 0 ? completed.reduce((s, v) => s + (v.driveTimeSecs || 0), 0) / visitCount : 0;
 
           let ehrColor = 'var(--color-primary)';

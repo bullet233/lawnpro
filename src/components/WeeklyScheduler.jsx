@@ -180,7 +180,14 @@ export default function WeeklyScheduler({ customers, tieredMatrixData, settings,
                 // Find last mowed
                 let lastMowedDays = null;
                 if (allVisits) {
-                  const custVisits = allVisits.filter(v => v.customerId === cust.id && v.status === 'completed');
+                  const defaultServices = settings?.defaultServices || [];
+                  const mowingServiceIds = defaultServices.filter(s => s.category === 'Mowing' || s.id === 's1').map(s => s.id);
+                  
+                  const custVisits = allVisits.filter(v => {
+                    if (v.customerId !== cust.id || v.status !== 'completed') return false;
+                    const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id));
+                    return isMow;
+                  });
                   if (custVisits.length > 0) {
                     custVisits.sort((a, b) => b.exitTime - a.exitTime);
                     lastMowedDays = getDaysSince(custVisits[0].exitTime);
