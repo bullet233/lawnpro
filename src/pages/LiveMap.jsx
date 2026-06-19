@@ -47,7 +47,7 @@ export default function LiveMap() {
   
   const { 
     isDrivingPaused, drivingDuration, togglePause: toggleDrivePause, 
-    resetTimer: resetDriveTimer, getFinalDriveTimeSecs,
+    pauseTimer: pauseDriveTimer, resetTimer: resetDriveTimer, getFinalDriveTimeSecs,
     isDrivingPausedRef, accumulatedDriveTimeRef, lastDriveResumeTimeRef 
   } = useDriveTimer();
 
@@ -370,6 +370,8 @@ export default function LiveMap() {
       onEnter: (customer) => {
         if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
         startTimer();
+        capturedDriveTimeSecsRef.current = getFinalDriveTimeSecs();
+        pauseDriveTimer();
         activeGeofenceIdRef.current = customer.id;
         setActiveGeofence(customer);
         setPendingArrival(null);
@@ -480,7 +482,7 @@ export default function LiveMap() {
     potentialEnterRef.current = null;
     potentialExitRef.current = null;
     
-    logVisit(completedCust, finalDuration, entryTime, 'completed', liveNote);
+    logVisit(completedCust, finalDuration, entryTime, 'completed', liveNote, capturedDriveTimeSecsRef.current);
     setLiveNote('');
   };
 
@@ -1046,6 +1048,8 @@ export default function LiveMap() {
                   <div style={{ display: 'flex', gap: '0.6rem' }}>
                     <button className="btn btn-primary" style={{ flex: 2, padding: '0.6rem', fontSize: '0.95rem', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.4rem' }} onClick={() => {
                       if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+                      capturedDriveTimeSecsRef.current = getFinalDriveTimeSecs();
+                      pauseDriveTimer();
                       startTimer();
                       activeGeofenceIdRef.current = nextStop.id;
                       anchorGeofenceRef.current = currentPosition ? { lat: currentPosition.lat, lng: currentPosition.lng } : 'no-gps';
@@ -1204,6 +1208,8 @@ export default function LiveMap() {
         onAddUnplanned={() => setShowQuickAdd(true)}
         onStartJob={(stop) => {
           if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+          capturedDriveTimeSecsRef.current = getFinalDriveTimeSecs();
+          pauseDriveTimer();
           activeGeofenceIdRef.current = stop.id;
           anchorGeofenceRef.current = position ? { lat: position.lat, lng: position.lng } : 'no-gps';
           setActiveGeofence(stop);

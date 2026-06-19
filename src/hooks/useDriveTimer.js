@@ -55,17 +55,29 @@ export function useDriveTimer() {
     return () => clearInterval(interval);
   }, [isDrivingPaused]);
 
-  const togglePause = () => {
-    if (isDrivingPaused) {
-      isDrivingPausedRef.current = false;
-      setIsDrivingPaused(false);
-      lastDriveResumeTimeRef.current = Date.now();
-      saveState(false, accumulatedDriveTimeRef.current);
-    } else {
+  const pauseTimer = () => {
+    if (!isDrivingPausedRef.current) {
       isDrivingPausedRef.current = true;
       setIsDrivingPaused(true);
       accumulatedDriveTimeRef.current += (Date.now() - lastDriveResumeTimeRef.current) / 1000;
       saveState(true, accumulatedDriveTimeRef.current);
+    }
+  };
+
+  const resumeTimer = () => {
+    if (isDrivingPausedRef.current) {
+      isDrivingPausedRef.current = false;
+      setIsDrivingPaused(false);
+      lastDriveResumeTimeRef.current = Date.now();
+      saveState(false, accumulatedDriveTimeRef.current);
+    }
+  };
+
+  const togglePause = () => {
+    if (isDrivingPausedRef.current) {
+      resumeTimer();
+    } else {
+      pauseTimer();
     }
   };
 
@@ -97,6 +109,8 @@ export function useDriveTimer() {
     isDrivingPaused,
     drivingDuration,
     togglePause,
+    pauseTimer,
+    resumeTimer,
     resetTimer,
     getFinalDriveTimeSecs,
     // Refs exposed for synchronous access without stale closures
