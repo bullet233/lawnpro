@@ -275,7 +275,6 @@ export default function LiveMap() {
           
           // Use planned Google Maps drive time if available, otherwise default to 5 minutes (300s)
           // Look up this stop in activeRoute.normalizedStops to find plannedDriveTimeSecs
-          const normalizedStop = activeRoute.normalizedStops.find(n => n.customerId === s.id);
           const driveTime = (normalizedStop && normalizedStop.plannedDriveTimeSecs !== undefined && normalizedStop.plannedDriveTimeSecs !== null) ? normalizedStop.plannedDriveTimeSecs : 300;
           
           totalSecondsLeft += avgDuration + driveTime; 
