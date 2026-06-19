@@ -482,6 +482,12 @@ export default function LiveMap() {
     potentialEnterRef.current = null;
     potentialExitRef.current = null;
     
+    if (engineRef.current) {
+      engineRef.current.activeGeofenceId = null;
+      engineRef.current.activeCustomer = null;
+      engineRef.current.jobStartTime = null;
+    }
+    
     logVisit(completedCust, finalDuration, entryTime, 'completed', liveNote, capturedDriveTimeSecsRef.current);
     setLiveNote('');
   };
@@ -945,6 +951,12 @@ export default function LiveMap() {
               anchorGeofenceRef.current = null;
               resetJobTimer();
               setLiveNote('');
+              
+              if (engineRef.current) {
+                engineRef.current.activeGeofenceId = null;
+                engineRef.current.activeCustomer = null;
+                engineRef.current.jobStartTime = null;
+              }
             }}
           />
         ) : (
@@ -1047,16 +1059,11 @@ export default function LiveMap() {
 
                   <div style={{ display: 'flex', gap: '0.6rem' }}>
                     <button className="btn btn-primary" style={{ flex: 2, padding: '0.6rem', fontSize: '0.95rem', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.4rem' }} onClick={() => {
-                      if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
-                      capturedDriveTimeSecsRef.current = getFinalDriveTimeSecs();
-                      pauseDriveTimer();
-                      startTimer();
-                      activeGeofenceIdRef.current = nextStop.id;
                       anchorGeofenceRef.current = currentPosition ? { lat: currentPosition.lat, lng: currentPosition.lng } : 'no-gps';
-                      setActiveGeofence(nextStop);
-                      potentialEnterRef.current = null;
-                      potentialExitRef.current = null;
                       dismissedOpportunitiesRef.current.clear();
+                      if (engineRef.current) {
+                        engineRef.current.manualStartJob(nextStop);
+                      }
                     }}>
                       <Play fill="currentColor" size={16} /> START JOB
                     </button>
@@ -1207,16 +1214,9 @@ export default function LiveMap() {
         progressInfo={progressInfo}
         onAddUnplanned={() => setShowQuickAdd(true)}
         onStartJob={(stop) => {
-          if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
-          capturedDriveTimeSecsRef.current = getFinalDriveTimeSecs();
-          pauseDriveTimer();
-          activeGeofenceIdRef.current = stop.id;
           anchorGeofenceRef.current = position ? { lat: position.lat, lng: position.lng } : 'no-gps';
-          setActiveGeofence(stop);
           setIsRouteListOpen(false);
-          startTimer();
           
-          // Inform Engine
           if (engineRef.current) {
             engineRef.current.manualStartJob(stop);
           }
