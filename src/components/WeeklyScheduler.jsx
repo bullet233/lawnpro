@@ -17,8 +17,18 @@ export default function WeeklyScheduler({ customers, tieredMatrixData, settings,
     const cols = { Unassigned: [] };
     DAYS.forEach(d => { cols[d] = []; });
     
+    const defaultServices = settings?.defaultServices || [];
+    const mowingServiceIds = defaultServices.filter(s => s.category === 'Mowing' || s.id === 's1').map(s => s.id);
+    
     (customers || []).forEach(c => {
       if (c.status === 'inactive') return; // Don't schedule inactive clients
+      
+      // Exclude non-mowing customers (e.g. fertilizer only) from the weekly scheduler
+      const hasMowing = !c.services || c.services.length === 0 || c.services.some(s => 
+        s.active && (s.id === 's1' || mowingServiceIds.includes(s.id) || (s.name && s.name.toLowerCase().includes('mow')))
+      );
+      if (!hasMowing) return;
+
       const day = c.preferredDay || 'Unassigned';
       if (cols[day]) {
         cols[day].push(c);
@@ -28,7 +38,7 @@ export default function WeeklyScheduler({ customers, tieredMatrixData, settings,
     });
     
     return cols;
-  }, [customers]);
+  }, [customers, settings]);
 
   const calculateDayCapacity = (dayCustomers) => {
     if (!tieredMatrixData || tieredMatrixData.length === 0) return 0;
@@ -243,12 +253,21 @@ export default function WeeklyScheduler({ customers, tieredMatrixData, settings,
                         {cust.address || 'No Address'}
                       </div>
                       
-                      {lastMowedDays !== null && (
+                      {lastMowedDays === null ? (
                         <div style={{ 
                           fontSize: '0.75rem', 
                           marginTop: '0.5rem', 
-                          color: lastMowedDays < 5 ? '#f59e0b' : 'var(--color-text-muted)',
-                          fontWeight: lastMowedDays < 5 ? 600 : 400
+                          color: '#f59e0b',
+                          fontWeight: 600
+                        }}>
+                          Never mowed
+                        </div>
+                      ) : (
+                        <div style={{ 
+                          fontSize: '0.75rem', 
+                          marginTop: '0.5rem', 
+                          color: lastMowedDays >= 7 ? '#ef4444' : (lastMowedDays >= 5 ? '#f59e0b' : 'var(--color-text-muted)'),
+                          fontWeight: lastMowedDays >= 5 ? 600 : 400
                         }}>
                           {lastMowedDays === 0 ? 'Mowed today' : `Last cut ${lastMowedDays} days ago`}
                         </div>

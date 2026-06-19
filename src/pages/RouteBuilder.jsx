@@ -21,7 +21,7 @@ export default function RouteBuilder() {
   const tieredMatrixData = useMemo(() => calculateTieredMatrix(allVisits, customers), [allVisits, customers]);
 
   const [activeTab,     setActiveTab]     = useState('build');
-  const [customerTab,   setCustomerTab]   = useState('all');
+  const [customerTab,   setCustomerTab]   = useState('mowing');
 
   const [selectedStops, setSelectedStops] = useState([]);
   const [showMap,       setShowMap]       = useState(false);
@@ -59,10 +59,10 @@ export default function RouteBuilder() {
     let defaultIds = [];
     if (customer.services) {
       if (customerTab === 'fertilizer') {
-        const fertService = customer.services.find(s => s.active && s.name && s.name.toLowerCase().includes('fertil'));
+        const fertService = customer.services.find(s => s.active && (s.id === 's3' || (s.name && s.name.toLowerCase().includes('fertil'))));
         if (fertService) defaultIds = [fertService.id];
       } else if (customerTab === 'mowing') {
-        const mowService = customer.services.find(s => s.active && s.name && s.name.toLowerCase().includes('mow'));
+        const mowService = customer.services.find(s => s.active && (s.id === 's1' || (s.name && s.name.toLowerCase().includes('mow'))));
         if (mowService) defaultIds = [mowService.id];
       }
       
@@ -488,8 +488,8 @@ export default function RouteBuilder() {
                   const filtered = q 
                     ? availableCustomers.filter(c => c.name.toLowerCase().includes(q) || (c.address || '').toLowerCase().includes(q))
                     : availableCustomers.filter(c => {
-                        if (customerTab === 'mowing') return !c.services || c.services.find(s => s.active && s.name && s.name.toLowerCase().includes('mow'));
-                        if (customerTab === 'fertilizer') return c.services && c.services.find(s => s.active && s.name && s.name.toLowerCase().includes('fertil'));
+                        if (customerTab === 'mowing') return c.services && c.services.some(s => s.active && (s.id === 's1' || (s.name && s.name.toLowerCase().includes('mow'))));
+                        if (customerTab === 'fertilizer') return c.services && c.services.some(s => s.active && (s.id === 's3' || (s.name && s.name.toLowerCase().includes('fertil'))));
                         return true;
                     });
                     

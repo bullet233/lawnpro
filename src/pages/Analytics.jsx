@@ -5,7 +5,7 @@ import { getSettings } from '../db/settings';
 import { parseLawnSizeToSqFt, calculateTieredMatrix } from '../utils/matrix';
 import { trackApiCall } from '../utils/apiTracker';
 import { GOOGLE_MAPS_API_KEY } from '../components/MapProvider';
-import { TrendingUp, Calculator, AlertCircle, Fuel, DollarSign, ArrowUp, ArrowDown, Edit2, Save, X, MapPin } from 'lucide-react';
+import { TrendingUp, Calculator, AlertCircle, Fuel, DollarSign, ArrowUp, ArrowDown, Edit2, Save, X, MapPin, AlertTriangle } from 'lucide-react';
 import { Autocomplete } from '@react-google-maps/api';
 
 // Haversine distance helper
@@ -252,7 +252,6 @@ function LineChart({ data, averagePace = 0, width = 340, height = 250 }) {
         <text x={14} y={pad.top + h / 2} textAnchor="middle" fill="var(--color-text-muted)" fontSize="11" transform={`rotate(-90, 14, ${pad.top + h / 2})`}>
           Sq Ft / Min
         </text>
-
         {/* X Axis labels */}
         {xTicks.map((t, i) => {
            const align = i === 0 ? "start" : i === xTicks.length - 1 ? "end" : "middle";
@@ -268,43 +267,142 @@ function LineChart({ data, averagePace = 0, width = 340, height = 250 }) {
 }
 
 function BucketHistoryModal({ bucket, minSqft, allVisits, allCustomers, onClose, width }) {
-  const data = useMemo(() => {
+  const { customerStats, slowest, fastest, maxPace } = useMemo(() => {
     const custMap = new Map();
     allCustomers.forEach(c => {
        const sqft = parseLawnSizeToSqFt(c.lawnSize);
        if (sqft > minSqft && sqft <= bucket.maxSqft) {
-          custMap.set(c.id, sqft);
+          custMap.set(c.id, { c, sqft, totalSecs: 0, count: 0 });
        }
     });
 
-    const bucketVisits = allVisits.filter(v => 
-       v.status === 'completed' && 
-       v.durationSecs >= 60 && 
-       custMap.has(v.customerId)
-    );
+    const settings = getSettings();
+    const defaultServices = settings.defaultServices || [];
+    const mowingServiceIds = defaultServices.filter(s => s.category === 'Mowing' || s.id === 's1').map(s => s.id);
 
-    bucketVisits.sort((a, b) => a.exitTime - b.exitTime);
-
-    return bucketVisits.map(v => {
-       const sqft = custMap.get(v.customerId);
-       const pace = Math.round(sqft / (v.durationSecs / 60));
-       return { date: new Date(v.exitTime), pace };
+    allVisits.forEach(v => {
+       const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id));
+       if (v.status === 'completed' && v.durationSecs >= 60 && custMap.has(v.customerId) && isMow) {
+          const stats = custMap.get(v.customerId);
+          stats.totalSecs += v.durationSecs;
+          stats.count += 1;
+       }
     });
+
+    const statsArr = [];
+    custMap.forEach(stats => {
+       if (stats.count > 0) {
+          const avgMins = stats.totalSecs / stats.count / 60;
+          const pace = Math.round(stats.sqft / avgMins);
+          statsArr.push({ 
+            id: stats.c.id, 
+            name: stats.c.name, 
+            avgMins, 
+            pace, 
+            sqft: stats.sqft,
+            count: stats.count 
+          });
+       }
+    });
+
+    // Sort by pace (lower pace = slower/worse, higher pace = faster/better)
+    statsArr.sort((a, b) => a.pace - b.pace);
+    
+    const slowest = statsArr.slice(0, 3);
+    const fastest = [...statsArr].sort((a, b) => b.pace - a.pace).slice(0, 3);
+    
+    let maxP = bucket.pace * 1.5;
+    if (statsArr.length > 0) {
+      maxP = Math.max(maxP, ...statsArr.map(s => s.pace));
+    }
+
+    return { customerStats: statsArr, slowest, fastest, maxPace: maxP };
   }, [bucket, minSqft, allVisits, allCustomers]);
 
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)', padding: '1rem' }} onClick={onClose}>
-       <div className="glass-card animate-scale-up" style={{ width: '100%', maxWidth: '500px', padding: '1.5rem', position: 'relative' }} onClick={e => e.stopPropagation()}>
+       <div className="glass-card animate-scale-up" style={{ width: '100%', maxWidth: '600px', maxHeight: '90vh', overflowY: 'auto', padding: '1.5rem', position: 'relative' }} onClick={e => e.stopPropagation()}>
           <button className="btn-icon" onClick={onClose} style={{ position: 'absolute', top: '10px', right: '10px' }}><X size={20} /></button>
           
-          <h3 style={{ margin: '0 0 0.5rem 0' }}>{bucket.label} History</h3>
+          <h3 style={{ margin: '0 0 0.5rem 0' }}>{bucket.label} Action Report</h3>
           <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', marginBottom: '1.5rem' }}>
-             Pace history for lawns between {minSqft.toLocaleString()} and {bucket.maxSqft === Infinity ? 'Infinity' : bucket.maxSqft.toLocaleString()} sq ft.
+             Performance for lawns between {minSqft.toLocaleString()} and {bucket.maxSqft === Infinity ? 'Infinity' : bucket.maxSqft.toLocaleString()} sq ft.
           </p>
 
-          {data.length > 0 ? (
-             <div style={{ display: 'flex', justifyContent: 'center' }}>
-               <LineChart data={data} averagePace={bucket.pace} width={width > 500 ? 450 : width - 60} height={260} />
+          {customerStats.length > 0 ? (
+             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+               
+               {/* Dot Plot */}
+               <div style={{ padding: '1.5rem 1rem', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+                 <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--color-text-muted)', marginBottom: '1rem', textAlign: 'center', textTransform: 'uppercase' }}>
+                   Speed Spread (SqFt per Minute)
+                 </div>
+                 <div style={{ position: 'relative', height: '60px', borderBottom: '2px solid var(--color-border)', margin: '0 10px' }}>
+                   {/* Target Pace Line */}
+                   <div style={{ position: 'absolute', left: `${(bucket.pace / maxPace) * 100}%`, top: 0, bottom: '-20px', width: '2px', background: 'var(--color-primary)', zIndex: 1 }} />
+                   <div style={{ position: 'absolute', left: `${(bucket.pace / maxPace) * 100}%`, bottom: '-35px', transform: 'translateX(-50%)', fontSize: '0.75rem', fontWeight: 700, color: 'var(--color-primary)' }}>
+                     Target: {Math.round(bucket.pace)}
+                   </div>
+                   
+                   {/* Client Dots */}
+                   {customerStats.map(s => {
+                     const left = `${(s.pace / maxPace) * 100}%`;
+                     const isSlow = s.pace < bucket.pace * 0.8;
+                     return (
+                       <div key={s.id} title={`${s.name} (${Math.round(s.avgMins)} mins)`} style={{
+                         position: 'absolute',
+                         left,
+                         top: '50%',
+                         transform: 'translate(-50%, -50%)',
+                         width: '12px',
+                         height: '12px',
+                         borderRadius: '50%',
+                         background: isSlow ? '#ef4444' : 'var(--color-text-main)',
+                         border: '2px solid var(--color-bg-main)',
+                         boxShadow: 'var(--shadow-sm)',
+                         cursor: 'help',
+                         zIndex: 2,
+                         opacity: 0.8
+                       }} />
+                     );
+                   })}
+                 </div>
+                 <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '25px', fontSize: '0.7rem', color: 'var(--color-text-muted)' }}>
+                   <span>Slower</span>
+                   <span>Faster</span>
+                 </div>
+               </div>
+
+               {/* Leaderboards */}
+               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                 <div style={{ background: 'rgba(239,68,68,0.05)', borderRadius: 'var(--radius-sm)', padding: '1rem', border: '1px solid rgba(239,68,68,0.2)' }}>
+                   <h4 style={{ margin: '0 0 0.8rem 0', color: '#ef4444', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                     <AlertTriangle size={14} /> Action Needed
+                   </h4>
+                   {slowest.map(s => (
+                     <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.4rem 0', borderBottom: '1px solid rgba(239,68,68,0.1)', fontSize: '0.85rem' }}>
+                       <span style={{ fontWeight: 600 }}>{s.name}</span>
+                       <span style={{ color: '#ef4444', fontWeight: 700 }}>{Math.round(s.avgMins)}m</span>
+                     </div>
+                   ))}
+                   <p style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginTop: '0.5rem', fontStyle: 'italic', lineHeight: 1.4 }}>
+                     These clients take the longest. Consider raising prices to hit your hourly target.
+                   </p>
+                 </div>
+                 
+                 <div style={{ background: 'rgba(16,185,129,0.05)', borderRadius: 'var(--radius-sm)', padding: '1rem', border: '1px solid rgba(16,185,129,0.2)' }}>
+                   <h4 style={{ margin: '0 0 0.8rem 0', color: '#10b981', fontSize: '0.9rem' }}>
+                     Top Performers
+                   </h4>
+                   {fastest.map(s => (
+                     <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.4rem 0', borderBottom: '1px solid rgba(16,185,129,0.1)', fontSize: '0.85rem' }}>
+                       <span style={{ fontWeight: 600 }}>{s.name}</span>
+                       <span style={{ color: '#10b981', fontWeight: 700 }}>{Math.round(s.avgMins)}m</span>
+                     </div>
+                   ))}
+                 </div>
+               </div>
+
              </div>
           ) : (
              <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>

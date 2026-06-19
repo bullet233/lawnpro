@@ -365,7 +365,7 @@ export default function LiveMap() {
   if (!engineRef.current) {
     engineRef.current = new GeofenceEngine({
       enterDebounceMs: 8000,
-      exitDebounceMs: 15000,
+      exitDebounceMs: 5000,
       drivebyThresholdSecs: getSettings().drivebyThresholdSecs || 45,
       onEnter: (customer) => {
         if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
@@ -462,6 +462,33 @@ export default function LiveMap() {
 
   const finishActiveRoute = async () => {
     if (!activeRoute) return;
+    
+    if (activeRoute.normalizedStops) {
+      const completedVisits = await db.visits.where({ routeId: activeRoute.id }).toArray();
+      const completedIds = new Set(completedVisits.map(v => v.customerId));
+      
+      const uncompletedStops = activeRoute.normalizedStops.filter(s => !completedIds.has(s.customerId));
+      
+      for (const stop of uncompletedStops) {
+        const customer = allCustomers.find(c => c.id === stop.customerId);
+        if (customer) {
+          await db.visits.add({
+            routeId: activeRoute.id,
+            customerId: customer.id,
+            status: 'skipped',
+            durationSecs: 0,
+            driveTimeSecs: 0,
+            entryTime: Date.now(),
+            exitTime: Date.now(),
+            weather: weatherRef.current || null,
+            priceEarned: 0,
+            appliedServices: [],
+            note: 'Forcibly skipped when ending route'
+          });
+        }
+      }
+    }
+
     await db.routes.update(activeRoute.id, { status: 'completed' });
     resetDriveTimer(false);
     setShowDayReview(true);
@@ -526,7 +553,7 @@ export default function LiveMap() {
 
     // Check if there are any stops left on the current route
     const hasMoreStops = route && route.normalizedStops ? route.normalizedStops.some(s => {
-      const alreadyVisited = routeVisitsRef.current.some(v => v.customerId === s.customerId && (v.status === 'completed'));
+      const alreadyVisited = routeVisitsRef.current.some(v => v.customerId === s.customerId && (v.status === 'completed' || v.status === 'skipped'));
       return !alreadyVisited && s.customerId !== customer.id;
     }) : false;
 

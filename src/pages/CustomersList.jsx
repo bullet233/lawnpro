@@ -108,7 +108,7 @@ export default function CustomersList() {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState('name'); // name | lastVisit | revenue | overdue
   const [showInactive, setShowInactive] = useState(false);
-  const [showFertOnly, setShowFertOnly] = useState(false);
+  const [serviceTab, setServiceTab] = useState('all');
   const [viewMode, setViewMode] = useState('cards'); // 'cards' | 'table'
   const [pendingEdits, setPendingEdits] = useState({}); // Local state for table edits
 
@@ -223,9 +223,11 @@ export default function CustomersList() {
       list = list.filter(c => c.status !== 'inactive');
     }
 
-    // Filter by Fertilizer Program
-    if (showFertOnly) {
-      list = list.filter(c => c.services && c.services.find(s => s.id === 's3')?.active);
+    // Filter by Service Type
+    if (serviceTab === 'fertilizer') {
+      list = list.filter(c => c.services && c.services.some(s => s.id === 's3' && s.active));
+    } else if (serviceTab === 'mowing') {
+      list = list.filter(c => c.services && c.services.some(s => s.id === 's1' && s.active));
     }
 
     // Search filter
@@ -254,7 +256,7 @@ export default function CustomersList() {
     });
 
     return list;
-  }, [customers, visitStats, searchQuery, sortBy, showInactive, showFertOnly, outlierCustomers]);
+  }, [customers, visitStats, searchQuery, sortBy, showInactive, serviceTab, outlierCustomers]);
 
   const handleToggleStatus = async (e, custId, currentStatus) => {
     e.preventDefault();
@@ -467,11 +469,21 @@ export default function CustomersList() {
                     if (edits.address !== undefined) updates.address = edits.address;
                     if (edits.lawnSize !== undefined) updates.lawnSize = edits.lawnSize;
                     
-                    if (edits.price !== undefined) {
+                    if (edits.price !== undefined || edits.fertPrice !== undefined) {
                       const newServices = JSON.parse(JSON.stringify(c.services || DEFAULT_SERVICES));
-                      const idx = newServices.findIndex(s => s.id === 's1');
-                      if (idx >= 0) newServices[idx].price = Number(edits.price);
-                      else newServices.push({ id: 's1', name: 'Mowing', price: Number(edits.price), active: true });
+                      
+                      if (edits.price !== undefined) {
+                        const idx = newServices.findIndex(s => s.id === 's1');
+                        if (idx >= 0) newServices[idx].price = Number(edits.price);
+                        else newServices.push({ id: 's1', name: 'Mowing', price: Number(edits.price), active: true });
+                      }
+                      
+                      if (edits.fertPrice !== undefined) {
+                        const fertIdx = newServices.findIndex(s => s.id === 's3');
+                        if (fertIdx >= 0) newServices[fertIdx].price = Number(edits.fertPrice);
+                        else newServices.push({ id: 's3', name: 'Fertilizer', price: Number(edits.fertPrice), active: true });
+                      }
+                      
                       updates.services = newServices;
                     }
                     
@@ -501,7 +513,7 @@ export default function CustomersList() {
           <button className="btn btn-secondary" onClick={() => fileRef.current?.click()}>
             <Upload size={16} /> Import
           </button>
-          <button className="btn btn-primary" onClick={() => navigate(showFertOnly ? '/customers/new?service=s3' : '/customers/new')}>
+          <button className="btn btn-primary" onClick={() => navigate(serviceTab === 'fertilizer' ? '/customers/new?service=s3' : '/customers/new')}>
             <Plus size={18} /> New
           </button>
         </div>
@@ -540,18 +552,22 @@ export default function CustomersList() {
             {s === 'overdue' && 'Overdue'}
           </button>
         ))}
-        <button
-          onClick={() => setShowFertOnly(!showFertOnly)}
-          style={{
-            padding: '0.4rem 0.8rem', fontSize: '0.8rem', fontWeight: 600,
-            borderRadius: '999px', cursor: 'pointer', transition: 'all 0.15s',
-            border: showFertOnly ? '1px solid var(--color-secondary)' : '1px solid var(--color-border)',
-            background: showFertOnly ? 'rgba(59,130,246,0.1)' : 'var(--color-bg-main)',
-            color: showFertOnly ? 'var(--color-secondary)' : 'var(--color-text-main)'
-          }}
-        >
-          Fertilizer Only
-        </button>
+        <div style={{ display: 'flex', background: 'var(--color-bg-card)', borderRadius: 'var(--radius-md)', padding: '0.25rem', border: '1px solid var(--color-border)', marginLeft: '0.5rem' }}>
+          {['all', 'mowing', 'fertilizer'].map(tab => (
+            <button 
+              key={tab}
+              onClick={() => setServiceTab(tab)}
+              style={{ 
+                padding: '0.4rem 0.8rem', fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer', textTransform: 'capitalize',
+                background: serviceTab === tab ? 'var(--color-primary)' : 'transparent', 
+                color: serviceTab === tab ? 'white' : 'var(--color-text-muted)',
+                border: 'none', borderRadius: 'var(--radius-sm)', transition: 'all 0.2s'
+              }}
+            >
+              {tab}
+            </button>
+          ))}
+        </div>
         <div style={{ flex: 1 }} />
         {inactiveCount > 0 && (
           <button
@@ -582,7 +598,7 @@ export default function CustomersList() {
               {searchQuery ? 'Try adjusting your search terms or filters.' : 'Add your first customer manually or import a CSV roster to get started building your route.'}
             </p>
             {!searchQuery && (
-              <button className="btn btn-primary" onClick={() => navigate(showFertOnly ? '/customers/new?service=s3' : '/customers/new')}>
+              <button className="btn btn-primary" onClick={() => navigate(serviceTab === 'fertilizer' ? '/customers/new?service=s3' : '/customers/new')}>
                 <Plus size={18} /> Add Customer
               </button>
             )}
@@ -675,6 +691,7 @@ export default function CustomersList() {
                   <th style={{ padding: '0.8rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Address</th>
                   <th style={{ padding: '0.8rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Lawn Size (sqft)</th>
                   <th style={{ padding: '0.8rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Mowing Price</th>
+                  <th style={{ padding: '0.8rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Fert Price</th>
                   <th style={{ padding: '0.8rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600, textAlign: 'center' }}>Fertilizer</th>
                 </tr>
               </thead>
@@ -682,13 +699,16 @@ export default function CustomersList() {
                 {filteredCustomers.map(c => {
                   const mowService = c.services?.find(s => s.id === 's1');
                   const dbPrice = mowService?.price || 0;
-                  const isFert = c.services?.find(s => s.id === 's3')?.active;
+                  const fertService = c.services?.find(s => s.id === 's3');
+                  const dbFertPrice = fertService?.price || 0;
+                  const isFert = fertService?.active || false;
                   
                   const pending = pendingEdits[c.id] || {};
                   const currentName = pending.name !== undefined ? pending.name : c.name;
                   const currentAddress = pending.address !== undefined ? pending.address : c.address;
                   const currentLawnSize = pending.lawnSize !== undefined ? pending.lawnSize : c.lawnSize;
                   const currentPrice = pending.price !== undefined ? pending.price : dbPrice;
+                  const currentFertPrice = pending.fertPrice !== undefined ? pending.fertPrice : dbFertPrice;
 
                   const handleEdit = (field, val) => {
                     setPendingEdits(prev => ({
@@ -736,6 +756,17 @@ export default function CustomersList() {
                             type="number"
                             value={currentPrice ?? ''} 
                             onChange={e => handleEdit('price', e.target.value)}
+                            style={{ width: '100%', padding: '0.4rem', border: 'none', background: 'transparent', color: 'var(--color-text-main)', fontWeight: 600 }}
+                          />
+                        </div>
+                      </td>
+                      <td style={{ padding: '0.4rem', borderRight: '1px solid var(--color-border)', background: isFert && (currentFertPrice === 0 || currentFertPrice === '') ? 'rgba(245,158,11,0.1)' : 'transparent' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', opacity: isFert ? 1 : 0.4 }}>
+                          <span style={{ color: 'var(--color-text-muted)', paddingLeft: '0.4rem', fontWeight: 600 }}>$</span>
+                          <input 
+                            type="number"
+                            value={currentFertPrice ?? ''} 
+                            onChange={e => handleEdit('fertPrice', e.target.value)}
                             style={{ width: '100%', padding: '0.4rem', border: 'none', background: 'transparent', color: 'var(--color-text-main)', fontWeight: 600 }}
                           />
                         </div>

@@ -83,11 +83,11 @@ export class GeofenceEngine {
       if (pointInPolygon(loc, customer.geofence)) {
         return true;
       }
-      // Fallback: within 25m of center
+      // Fallback: within 15m of center
       const centerLat = customer.geofence.reduce((s, p) => s + p.lat, 0) / customer.geofence.length;
       const centerLng = customer.geofence.reduce((s, p) => s + p.lng, 0) / customer.geofence.length;
       const d = getDistance(loc.lat, loc.lng, centerLat, centerLng);
-      return d <= 25;
+      return d <= 15;
     }
     return false;
   }
