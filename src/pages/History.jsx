@@ -7,7 +7,7 @@ import AppDialog from '../components/AppDialog';
 import ComplianceLogModal from '../components/ComplianceLogModal';
 import { getSettings } from '../db/settings';
 import { getBusinessDateString } from '../utils/dateUtils';
-import { calculateServiceTotals } from '../utils/revenueUtils';
+import { calculateServiceTotals, getVisitRevenueBreakdown } from '../utils/revenueUtils';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const fmt = (secs) => { 
@@ -618,9 +618,23 @@ export default function History() {
 
                             {/* Right: Revenue, Status, Actions */}
                             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', minWidth: '120px' }}>
-                              <div style={{ fontWeight: 800, color: priceColor, fontSize: '1.4rem', lineHeight: 1, marginBottom: '0.4rem' }}>
-                                ${job.priceEarned.toFixed(2)}
-                              </div>
+                                  <div style={{ fontWeight: 800, color: priceColor, fontSize: '1.4rem', lineHeight: 1, marginBottom: '0.4rem', display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                                    ${job.priceEarned.toFixed(2)}
+                                    {job.appliedServices?.length > 1 && (() => {
+                                      const breakdown = getVisitRevenueBreakdown(job, job.custObj, settings?.defaultServices);
+                                      if (Object.keys(breakdown).length > 1) {
+                                        return (
+                                          <div style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', fontWeight: 600, marginTop: '0.3rem', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.1rem', letterSpacing: '0.5px' }}>
+                                            {Object.entries(breakdown).map(([sid, amt]) => {
+                                              const sName = job.custObj?.services?.find(s => s.id === sid)?.name || settings?.defaultServices?.find(s => s.id === sid)?.name || sid;
+                                              return <div key={sid}>{sName}: ${amt.toFixed(0)}</div>;
+                                            })}
+                                          </div>
+                                        );
+                                      }
+                                      return null;
+                                    })()}
+                                  </div>
                               
                               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
                                 {serviceNames.some(n => n?.toLowerCase().match(/(fertilizer|weed|spray|chem)/)) && (

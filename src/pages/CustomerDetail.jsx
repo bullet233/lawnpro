@@ -10,6 +10,7 @@ import VisitEditModal from '../components/VisitEditModal';
 import { getSettings } from '../db/settings';
 import { trackApiCall } from '../utils/apiTracker';
 import { getDaysSince } from '../utils/dateUtils';
+import { getVisitRevenueBreakdown } from '../utils/revenueUtils';
 
 export default function CustomerDetail() {
   const { id } = useParams();
@@ -793,9 +794,23 @@ export default function CustomerDetail() {
                                 </div>
                               )}
                             </div>
-                            <div style={{ fontWeight: 700, color: 'var(--color-primary)', flexShrink: 0 }}>
-                              ${(v.priceEarned || 0).toFixed(0)}
-                            </div>
+                              <div style={{ fontWeight: 700, color: 'var(--color-primary)', flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                                ${(v.priceEarned || 0).toFixed(0)}
+                                {v.appliedServices?.length > 1 && (() => {
+                                  const breakdown = getVisitRevenueBreakdown(v, customer, settings?.defaultServices);
+                                  if (Object.keys(breakdown).length > 1) {
+                                    return (
+                                      <div style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', fontWeight: 600, marginTop: '0.1rem', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.1rem' }}>
+                                        {Object.entries(breakdown).map(([sid, amt]) => {
+                                          const sName = customer?.services?.find(s => s.id === sid)?.name || settings?.defaultServices?.find(s => s.id === sid)?.name || sid;
+                                          return <div key={sid}>{sName}: ${amt.toFixed(0)}</div>;
+                                        })}
+                                      </div>
+                                    );
+                                  }
+                                  return null;
+                                })()}
+                              </div>
                             <button 
                               className="btn btn-secondary" 
                               style={{ padding: '0.3rem', flexShrink: 0, marginLeft: '0.2rem', color: 'var(--color-text-muted)' }}
