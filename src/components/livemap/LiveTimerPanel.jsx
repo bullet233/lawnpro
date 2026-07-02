@@ -51,7 +51,11 @@ export default function LiveTimerPanel({
       const avg = durs.reduce((a, b) => a + b, 0) / durs.length;
       const avgMin = Math.round(avg / 60);
       const over = liveDuration > avg + 60;
-      paceCue = { text: over ? `over ~${avgMin}m avg` : `ahead of ~${avgMin}m avg`, color: over ? PAUSED.soft : theme.soft };
+      // Neutral "avg ~Xm" until the clock actually passes the average — being
+      // "ahead" 30 seconds into a job is noise, not information.
+      paceCue = over
+        ? { text: `over ~${avgMin}m avg`, color: PAUSED.soft }
+        : { text: `avg ~${avgMin}m`, color: 'rgba(255,255,255,0.75)' };
     }
   }
 

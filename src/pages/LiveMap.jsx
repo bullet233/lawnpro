@@ -75,6 +75,7 @@ export default function LiveMap() {
                       const potentialEnterRef = useRef(null);
   const potentialExitRef = useRef(null);
   const [completionPanel, setCompletionPanel] = useState(null);
+  const [completionEpoch, setCompletionEpoch] = useState(0); // restarts the panel's drain bar
   const [panelNote, setPanelNote] = useState('');
   const [liveNote, setLiveNote] = useState('');
   const liveNoteRef = useRef('');
@@ -291,17 +292,20 @@ export default function LiveMap() {
     const minutesLeft = Math.round(totalSecondsLeft / 60);
     
     let etaString = '';
+    let finishString = '';
     if (minutesLeft > 0) {
       if (minutesLeft > 60) {
-        etaString = `${Math.floor(minutesLeft / 60)}h ${minutesLeft % 60}m remaining`;
+        etaString = `${Math.floor(minutesLeft / 60)}h ${minutesLeft % 60}m left`;
       } else {
-        etaString = `${minutesLeft}m remaining`;
+        etaString = `${minutesLeft}m left`;
       }
+      // A clock time is what you actually plan the day around.
+      finishString = `~${new Date(Date.now() + minutesLeft * 60000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
     } else if (totalStops - completedStops === 0) {
       etaString = 'Finished';
     }
 
-    return { completedStops, totalStops, etaString };
+    return { completedStops, totalStops, etaString, finishString };
   }, [activeRoute, routeVisits, activeGeofence?.id, allVisits, allCustomers, globalPace]);
 
   // Reuse the top-level getDistance (Haversine) — alias for clarity
@@ -657,21 +661,7 @@ export default function LiveMap() {
         exitTime: Date.now(),
         appliedServices
       });
-      if (completionTimerRef.current) clearTimeout(completionTimerRef.current);
-      completionTimerRef.current = setTimeout(async () => {
-        if (panelNoteActiveRef.current) {
-          // Retry in 5 seconds if user is actively typing
-          completionTimerRef.current = setTimeout(async () => {
-            // Flush note + conditions/services on final auto-dismiss so nothing is lost
-            await flushCompletionDetails(visitId);
-            setCompletionPanel(null);
-          }, 5000);
-        } else {
-          // Flush note + conditions/services on auto-dismiss so nothing is lost
-          await flushCompletionDetails(visitId);
-          setCompletionPanel(null);
-        }
-      }, 12000);
+      armCompletionTimer(visitId);
     }
 
     if (route && route.normalizedStops) {
@@ -694,6 +684,31 @@ export default function LiveMap() {
 
   // Persist whatever the user has entered/selected on the completion panel.
   // Used by both the explicit "Done" button and the auto-dismiss timer.
+  // How long the completion panel lingers before cleaning itself up.
+  const COMPLETION_AUTO_DISMISS_MS = 20000;
+
+  // (Re)arm the completion panel's self-cleanup countdown. Re-called on any
+  // interaction inside the panel so it never vanishes mid-tap; the drain bar in
+  // JobCompletionModal restarts via the epoch bump.
+  const armCompletionTimer = (visitId) => {
+    if (completionTimerRef.current) clearTimeout(completionTimerRef.current);
+    setCompletionEpoch(e => e + 1);
+    completionTimerRef.current = setTimeout(async () => {
+      if (panelNoteActiveRef.current) {
+        // Retry in 5 seconds if user is actively typing
+        completionTimerRef.current = setTimeout(async () => {
+          // Flush note + conditions/services on final auto-dismiss so nothing is lost
+          await flushCompletionDetails(visitId);
+          setCompletionPanel(null);
+        }, 5000);
+      } else {
+        // Flush note + conditions/services on auto-dismiss so nothing is lost
+        await flushCompletionDetails(visitId);
+        setCompletionPanel(null);
+      }
+    }, COMPLETION_AUTO_DISMISS_MS);
+  };
+
   const flushCompletionDetails = async (visitId, details) => {
     if (!visitId) return;
     const note = (details?.note ?? panelNoteRef.current ?? '').trim();
@@ -976,8 +991,11 @@ export default function LiveMap() {
       )}
 
       
-      <JobCompletionModal 
+      <JobCompletionModal
         completionPanel={completionPanel}
+        autoDismissMs={COMPLETION_AUTO_DISMISS_MS}
+        epoch={completionEpoch}
+        onUserActivity={() => { if (completionPanel?.visitId) armCompletionTimer(completionPanel.visitId); }}
         panelNote={panelNote}
         setPanelNote={setPanelNote}
         panelNoteActiveRef={panelNoteActiveRef}

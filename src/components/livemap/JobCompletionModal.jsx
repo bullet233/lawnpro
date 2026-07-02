@@ -11,6 +11,9 @@ const CONDITIONS = [
 
 export default function JobCompletionModal({
   completionPanel,
+  autoDismissMs,
+  epoch,
+  onUserActivity,
   panelNote,
   setPanelNote,
   panelNoteActiveRef,
@@ -78,6 +81,7 @@ export default function JobCompletionModal({
     <div
       className="completion-panel"
       style={{ position: 'absolute', top: '1rem', left: '1rem', right: '1rem', zIndex: 2000, background: 'var(--color-bg-card)', borderRadius: '1.5rem', border: '1px solid var(--color-border)', boxShadow: '0 12px 40px rgba(0,0,0,0.18)', padding: '0.7rem 1rem 1rem' }}
+      onPointerDownCapture={() => onUserActivity?.()}
       onTouchStart={e => { panelTouchRef.current = e.touches[0].clientY; }}
       onTouchEnd={e => {
         if (panelTouchRef.current !== null) {
@@ -255,6 +259,13 @@ export default function JobCompletionModal({
         </div>
       )}
 
+      {/* Auto-dismiss drain bar — restarts (via epoch key) whenever the countdown is re-armed */}
+      {autoDismissMs > 0 && (
+        <div style={{ height: '3px', borderRadius: '2px', background: 'var(--color-border)', overflow: 'hidden', marginBottom: '0.45rem' }}>
+          <div key={epoch} style={{ height: '100%', background: 'var(--color-primary)', animation: `cpDrain ${autoDismissMs}ms linear forwards` }} />
+          <style>{`@keyframes cpDrain { from { width: 100%; } to { width: 0%; } }`}</style>
+        </div>
+      )}
       <button
         style={{ width: '100%', height: '52px', border: 'none', borderRadius: '16px', background: 'var(--color-text-main)', color: 'var(--color-bg-card)', fontSize: '1rem', fontWeight: 700, cursor: 'pointer', marginBottom: '0.5rem' }}
         onClick={() => handleSaveCompletion({ note: panelNote, conditions: selectedConditions, appliedServices: selectedServices })}
@@ -280,7 +291,7 @@ export default function JobCompletionModal({
           style={{ flex: 1, height: '44px', borderRadius: '14px', background: 'transparent', border: 'none', color: 'var(--color-text-muted)', fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer' }}
           onClick={() => { if (completionTimerRef.current) clearTimeout(completionTimerRef.current); setCompletionPanel(null); }}
         >
-          Dismiss
+          Close
         </button>
       </div>
     </div>

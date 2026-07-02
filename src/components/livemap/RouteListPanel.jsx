@@ -41,8 +41,11 @@ export default function RouteListPanel({
                {isRouteListOpen ? <ChevronDown size={18} color="var(--color-text-muted)" style={{ marginLeft: '0.5rem' }} /> : <ChevronUp size={18} color="var(--color-text-muted)" style={{ marginLeft: '0.5rem' }} />}
              </div>
              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-               <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>Est. Time</span>
-               <strong style={{ color: 'var(--color-primary)' }}>{progressInfo.etaString}</strong>
+               <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>{progressInfo.finishString ? 'Est. Finish' : 'Est. Time'}</span>
+               <strong style={{ color: 'var(--color-primary)' }}>{progressInfo.finishString || progressInfo.etaString}</strong>
+               {progressInfo.finishString && (
+                 <span style={{ fontSize: '0.72rem', color: 'var(--color-text-muted)' }}>{progressInfo.etaString}</span>
+               )}
              </div>
           </div>
 
