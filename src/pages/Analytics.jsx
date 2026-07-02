@@ -445,6 +445,9 @@ export default function Analytics() {
   const [targetObstacles, setTargetObstacles] = useState('');
   const [targetTerrain, setTargetTerrain] = useState('flat');
   const [targetFenced, setTargetFenced] = useState(false);
+  // Drive time is always computed when an address is given, but only priced into
+  // the bid when this is on — Dylan treats drive as optional info, not a default cost.
+  const [includeDrive, setIncludeDrive] = useState(() => localStorage.getItem('bid_include_drive') === '1');
   const [isCalculating, setIsCalculating] = useState(false);
   const [bidResult, setBidResult] = useState(null);
   const [autocomplete, setAutocomplete] = useState(null);
@@ -612,6 +615,30 @@ export default function Analytics() {
     }
   };
 
+  // Toggle drive-in-bid and re-price the current quote locally (drive minutes are
+  // already known — no need to hit the Maps APIs again).
+  const handleIncludeDriveChange = (checked) => {
+    setIncludeDrive(checked);
+    localStorage.setItem('bid_include_drive', checked ? '1' : '0');
+    setBidResult(prev => {
+      if (!prev || prev.error || prev.baseMinsRaw == null) return prev;
+      const s = settings || getSettings();
+      const perMin = (s.targetHourlyRate || 60) / 60;
+      const pricedDriveMins = checked ? (prev.driveMins || 0) : 0;
+      const totalMins = prev.baseMinsRaw + prev.diffMinsRaw + pricedDriveMins;
+      const rawPrice = totalMins * perMin;
+      const minFee = s.minStopFee ?? 30;
+      const finalPrice = Math.max(minFee, rawPrice);
+      return {
+        ...prev,
+        driveIncluded: checked,
+        targetPrice: finalPrice.toFixed(2),
+        isFloor: finalPrice === minFee && rawPrice < minFee,
+        predictedMins: Math.round(totalMins)
+      };
+    });
+  };
+
   // 2. Calculator Logic (Matrix Powered)
   const handleCalculateBid = async () => {
     if (!settings || !tieredMatrixData) return;
@@ -729,7 +756,8 @@ export default function Analytics() {
       const diffPrice = difficultyMins * perMin;
       const drivePrice = driveMins * perMin;
 
-      const totalPredictedMins = baseMins + difficultyMins + driveMins;
+      const pricedDriveMins = includeDrive ? driveMins : 0;
+      const totalPredictedMins = baseMins + difficultyMins + pricedDriveMins;
       const rawPrice = totalPredictedMins * perMin;
       const minFee = settings.minStopFee ?? 30;
       const finalPrice = Math.max(minFee, rawPrice); // Settings floor
@@ -752,6 +780,10 @@ export default function Analytics() {
         basePrice: basePrice.toFixed(2),
         diffPrice: diffPrice.toFixed(2),
         drivePrice: drivePrice.toFixed(2),
+        driveMins,
+        driveIncluded: includeDrive,
+        baseMinsRaw: baseMins,
+        diffMinsRaw: difficultyMins,
         predictedMins: Math.round(totalPredictedMins),
         confidence: parts.join(' '),
         sqft: parsedTarget,
@@ -1317,13 +1349,22 @@ export default function Analytics() {
                 <option value="hilly">Hilly / Steep</option>
               </select>
               <label style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', whiteSpace: 'nowrap', cursor: 'pointer', flexGrow: 1 }}>
-                <input 
-                  type="checkbox" 
-                  checked={targetFenced} 
+                <input
+                  type="checkbox"
+                  checked={targetFenced}
                   onChange={e => setTargetFenced(e.target.checked)}
                   style={{ width: '16px', height: '16px' }}
                 />
                 Fenced
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', whiteSpace: 'nowrap', cursor: 'pointer', flexGrow: 1 }}>
+                <input
+                  type="checkbox"
+                  checked={includeDrive}
+                  onChange={e => handleIncludeDriveChange(e.target.checked)}
+                  style={{ width: '16px', height: '16px' }}
+                />
+                Add drive to bid
               </label>
               <button className="btn btn-primary" onClick={handleCalculateBid} disabled={isCalculating} style={{ flex: '1 1 100%' }}>
                 {isCalculating ? 'Loading...' : 'Quote'}
@@ -1362,11 +1403,18 @@ export default function Analytics() {
                       <span style={{ fontWeight: 600, color: '#f59e0b' }}>+${bidResult.diffPrice}</span>
                     </div>
                   )}
-                  {parseFloat(bidResult.drivePrice) > 0 && (
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span style={{ color: 'var(--color-text-muted)' }}>Drive Time Cost</span>
-                      <span style={{ fontWeight: 600, color: '#ef4444' }}>+${bidResult.drivePrice}</span>
-                    </div>
+                  {bidResult.driveMins > 0 && (
+                    bidResult.driveIncluded ? (
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: 'var(--color-text-muted)' }}>Drive Time Cost ({bidResult.driveMins} min)</span>
+                        <span style={{ fontWeight: 600, color: '#ef4444' }}>+${bidResult.drivePrice}</span>
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: 'var(--color-text-muted)' }}>Drive Time — not in bid ({bidResult.driveMins} min)</span>
+                        <span style={{ fontWeight: 600, color: 'var(--color-text-muted)' }}>${bidResult.drivePrice}</span>
+                      </div>
+                    )
                   )}
                 </div>
 
