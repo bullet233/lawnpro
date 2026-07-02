@@ -428,6 +428,14 @@ export default function Analytics() {
     const visits = allVisitsRaw.filter(v => validIds.has(v.customerId) && (!v.division || v.division === activeMode));
     return { allCustomers: custs, allVisits: visits };
   }, [allVisitsRaw, allCustomersRaw, activeMode]);
+
+  // Mowing-division visits regardless of the active mode. The bidding models price
+  // MOWING work — training them on the mode-filtered list refits the curve on
+  // fertilizer applications whenever the app is in Fertilizer mode.
+  const mowVisits = useMemo(() => {
+    const validIds = new Set(allCustomers.map(c => c.id));
+    return allVisitsRaw.filter(v => validIds.has(v.customerId) && (!v.division || v.division === 'mowing'));
+  }, [allVisitsRaw, allCustomers]);
   const allFuelLogs = useLiveQuery(() => db.fuelLogs.toArray(), []) || [];
   const [activeTab, setActiveTab] = useState('overview'); // overview, bidding, expenses
   const [pricingModel, setPricingModel] = useState(() => localStorage.getItem('pricing_model') || 'bucket'); // 'bucket' | 'linear'
@@ -545,10 +553,10 @@ export default function Analytics() {
   }, [allVisits, allCustomers]);
 
   // 1.6 Tiered Matrix Math (Beta)
-  const tieredMatrixData = useMemo(() => calculateTieredMatrix(allVisits, allCustomers), [allVisits, allCustomers]);
+  const tieredMatrixData = useMemo(() => calculateTieredMatrix(mowVisits, allCustomers), [mowVisits, allCustomers]);
 
   // 1.7 Trend curve pricing model (beta alternative — A/B toggle). Power-law fit.
-  const trendModel = useMemo(() => calculatePowerModel(allVisits, allCustomers), [allVisits, allCustomers]);
+  const trendModel = useMemo(() => calculatePowerModel(mowVisits, allCustomers), [mowVisits, allCustomers]);
   // When 'linear' (the trend curve) is selected but there isn't enough data to fit, fall back to buckets.
   const usingTrend = pricingModel === 'linear' && !!trendModel;
 
@@ -1477,9 +1485,9 @@ export default function Analytics() {
       {/* Render Bucket History Modal */}
       {selectedBucket && (
         <BucketHistoryModal 
-          bucket={selectedBucket.bucket} 
+          bucket={selectedBucket.bucket}
           minSqft={selectedBucket.minSqft}
-          allVisits={allVisits}
+          allVisits={mowVisits}
           allCustomers={allCustomers}
           width={chartWidth}
           onClose={() => setSelectedBucket(null)} 
