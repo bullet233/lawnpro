@@ -153,6 +153,27 @@ describe('GeofenceEngine', () => {
     expect(engine.activeGeofenceId).toBe('c1');
   });
 
+  it('survives a manually-anchored customer without a geofence overlapping a polygon customer', () => {
+    // Started manually at a customer that has no polygon (e.g. quick-added from
+    // the field) while parked inside another customer's fence.
+    const anchored = { id: 'c2', name: 'No-Fence Customer' };
+    engine.setContext({
+      routeStops: [customer, anchored],
+      anchorGeofence: { lat: 40.005, lng: -73.995 }
+    });
+    engine.manualStartJob(anchored);
+    expect(engine.activeGeofenceId).toBe('c2');
+
+    // Inside c1's polygon AND within the anchor radius — both match.
+    expect(() =>
+      engine.updateLocation({ lat: 40.005, lng: -73.995, timestamp: 100000 })
+    ).not.toThrow();
+
+    // The manual job stays active; the polygon customer does not steal it.
+    expect(engine.activeGeofenceId).toBe('c2');
+    expect(onExit).not.toHaveBeenCalled();
+  });
+
   it('ignores poor GPS accuracy', () => {
     let time = 100000;
     // We are inside, but accuracy is bad (50m)

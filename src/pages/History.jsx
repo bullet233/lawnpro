@@ -9,6 +9,7 @@ import { getSettings } from '../db/settings';
 import { getBusinessDateString } from '../utils/dateUtils';
 import { calculateServiceTotals, getVisitRevenueBreakdown } from '../utils/revenueUtils';
 import { useServiceMode } from '../components/ServiceProvider';
+import { toast } from '../utils/toast';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const fmt = (secs) => { 
@@ -217,7 +218,7 @@ export default function History() {
           setDialog(null);
         } catch (error) {
           console.error('Failed to delete visit:', error);
-          alert('Could not delete the log. Please refresh the app and try again.');
+          toast('Could not delete the log. Please refresh the app and try again.', 'error');
         }
       }
     });

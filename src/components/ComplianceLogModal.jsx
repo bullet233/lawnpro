@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { X, CheckCircle, Save, Copy, Repeat, Printer, Plus, Trash2 } from 'lucide-react';
 import { getSettings } from '../db/settings';
 import { parseLawnSizeToSqFt } from '../utils/parseLawnSize';
+import { toast } from '../utils/toast';
 
 export default function ComplianceLogModal({ visit, customerName, customerLawnSize, initialLog, onSave, onClose }) {
   const settings = getSettings();
@@ -132,7 +133,7 @@ export default function ComplianceLogModal({ visit, customerName, customerLawnSi
 
     const text = `Post-Application Notice\nDate: ${new Date(visit.exitTime).toLocaleDateString()}\nApplicator: ${log.applicatorName || 'Technician'}\n\nProducts Applied:\n${prods}\n\nInstructions:\n${noticesText}`;
     navigator.clipboard.writeText(text);
-    alert('Notice copied to clipboard!');
+    toast('Notice copied to clipboard');
   };
 
   const handleRepeatLast = () => {
@@ -149,7 +150,7 @@ export default function ComplianceLogModal({ visit, customerName, customerLawnSi
           products: last.products && last.products.length > 0 ? last.products : prev.products
         }));
       } else {
-        alert('No previous log found to repeat.');
+        toast('No previous log found to repeat', 'info');
       }
     } catch (e) {
       console.error(e);

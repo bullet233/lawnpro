@@ -7,6 +7,7 @@ import { getSettings } from '../db/settings';
 import { trackApiCall } from '../utils/apiTracker';
 import { getBusinessDayStart } from '../utils/dateUtils';
 import ComplianceLogModal from './ComplianceLogModal';
+import { toast } from '../utils/toast';
 
 export default function DayReviewModal({ onClose }) {
   const allCustomers = useLiveQuery(() => db.customers.toArray(), []) || [];
@@ -171,7 +172,7 @@ export default function DayReviewModal({ onClose }) {
     const log = edit.complianceLog || {};
     const text = `Post-Application Notice\nDate: ${new Date(visit.exitTime).toLocaleDateString()}\nApplicator: ${log.applicatorName || 'Technician'}\nProduct: ${log.productName || 'N/A'} (EPA Reg #${log.epaRegNum || 'N/A'})\nTarget: ${log.targetSite || 'Turf'}\n\nPlease keep children and pets off the treated area until dry (approx 2-3 hours).`;
     navigator.clipboard.writeText(text);
-    alert('Notice copied to clipboard!');
+    toast('Notice copied to clipboard');
   };
 
   const handleSaveAll = async () => {

@@ -8,6 +8,7 @@ import { GOOGLE_MAPS_API_KEY } from '../components/MapProvider';
 import { TrendingUp, Calculator, AlertCircle, Fuel, DollarSign, ArrowUp, ArrowDown, Edit2, Save, X, MapPin, AlertTriangle } from 'lucide-react';
 import { Autocomplete } from '@react-google-maps/api';
 import { useServiceMode } from '../components/ServiceProvider';
+import { toast } from '../utils/toast';
 
 // Haversine distance helper
 const haversineDistance = (lat1, lon1, lat2, lon2) => {
@@ -609,7 +610,7 @@ export default function Analytics() {
 
     const parsedTarget = parseLawnSizeToSqFt(targetSqFt);
     if (!parsedTarget) {
-      alert("Please enter a valid size (e.g. 5000 or 0.25 acres)");
+      toast('Please enter a valid size (e.g. 5000 or 0.25 acres)', 'error');
       return;
     }
 
@@ -750,7 +751,7 @@ export default function Analytics() {
       });
     } catch (e) {
       console.error(e);
-      alert('Error calculating bid: ' + e.message);
+      toast('Error calculating bid: ' + e.message, 'error');
     } finally {
       setIsCalculating(false);
     }

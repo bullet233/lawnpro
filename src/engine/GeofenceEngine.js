@@ -126,12 +126,17 @@ export class GeofenceEngine {
     if (insideCustomers.length === 1) {
       insideCustomer = insideCustomers[0];
     } else if (insideCustomers.length > 1) {
-      // Pick the closest if overlapping
+      // Pick the closest if overlapping. A customer without a polygon can only
+      // have matched via the manual anchor — explicit intent, so it wins outright.
       let closestDist = Infinity;
       for (const cust of insideCustomers) {
-        const centerLat = cust.geofence.reduce((s, p) => s + p.lat, 0) / cust.geofence.length;
-        const centerLng = cust.geofence.reduce((s, p) => s + p.lng, 0) / cust.geofence.length;
-        const d = getDistance(loc.lat, loc.lng, centerLat, centerLng);
+        const fence = cust.geofence || [];
+        let d = -1;
+        if (fence.length > 0) {
+          const centerLat = fence.reduce((s, p) => s + p.lat, 0) / fence.length;
+          const centerLng = fence.reduce((s, p) => s + p.lng, 0) / fence.length;
+          d = getDistance(loc.lat, loc.lng, centerLat, centerLng);
+        }
         if (d < closestDist) {
           closestDist = d;
           insideCustomer = cust;
