@@ -85,3 +85,73 @@ export function calculateTieredMatrix(allVisits, allCustomers) {
 
   return buckets.map((b, i) => ({ ...b, pace: bucketPace[i], rawHasData: stats[i].totalSecs > 0 }));
 }
+
+// Difficulty-normalized (sqft, mins) points for every mow visit — the same
+// normalization the bucket model applies (obstacles/fenced/terrain removed so the
+// modifiers can be added back on top when quoting). Shared by the trend fitters.
+function collectMowPoints(allVisits, allCustomers) {
+  const settings = getSettings();
+  const mowingServiceIds = (settings.defaultServices || [])
+    .filter(s => s.category === 'Mowing' || s.id === 's1').map(s => s.id);
+  const custById = new Map(allCustomers.map(c => [c.id, c]));
+  const pts = [];
+  allVisits.forEach(v => {
+    if (v.status !== 'completed' || !v.durationSecs || v.durationSecs < 60) return;
+    const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id));
+    if (!isMow) return;
+    const cust = custById.get(v.customerId);
+    if (!cust) return;
+    const sqft = parseLawnSizeToSqFt(cust.lawnSize);
+    if (!sqft) return;
+    let mins = v.durationSecs / 60;
+    const obstacles = parseInt(cust.obstacleCount, 10) || 0;
+    if (obstacles > 0) mins -= (obstacles * 1.5);
+    if (cust.fencedBackyard) mins -= 3;
+    if (cust.terrain === 'moderate') mins /= 1.15;
+    else if (cust.terrain === 'hilly') mins /= 1.30;
+    mins = Math.max(0.5, mins);
+    pts.push([sqft, mins]);
+  });
+  return pts;
+}
+
+// ── Trend curve pricing model (beta alternative to tiered buckets) ────────────
+// Fits a power curve  time = A * sqft^b  (log-log least squares) across every mow
+// visit. With 0 < b < 1 the curve is concave — bigger lawns cost more total time
+// but less time per square foot — which is what the real data shows, so it
+// extrapolates sanely at both ends (no fake fixed "setup" constant, no per-bucket
+// cliffs). In leave-one-out cross-validation on real data this beat the tiered
+// buckets and a straight line. Returns null when there's too little data to fit;
+// callers fall back to buckets.
+export function calculatePowerModel(allVisits, allCustomers) {
+  if (!allVisits || !allCustomers || allVisits.length === 0 || allCustomers.length === 0) return null;
+
+  const pts = collectMowPoints(allVisits, allCustomers).filter(([x, y]) => x > 0 && y > 0);
+  if (pts.length < 5) return null; // too little data to trust a fit
+
+  const n = pts.length;
+  const sx = pts.reduce((s, p) => s + Math.log(p[0]), 0);
+  const sy = pts.reduce((s, p) => s + Math.log(p[1]), 0);
+  const sxx = pts.reduce((s, p) => s + Math.log(p[0]) ** 2, 0);
+  const sxy = pts.reduce((s, p) => s + Math.log(p[0]) * Math.log(p[1]), 0);
+  const denom = n * sxx - sx * sx;
+  if (denom === 0) return null;
+
+  const b = (n * sxy - sx * sy) / denom;
+  if (b <= 0) return null; // non-increasing fit — not usable for pricing
+  const A = Math.exp((sy - b * sx) / n);
+
+  // R² measured on the real (minutes) scale, not log space, so it's comparable.
+  const my = pts.reduce((s, p) => s + p[1], 0) / n;
+  const ssTot = pts.reduce((s, p) => s + (p[1] - my) ** 2, 0);
+  const ssRes = pts.reduce((s, p) => s + (p[1] - A * Math.pow(p[0], b)) ** 2, 0);
+  const r2 = ssTot > 0 ? 1 - ssRes / ssTot : 0;
+
+  return { A, b, r2, n };
+}
+
+// Predicted clean base minutes for a size under the trend curve model.
+export function predictTrendMins(model, sqft) {
+  if (!model) return 0;
+  return Math.max(0.5, model.A * Math.pow(sqft, model.b));
+}

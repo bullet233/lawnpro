@@ -7,6 +7,11 @@ import GeofenceEditor from '../components/GeofenceEditor';
 import { Autocomplete } from '@react-google-maps/api';
 import AppDialog from '../components/AppDialog';
 import VisitEditModal from '../components/VisitEditModal';
+import ManualVisitModal from '../components/ManualVisitModal';
+import ComplianceLogModal from '../components/ComplianceLogModal';
+import LawnMeasureModal from '../components/LawnMeasureModal';
+import { enrollCustomer, unenrollCustomer, completeTreatment, skipTreatment, classifyTreatment } from '../db/treatments';
+import { toast } from '../utils/toast';
 import { getSettings } from '../db/settings';
 import { trackApiCall } from '../utils/apiTracker';
 import { getDaysSince } from '../utils/dateUtils';
@@ -23,8 +28,13 @@ export default function CustomerDetail() {
     isNew ? null : db.customers.get(Number(id))
   , [id]);
 
-  const customerVisits = useLiveQuery(() => 
+  const customerVisits = useLiveQuery(() =>
     isNew ? [] : db.visits.where({ customerId: Number(id) }).toArray()
+  , [id]) || [];
+
+  const programs = useLiveQuery(() => db.treatmentPrograms.toArray(), []) || [];
+  const customerTreatments = useLiveQuery(() =>
+    isNew ? [] : db.treatments.where({ customerId: Number(id) }).toArray()
   , [id]) || [];
 
   const completedFertilizerVisits = useMemo(() => {
@@ -43,7 +53,7 @@ export default function CustomerDetail() {
     { id: 's4', name: 'Fall Clean-up', price: 150, active: false }
   ];
 
-  const [formData, setFormData] = useState({ name: '', address: '', phone: '', email: '', lawnSize: '', obstacleCount: '', terrain: 'flat', fencedBackyard: false, propertyNotes: '', serviceInterval: 7, mowingInterval: 7, fertilizerInterval: 30, fertilizerRounds: 6, specialApplications: '' });
+  const [formData, setFormData] = useState({ name: '', address: '', phone: '', email: '', lawnSize: '', mowableSqFt: '', perimeterFt: '', obstacleCount: '', terrain: 'flat', fencedBackyard: false, propertyNotes: '', serviceInterval: 7, mowingInterval: 7, fertilizerInterval: 30, fertilizerRounds: 6, specialApplications: '' });
   const [geofence, setGeofence] = useState(null);
   const [services, setServices] = useState(() => {
     const globalDefaults = getSettings().defaultServices || defaultServices;
@@ -60,6 +70,13 @@ export default function CustomerDetail() {
   const [dialog, setDialog] = useState(null);
   const [settings, setSettings] = useState(null);
   const [editingJob, setEditingJob] = useState(null);
+  const [showManualVisitModal, setShowManualVisitModal] = useState(false);
+  const [showMeasure, setShowMeasure] = useState(false);
+  const [showAllVisits, setShowAllVisits] = useState(false);
+  const [visitSort, setVisitSort] = useState('date-desc'); // {field}-{dir} for the visit log
+  const [visitFilter, setVisitFilter] = useState('all'); // service-id filter for the visit log
+  const [groupByMonth, setGroupByMonth] = useState(false); // group the visit log under month headers
+  const [loggingTreatment, setLoggingTreatment] = useState(null);
   const [isDirty, setIsDirty] = useState(false);
   const initialDataRef = useRef(null);
 
@@ -75,6 +92,8 @@ export default function CustomerDetail() {
         phone: customer.phone || '',
         email: customer.email || '',
         lawnSize: customer.lawnSize || '',
+        mowableSqFt: customer.mowableSqFt || '',
+        perimeterFt: customer.perimeterFt || '',
         obstacleCount: customer.obstacleCount ?? '',
         terrain: customer.terrain || 'flat',
         fencedBackyard: customer.fencedBackyard || false,
@@ -189,6 +208,81 @@ export default function CustomerDetail() {
         setGeofence(defaultFence);
       }
     }
+  };
+
+  const handleSaveEditedJob = async (updatedData) => {
+    if (!editingJob) return;
+    
+    const updateObj = {
+      appliedServices: updatedData.appliedServices,
+      addOns: updatedData.addOns,
+      priceEarned: updatedData.priceEarned,
+      durationSecs: updatedData.durationSecs,
+      driveTimeSecs: updatedData.driveTimeSecs,
+      note: updatedData.note,
+      exitTime: updatedData.exitTime,
+      entryTime: updatedData.entryTime
+    };
+    
+    await db.visits.update(editingJob.id, updateObj);
+    setEditingJob(null);
+  };
+
+  const handleSaveManualVisit = async (visitData) => {
+    await db.visits.add({
+      customerId: Number(id),
+      routeId: null,
+      status: 'completed',
+      ...visitData
+    });
+    setShowManualVisitModal(false);
+  };
+
+  const handleMeasureResult = ({ sqft, perimeterFt }) => {
+    setFormData(prev => ({
+      ...prev,
+      mowableSqFt: sqft,
+      perimeterFt: perimeterFt,
+      // Use the measured area as the lawn size (it drives the bidding matrix),
+      // but don't clobber a manual entry with an empty measurement.
+      lawnSize: sqft ? String(sqft) : prev.lawnSize,
+    }));
+    setShowMeasure(false);
+    toast(`Measured ${sqft.toLocaleString()} sq ft · ${perimeterFt.toLocaleString()} ft edging`);
+  };
+
+  // ── Treatment program enrollment ─────────────────────────────────────────
+  const fertServicePrice = () => {
+    const svc = services.find(s => s.active && (s.category === 'Fertilizer' || s.id === 's3'));
+    return svc ? Number(svc.price) || 0 : 0;
+  };
+
+  const handleEnrollProgram = async () => {
+    const program = programs[0];
+    if (!program) { toast('No treatment program found.'); return; }
+    const n = await enrollCustomer(Number(id), program.id, new Date().getFullYear());
+    toast(`Enrolled — ${n} step${n === 1 ? '' : 's'} scheduled.`);
+  };
+
+  const handleUnenroll = () => {
+    setDialog({
+      type: 'confirm',
+      title: 'Remove from program?',
+      message: 'This unenrolls the client and removes their upcoming (not-yet-completed) scheduled treatments for this year. Completed application history is kept.',
+      confirmLabel: 'Unenroll',
+      onConfirm: async () => { await unenrollCustomer(Number(id)); toast('Client unenrolled.'); }
+    });
+  };
+
+  const handleSaveTreatmentLog = async (logData) => {
+    if (!loggingTreatment) return;
+    await completeTreatment(loggingTreatment.id, {
+      complianceLog: logData,
+      completedAt: Date.now(),
+      price: fertServicePrice()
+    });
+    setLoggingTreatment(null);
+    toast('Application logged.');
   };
 
   const handleSave = async () => {
@@ -438,13 +532,32 @@ export default function CustomerDetail() {
 
               <div className="input-group">
                 <label className="input-label">Lawn Size</label>
-                <input 
-                  type="text" 
-                  className="input-field" 
-                  value={formData.lawnSize} 
-                  onChange={e => setFormData({ ...formData, lawnSize: e.target.value })} 
-                  placeholder="e.g. 5000 sq ft or 0.25 acres"
-                />
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <input
+                    type="text"
+                    className="input-field"
+                    value={formData.lawnSize}
+                    onChange={e => setFormData({ ...formData, lawnSize: e.target.value })}
+                    placeholder="e.g. 5000 sq ft or 0.25 acres"
+                    style={{ flex: 1 }}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => setShowMeasure(true)}
+                    disabled={isNew && !formData.address}
+                    title={isNew && !formData.address ? 'Enter an address first' : 'Measure on satellite'}
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', whiteSpace: 'nowrap', padding: '0.55rem 0.7rem' }}
+                  >
+                    <MapPin size={15} /> Measure
+                  </button>
+                </div>
+                {formData.mowableSqFt ? (
+                  <div style={{ fontSize: '0.72rem', color: 'var(--color-primary)', marginTop: '0.3rem', fontWeight: 600 }}>
+                    📐 Measured: {Number(formData.mowableSqFt).toLocaleString()} sq ft
+                    {formData.perimeterFt ? ` · ${Number(formData.perimeterFt).toLocaleString()} ft edging` : ''}
+                  </div>
+                ) : null}
               </div>
             </div>
             </div>
@@ -605,6 +718,69 @@ export default function CustomerDetail() {
           const mowVisits = sortedByDate.filter(v => !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id)));
           const fertVisits = sortedByDate.filter(v => v.appliedServices && v.appliedServices.some(id => fertServiceIds.includes(id)));
 
+          // Full visit log = completed AND skipped (true history), newest first.
+          const isFertVisit = (v) => v.appliedServices && v.appliedServices.some(id => fertServiceIds.includes(id));
+          const logVisits = [...customerVisits]
+            .filter(v => v.status === 'completed' || v.status === 'skipped')
+            .sort((a, b) => (b.exitTime || b.entryTime || 0) - (a.exitTime || a.entryTime || 0));
+          // Days since the previous visit OF THE SAME TYPE (mow/fert) — service cadence.
+          const gapById = {};
+          {
+            const lastByType = {};
+            [...logVisits].reverse().forEach(v => {
+              const t = isFertVisit(v) ? 'fert' : 'mow';
+              const prev = lastByType[t];
+              if (prev && v.exitTime) gapById[v.id] = Math.round((v.exitTime - prev) / 86400000);
+              if (v.exitTime) lastByType[t] = v.exitTime;
+            });
+          }
+          // Service filter — chips auto-built from services this client has actually had.
+          // Empty appliedServices => implicit mow (s1), matching the app's convention.
+          const svcIdsFor = (v) => (v.appliedServices && v.appliedServices.length) ? v.appliedServices : ['s1'];
+          const distinctServiceIds = [];
+          logVisits.forEach(v => svcIdsFor(v).forEach(id => { if (!distinctServiceIds.includes(id)) distinctServiceIds.push(id); }));
+          const serviceNameFor = (id) => services.find(s => s.id === id)?.name || settings?.defaultServices?.find(s => s.id === id)?.name || id;
+          // Guard so switching to a client without the selected service falls back to "all".
+          const effectiveFilter = (visitFilter !== 'all' && distinctServiceIds.includes(visitFilter)) ? visitFilter : 'all';
+          const filteredLog = effectiveFilter === 'all' ? logVisits : logVisits.filter(v => svcIdsFor(v).includes(effectiveFilter));
+
+          // Display sort (gap chips are computed from chronological order, unaffected).
+          const [sortField, sortDir] = visitSort.split('-');
+          const visitRate = (v) => { const s = (v.durationSecs || 0) + (v.driveTimeSecs || 0); return s > 0 ? (v.priceEarned || 0) / (s / 3600) : 0; };
+          const sortedLog = [...filteredLog].sort((a, b) => {
+            const dir = sortDir === 'asc' ? 1 : -1;
+            switch (sortField) {
+              case 'price': return dir * ((a.priceEarned || 0) - (b.priceEarned || 0));
+              case 'time': return dir * ((a.durationSecs || 0) - (b.durationSecs || 0));
+              case 'rate': return dir * (visitRate(a) - visitRate(b));
+              default: return dir * ((a.exitTime || 0) - (b.exitTime || 0));
+            }
+          });
+          const visitsToShow = showAllVisits ? sortedLog : sortedLog.slice(0, 15);
+
+          // When grouping by month, inject month-header markers between visits so the
+          // single existing row map can render both headers and rows (no duplication).
+          let displayItems;
+          if (groupByMonth) {
+            const chrono = [...filteredLog].sort((a, b) => (b.exitTime || 0) - (a.exitTime || 0));
+            displayItems = [];
+            let curKey = null, curGroup = null;
+            chrono.forEach(v => {
+              const d = v.exitTime ? new Date(v.exitTime) : null;
+              const key = d ? `${d.getFullYear()}-${d.getMonth()}` : 'unknown';
+              if (key !== curKey) {
+                curKey = key;
+                curGroup = { __header: true, key, label: d ? d.toLocaleDateString([], { month: 'long', year: 'numeric' }) : 'Unknown date', count: 0, revenue: 0 };
+                displayItems.push(curGroup);
+              }
+              curGroup.count += 1;
+              curGroup.revenue += (v.priceEarned || 0);
+              displayItems.push(v);
+            });
+          } else {
+            displayItems = visitsToShow;
+          }
+
           const lastMowVisit = mowVisits[0];
           const lastMowedDate = lastMowVisit ? new Date(lastMowVisit.exitTime) : null;
           const daysSinceMow = lastMowedDate ? getDaysSince(lastMowedDate.getTime()) : null;
@@ -754,65 +930,144 @@ export default function CustomerDetail() {
                   )}
                   {/* Visit History Timeline */}
                   <div className="card">
-                    <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '0.5rem' }}>
-                      <Clock size={13} style={{ verticalAlign: 'middle', marginRight: '0.3rem' }} />
-                      Recent Visits
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                      <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                        <Clock size={13} style={{ verticalAlign: 'middle', marginRight: '0.3rem' }} />
+                        Visit Log <span style={{ opacity: 0.6 }}>({filteredLog.length})</span>
+                      </div>
+                      <button className="btn btn-secondary" style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }} onClick={() => setShowManualVisitModal(true)}>
+                        + Log Manual Visit
+                      </button>
                     </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem', maxHeight: '250px', overflowY: 'auto' }}>
-                      {sortedByDate.slice(0, 15).map(v => {
+                    {distinctServiceIds.length > 1 && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap', marginBottom: '0.6rem' }}>
+                        {['all', ...distinctServiceIds].map(id => {
+                          const active = effectiveFilter === id;
+                          const label = id === 'all' ? 'All' : serviceNameFor(id);
+                          return (
+                            <button key={id} onClick={() => setVisitFilter(id)}
+                              style={{ padding: '0.25rem 0.6rem', fontSize: '0.72rem', fontWeight: 600, borderRadius: '999px', cursor: 'pointer',
+                                border: active ? '1px solid var(--color-primary)' : '1px solid var(--color-border)',
+                                background: active ? 'rgba(16,185,129,0.1)' : 'var(--color-bg-main)',
+                                color: active ? 'var(--color-primary)' : 'var(--color-text-muted)' }}>
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {filteredLog.length > 1 && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.7rem', flexWrap: 'wrap' }}>
+                        {!groupByMonth && (
+                          <>
+                            <span style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Sort</span>
+                            <select value={visitSort} onChange={e => setVisitSort(e.target.value)} className="input-field"
+                              style={{ padding: '0.3rem 0.5rem', fontSize: '0.78rem', width: 'auto' }}>
+                              <option value="date-desc">Newest first</option>
+                              <option value="date-asc">Oldest first</option>
+                              <option value="price-desc">Highest $</option>
+                              <option value="price-asc">Lowest $</option>
+                              <option value="time-desc">Longest job</option>
+                              <option value="time-asc">Shortest job</option>
+                              <option value="rate-desc">Best $/hr</option>
+                              <option value="rate-asc">Worst $/hr</option>
+                            </select>
+                          </>
+                        )}
+                        <button onClick={() => setGroupByMonth(!groupByMonth)}
+                          style={{ padding: '0.3rem 0.7rem', fontSize: '0.75rem', fontWeight: 600, borderRadius: '999px', cursor: 'pointer',
+                            border: groupByMonth ? '1px solid var(--color-primary)' : '1px solid var(--color-border)',
+                            background: groupByMonth ? 'rgba(16,185,129,0.1)' : 'var(--color-bg-main)',
+                            color: groupByMonth ? 'var(--color-primary)' : 'var(--color-text-muted)' }}>
+                          📅 By month
+                        </button>
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', maxHeight: (showAllVisits || groupByMonth) ? '620px' : '340px', overflowY: 'auto' }}>
+                      {displayItems.map((item) => {
+                        if (item.__header) return (
+                          <div key={item.key} style={{ position: 'sticky', top: 0, zIndex: 1, background: 'var(--color-bg-card)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.4rem 0.2rem 0.35rem', borderTop: '1px solid var(--color-border)', marginTop: '0.2rem' }}>
+                            <span style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--color-text-main)' }}>{item.label}</span>
+                            <span style={{ fontSize: '0.72rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>{item.count} visit{item.count !== 1 ? 's' : ''} · ${item.revenue.toFixed(0)}</span>
+                          </div>
+                        );
+                        const v = item;
                         const svcNames = (v.appliedServices || []).map(sid => services.find(s => s.id === sid)?.name).filter(Boolean);
+                        const isSkipped = v.status === 'skipped';
+                        const secs = (v.durationSecs || 0) + (v.driveTimeSecs || 0);
+                        const perHr = secs > 0 ? (v.priceEarned || 0) / (secs / 3600) : 0;
+                        const gap = gapById[v.id];
+                        const interval = isFertVisit(v) ? (formData.fertilizerInterval || 30) : (formData.mowingInterval || 7);
+                        const gapColor = gap == null ? null : gap > interval * 1.6 ? '#ef4444' : gap > interval + 2 ? '#f59e0b' : 'var(--color-text-muted)';
+                        const hasEpa = !!v.complianceLog;
+
                         return (
-                          <div key={v.id} style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', padding: '0.5rem 0.7rem', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)', fontSize: '0.8rem' }}>
-                            <div style={{ width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0, background: v.status === 'completed' ? 'var(--color-primary)' : v.status === 'skipped' ? '#ef4444' : '#f59e0b' }} />
+                          <div key={v.id} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.6rem', padding: '0.6rem 0.7rem', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)', fontSize: '0.8rem', opacity: isSkipped ? 0.7 : 1 }}>
+                            <div style={{ width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0, marginTop: '0.35rem', background: v.status === 'completed' ? 'var(--color-primary)' : '#ef4444' }} />
                             <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontWeight: 600, color: 'var(--color-text-main)', display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
-                                <span>{new Date(v.exitTime).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
-                                <div style={{ display: 'flex', gap: '0.4rem' }}>
-                                  <span style={{ 
-                                    display: 'inline-flex', alignItems: 'center', gap: '0.3rem', 
-                                    background: 'var(--color-bg-card)', color: 'var(--color-text-muted)', 
-                                    border: '1px solid var(--color-border)',
-                                    padding: '0.15rem 0.4rem', borderRadius: 'var(--radius-sm)', fontSize: '0.7rem', fontWeight: 600 
-                                  }} title="Drive Time">
-                                    <span style={{ fontSize: '0.6rem', textTransform: 'uppercase', letterSpacing: '0.5px', opacity: 0.8 }}>Drive</span>
-                                    <span style={{ color: 'var(--color-text-main)', fontWeight: 700 }}>{Math.round((v.driveTimeSecs || 0) / 60)}m</span>
+                              <div style={{ fontWeight: 600, color: 'var(--color-text-main)', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <span>{v.exitTime ? new Date(v.exitTime).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}</span>
+                                {gap != null && (
+                                  <span style={{ fontSize: '0.65rem', fontWeight: 600, color: gapColor }} title={`${gap} days since previous ${isFertVisit(v) ? 'fertilizer' : 'mow'} visit`}>
+                                    +{gap}d
                                   </span>
-                                  <span style={{ 
-                                    display: 'inline-flex', alignItems: 'center', gap: '0.3rem', 
-                                    background: 'var(--color-bg-card)', color: 'var(--color-text-muted)', 
-                                    border: '1px solid var(--color-border)',
-                                    padding: '0.15rem 0.4rem', borderRadius: 'var(--radius-sm)', fontSize: '0.7rem', fontWeight: 600 
-                                  }} title="Job Time">
-                                    <span style={{ fontSize: '0.6rem', textTransform: 'uppercase', letterSpacing: '0.5px', opacity: 0.8 }}>Job</span>
-                                    <span style={{ color: 'var(--color-text-main)', fontWeight: 700 }}>{Math.round((v.durationSecs || 0) / 60)}m</span>
-                                  </span>
-                                </div>
+                                )}
+                                {isSkipped ? (
+                                  <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#ef4444', background: 'rgba(239,68,68,0.1)', padding: '0.1rem 0.4rem', borderRadius: 'var(--radius-sm)' }}>SKIPPED</span>
+                                ) : (
+                                  <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', padding: '0.1rem 0.4rem', borderRadius: 'var(--radius-sm)', fontSize: '0.68rem', fontWeight: 600 }} title="Drive Time">
+                                      <span style={{ fontSize: '0.58rem', textTransform: 'uppercase', letterSpacing: '0.5px', opacity: 0.8 }}>Drive</span>
+                                      <span style={{ color: 'var(--color-text-main)', fontWeight: 700 }}>{Math.round((v.driveTimeSecs || 0) / 60)}m</span>
+                                    </span>
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', padding: '0.1rem 0.4rem', borderRadius: 'var(--radius-sm)', fontSize: '0.68rem', fontWeight: 600 }} title="Job Time">
+                                      <span style={{ fontSize: '0.58rem', textTransform: 'uppercase', letterSpacing: '0.5px', opacity: 0.8 }}>Job</span>
+                                      <span style={{ color: 'var(--color-text-main)', fontWeight: 700 }}>{Math.round((v.durationSecs || 0) / 60)}m</span>
+                                    </span>
+                                    {perHr > 0 && (
+                                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', padding: '0.1rem 0.4rem', borderRadius: 'var(--radius-sm)', fontSize: '0.68rem', fontWeight: 700, color: settings && perHr < settings.rateUnderpaidThreshold ? '#ef4444' : settings && perHr < settings.targetHourlyRate ? '#f59e0b' : 'var(--color-primary)' }} title="Effective rate (job + drive)">
+                                        ${perHr.toFixed(0)}/hr
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
                               </div>
-                              {svcNames.length > 0 && (
-                                <div style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                  {svcNames.join(', ')}
+                              {(svcNames.length > 0 || hasEpa) && (
+                                <div style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', marginTop: '0.2rem', display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                  {svcNames.length > 0 && <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{svcNames.join(', ')}</span>}
+                                  {hasEpa && (
+                                    <button onClick={() => navigate(`/print-epa/${v.id}`)} title="View / print EPA compliance log"
+                                      style={{ fontSize: '0.62rem', fontWeight: 700, color: '#0ea5e9', background: 'rgba(14,165,233,0.1)', border: '1px solid rgba(14,165,233,0.3)', borderRadius: 'var(--radius-sm)', padding: '0.05rem 0.35rem', cursor: 'pointer', flexShrink: 0 }}>
+                                      🧪 EPA log
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                              {v.note && v.note.trim() && (
+                                <div style={{ fontSize: '0.72rem', color: 'var(--color-text-main)', fontStyle: 'italic', marginTop: '0.35rem', background: 'var(--color-bg-card)', borderLeft: '3px solid #f59e0b', padding: '0.35rem 0.5rem', borderRadius: '4px' }}>
+                                  “{v.note}”
                                 </div>
                               )}
                             </div>
-                              <div style={{ fontWeight: 700, color: 'var(--color-primary)', flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-                                ${(v.priceEarned || 0).toFixed(0)}
-                                {v.appliedServices?.length > 1 && (() => {
-                                  const breakdown = getVisitRevenueBreakdown(v, customer, settings?.defaultServices);
-                                  if (Object.keys(breakdown).length > 1) {
-                                    return (
-                                      <div style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', fontWeight: 600, marginTop: '0.1rem', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.1rem' }}>
-                                        {Object.entries(breakdown).map(([sid, amt]) => {
-                                          const sName = customer?.services?.find(s => s.id === sid)?.name || settings?.defaultServices?.find(s => s.id === sid)?.name || sid;
-                                          return <div key={sid}>{sName}: ${amt.toFixed(0)}</div>;
-                                        })}
-                                      </div>
-                                    );
-                                  }
-                                  return null;
-                                })()}
-                              </div>
-                            <button 
-                              className="btn btn-secondary" 
+                            <div style={{ fontWeight: 700, color: isSkipped ? 'var(--color-text-muted)' : 'var(--color-primary)', flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                              ${(v.priceEarned || 0).toFixed(0)}
+                              {v.appliedServices?.length > 1 && (() => {
+                                const breakdown = getVisitRevenueBreakdown(v, customer, settings?.defaultServices);
+                                if (Object.keys(breakdown).length > 1) {
+                                  return (
+                                    <div style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', fontWeight: 600, marginTop: '0.1rem', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.1rem' }}>
+                                      {Object.entries(breakdown).map(([sid, amt]) => {
+                                        const sName = customer?.services?.find(s => s.id === sid)?.name || settings?.defaultServices?.find(s => s.id === sid)?.name || sid;
+                                        return <div key={sid}>{sName}: ${amt.toFixed(0)}</div>;
+                                      })}
+                                    </div>
+                                  );
+                                }
+                                return null;
+                              })()}
+                            </div>
+                            <button
+                              className="btn btn-secondary"
                               style={{ padding: '0.3rem', flexShrink: 0, marginLeft: '0.2rem', color: 'var(--color-text-muted)' }}
                               onClick={() => setEditingJob(v)}
                               title="Edit Visit"
@@ -823,6 +1078,11 @@ export default function CustomerDetail() {
                         );
                       })}
                     </div>
+                    {!groupByMonth && filteredLog.length > 15 && (
+                      <button className="btn btn-secondary" style={{ width: '100%', marginTop: '0.6rem', padding: '0.4rem', fontSize: '0.8rem' }} onClick={() => setShowAllVisits(!showAllVisits)}>
+                        {showAllVisits ? 'Show less' : `Show all ${filteredLog.length} visits`}
+                      </button>
+                    )}
                   </div>
                 </>
               )}
@@ -842,7 +1102,79 @@ export default function CustomerDetail() {
 
         {activeTab === 'fertilizer' && (
           <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-            
+
+            {/* Treatment Program */}
+            {!isNew && (() => {
+              const year = new Date().getFullYear();
+              const enrolled = !!customer?.treatmentProgramId;
+              const yearTreatments = customerTreatments
+                .filter(t => t.year === year)
+                .map(t => ({
+                  ...t,
+                  state: t.status === 'completed' ? 'completed'
+                    : t.status === 'skipped' ? 'skipped'
+                    : classifyTreatment(t, Date.now())
+                }))
+                .sort((a, b) => (a.stepOrder || 0) - (b.stepOrder || 0));
+              const done = yearTreatments.filter(t => t.state === 'completed').length;
+              const stateMeta = {
+                completed: { label: 'Done', color: 'var(--color-primary)' },
+                overdue: { label: 'Overdue', color: '#ef4444' },
+                due: { label: 'Due Now', color: '#f59e0b' },
+                scheduled: { label: 'Scheduled', color: 'var(--color-text-muted)' },
+                skipped: { label: 'Skipped', color: 'var(--color-text-muted)' },
+              };
+              return (
+                <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.5rem' }}>
+                    <h3 style={{ margin: 0, fontSize: '1.1rem', color: 'var(--color-text-main)' }}>💧 Treatment Program</h3>
+                    {enrolled ? (
+                      <button onClick={handleUnenroll} style={{ background: 'transparent', border: '1px solid var(--color-border)', color: 'var(--color-text-muted)', borderRadius: 'var(--radius-sm)', padding: '0.3rem 0.6rem', cursor: 'pointer', fontSize: '0.8rem' }}>Unenroll</button>
+                    ) : (
+                      <button className="btn btn-primary" style={{ padding: '0.4rem 0.9rem', fontSize: '0.85rem' }} onClick={handleEnrollProgram}>Enroll</button>
+                    )}
+                  </div>
+
+                  {!enrolled ? (
+                    <div style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+                      Enroll this client in <strong>{programs[0]?.name || 'the treatment program'}</strong> to auto-schedule seasonal applications and track compliance.
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+                        {programs.find(p => p.id === customer.treatmentProgramId)?.name || 'Program'} · {done}/{yearTreatments.length} done in {year}
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                        {yearTreatments.map(t => {
+                          const sm = stateMeta[t.state] || stateMeta.scheduled;
+                          const canLog = t.state === 'due' || t.state === 'overdue' || t.state === 'scheduled';
+                          return (
+                            <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '0.7rem', padding: '0.6rem 0.7rem', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--color-text-main)' }}>{t.stepName}</div>
+                                <div style={{ fontSize: '0.72rem', fontWeight: 700, color: sm.color, marginTop: '0.1rem' }}>
+                                  {t.state === 'completed' && t.completedAt
+                                    ? `Done ${new Date(t.completedAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}`
+                                    : sm.label}
+                                </div>
+                              </div>
+                              {t.state === 'completed' ? (
+                                <span style={{ color: 'var(--color-primary)', fontWeight: 700, fontSize: '0.8rem' }}>✓</span>
+                              ) : t.state === 'skipped' ? (
+                                <span style={{ color: 'var(--color-text-muted)', fontSize: '0.75rem' }}>—</span>
+                              ) : canLog && (
+                                <button className="btn btn-secondary" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} onClick={() => setLoggingTreatment(t)}>Log</button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+                </div>
+              );
+            })()}
+
             {/* Settings */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
               <div className="input-group">
@@ -919,10 +1251,34 @@ export default function CustomerDetail() {
           customer={customer}
           defaultServices={settings?.defaultServices}
           onClose={() => setEditingJob(null)}
-          onSave={async (updates) => {
-            await db.visits.update(editingJob.id, updates);
-            setEditingJob(null);
-          }}
+          onSave={handleSaveEditedJob}
+        />
+      )}
+
+      {showManualVisitModal && customer && (
+        <ManualVisitModal
+          customer={customer}
+          onClose={() => setShowManualVisitModal(false)}
+          onSave={handleSaveManualVisit}
+        />
+      )}
+
+      {showMeasure && (
+        <LawnMeasureModal
+          customer={{ name: formData.name, address: formData.address }}
+          onClose={() => setShowMeasure(false)}
+          onSave={handleMeasureResult}
+        />
+      )}
+
+      {loggingTreatment && customer && (
+        <ComplianceLogModal
+          visit={{ exitTime: Date.now(), phone: customer.phone, address: customer.address }}
+          customerName={customer.name}
+          customerLawnSize={customer.lawnSize}
+          initialLog={null}
+          onSave={handleSaveTreatmentLog}
+          onClose={() => setLoggingTreatment(null)}
         />
       )}
     </div>

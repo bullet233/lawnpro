@@ -1,12 +1,15 @@
 import { useState, useRef, useMemo } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/db';
-import { Plus, ChevronRight, Upload, CheckCircle, AlertTriangle, Search, ArrowUpDown, Save, Users, Download } from 'lucide-react';
+import { Plus, ChevronRight, Upload, CheckCircle, AlertTriangle, Search, ArrowUpDown, Save, Users, Download, ExternalLink } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import AppDialog from '../components/AppDialog';
-import { getSettings } from '../db/settings';
 import { trackApiCall } from '../utils/apiTracker';
 import { getDaysSince } from '../utils/dateUtils';
+import { parseLawnSizeToSqFt } from '../utils/parseLawnSize';
+import { getSettings } from '../db/settings';
+import { classifyTreatment } from '../db/treatments';
+import { useServiceMode } from '../components/ServiceProvider';
 
 // Avatar Helper Component
 function Avatar({ name }) {
@@ -99,6 +102,7 @@ export default function CustomersList() {
   const navigate = useNavigate();
   const customers = useLiveQuery(() => db.customers.toArray(), []);
   const allVisits  = useLiveQuery(() => db.visits.toArray(), []);
+  const allTreatments = useLiveQuery(() => db.treatments.toArray(), []) || [];
   const fileRef = useRef(null);
 
   const [importing, setImporting] = useState(false);
@@ -108,36 +112,31 @@ export default function CustomersList() {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState('name'); // name | lastVisit | revenue | overdue
   const [showInactive, setShowInactive] = useState(false);
-  const [serviceTab, setServiceTab] = useState('all');
+  const [needsAttentionOnly, setNeedsAttentionOnly] = useState(false);
+  const { activeMode } = useServiceMode();
   const [viewMode, setViewMode] = useState('cards'); // 'cards' | 'table'
   const [pendingEdits, setPendingEdits] = useState({}); // Local state for table edits
+  const [tableSort, setTableSort] = useState({ col: 'name', dir: 'asc' }); // table-view column sort
 
   // Build per-customer visit stats
   const visitStats = useMemo(() => {
     if (!allVisits) return {};
     const stats = {};
-    const settings = getSettings();
-    const defaultServices = settings.defaultServices || [];
-    const mowingServiceIds = defaultServices.filter(s => s.category === 'Mowing' || s.id === 's1').map(s => s.id);
-    const fertServiceIds = defaultServices.filter(s => s.category === 'Fertilizer' || s.id === 's3').map(s => s.id);
 
     for (const v of allVisits) {
       if (v.status === 'skipped') continue;
-      if (!stats[v.customerId]) stats[v.customerId] = { count: 0, lastExit: 0, lastMow: 0, lastFert: 0, firstExit: Infinity, revenue: 0 };
+      // Filter out visits that don't match the current division
+      if (v.division && v.division !== activeMode) continue;
+      
+      if (!stats[v.customerId]) stats[v.customerId] = { count: 0, lastExit: 0, firstExit: Infinity, revenue: 0 };
       const s = stats[v.customerId];
       s.count++;
       s.revenue += (v.priceEarned || 0);
       if (v.exitTime > s.lastExit) s.lastExit = v.exitTime;
       if (v.exitTime < s.firstExit) s.firstExit = v.exitTime;
-      
-      const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id));
-      const isFert = v.appliedServices && v.appliedServices.some(id => fertServiceIds.includes(id));
-      
-      if (isMow && v.exitTime > s.lastMow) s.lastMow = v.exitTime;
-      if (isFert && v.exitTime > s.lastFert) s.lastFert = v.exitTime;
     }
     return stats;
-  }, [allVisits]);
+  }, [allVisits, activeMode]);
 
   // Find outliers (>50 miles from average)
   const outlierCustomers = useMemo(() => {
@@ -173,49 +172,75 @@ export default function CustomersList() {
   // Filter, sort, and compute overdue
   const filteredCustomers = useMemo(() => {
     if (!customers) return [];
+    const now = Date.now();
+    const settings = getSettings();
+    const defaultServices = settings.defaultServices || [];
+    const mowIds = defaultServices.filter(s => s.category === 'Mowing' || s.id === 's1').map(s => s.id);
+    const fertIds = defaultServices.filter(s => s.category === 'Fertilizer' || s.id === 's3').map(s => s.id);
+    // Category/id-based service matching (robust to oddly-named services), consistent
+    // with the Dashboard and Analytics rather than fragile name-substring matching.
+    const isMowingClient = (c) => (c.services || []).some(s => s.active && (s.category === 'Mowing' || s.id === 's1' || mowIds.includes(s.id)));
+    const isFertClient = (c) => (c.services || []).some(s => s.active && (s.category === 'Fertilizer' || s.id === 's3' || fertIds.includes(s.id)));
+
+    // For enrolled clients, the fertilizer-mode "overdue" comes from the treatment
+    // program (so this page agrees with the Treatments page), not the naive interval.
+    const treatStateByCust = {};
+    if (activeMode === 'fertilizer') {
+      allTreatments.forEach(t => {
+        if (t.status !== 'scheduled' && t.status !== 'due') return;
+        const st = classifyTreatment(t, now);
+        if (st !== 'due' && st !== 'overdue') return;
+        const cur = treatStateByCust[t.customerId];
+        treatStateByCust[t.customerId] = st === 'overdue' ? 'overdue' : (cur === 'overdue' ? 'overdue' : 'due');
+      });
+    }
+
     let list = customers.map(c => {
       const stats = visitStats[c.id];
-      const now = Date.now();
-      
-      const isMowCust = !c.services || c.services.find(s => s.id === 's1')?.active;
-      const isFertCust = c.services && c.services.find(s => s.id === 's3')?.active;
-      
-      let overdueLevel = 0;
+
+      let overdueLevel = 0; // 0=fine, 1=warning, 2=danger
       let maxOverdueDays = -999;
       let primaryDaysSince = null; // for display
+      let dueText = null;
 
-      if (isMowCust) {
+      // visitStats is already scoped to the active division, so lastExit is the
+      // last visit in the current mode.
+      const daysSinceVisit = stats?.lastExit ? getDaysSince(stats.lastExit) : null;
+      if (activeMode === 'mowing') {
         const mInt = c.mowingInterval || c.serviceInterval || 7;
-        const daysSinceMow = stats?.lastMow ? getDaysSince(stats.lastMow) : null;
-        if (daysSinceMow !== null) {
-          if (daysSinceMow > mInt + 3) overdueLevel = Math.max(overdueLevel, 2);
-          else if (daysSinceMow >= mInt) overdueLevel = Math.max(overdueLevel, 1);
-          maxOverdueDays = Math.max(maxOverdueDays, daysSinceMow - mInt);
-          primaryDaysSince = daysSinceMow;
+        if (daysSinceVisit !== null) {
+          if (daysSinceVisit > mInt + 3) overdueLevel = 2;
+          else if (daysSinceVisit >= mInt) overdueLevel = 1;
+          maxOverdueDays = daysSinceVisit - mInt;
+          primaryDaysSince = daysSinceVisit;
+          if (overdueLevel === 2) dueText = `${daysSinceVisit}d overdue`;
+          else if (overdueLevel === 1) dueText = `${daysSinceVisit}d ago`;
         }
-      }
-      if (isFertCust) {
-        const fInt = c.fertilizerInterval || 30;
-        const daysSinceFert = stats?.lastFert ? getDaysSince(stats.lastFert) : null;
-        if (daysSinceFert !== null) {
-          if (daysSinceFert > fInt + 7) overdueLevel = Math.max(overdueLevel, 2);
-          else if (daysSinceFert >= fInt) overdueLevel = Math.max(overdueLevel, 1);
-          maxOverdueDays = Math.max(maxOverdueDays, daysSinceFert - fInt);
-          if (primaryDaysSince === null) primaryDaysSince = daysSinceFert;
-        }
-      }
-      if (!isMowCust && !isFertCust) {
-        const mInt = c.serviceInterval || 7;
-        const daysSince = stats?.lastExit ? getDaysSince(stats.lastExit) : null;
-        if (daysSince !== null) {
-          if (daysSince > mInt + 7) overdueLevel = 2;
-          else if (daysSince >= mInt) overdueLevel = 1;
-          maxOverdueDays = daysSince - mInt;
-          primaryDaysSince = daysSince;
+      } else if (activeMode === 'fertilizer') {
+        if (c.treatmentProgramId) {
+          const st = treatStateByCust[c.id];
+          if (st === 'overdue') { overdueLevel = 2; maxOverdueDays = 999; dueText = 'Treatment overdue'; }
+          else if (st === 'due') { overdueLevel = 1; maxOverdueDays = 1; dueText = 'Treatment due'; }
+        } else {
+          const fInt = c.fertilizerInterval || 30;
+          if (daysSinceVisit !== null) {
+            if (daysSinceVisit > fInt + 7) overdueLevel = 2;
+            else if (daysSinceVisit >= fInt) overdueLevel = 1;
+            maxOverdueDays = daysSinceVisit - fInt;
+            primaryDaysSince = daysSinceVisit;
+            if (overdueLevel === 2) dueText = `${daysSinceVisit}d overdue`;
+            else if (overdueLevel === 1) dueText = `${daysSinceVisit}d ago`;
+          }
         }
       }
 
-      return { ...c, stats, daysSince: primaryDaysSince, overdueLevel, maxOverdueDays, intervalDays: c.mowingInterval || c.serviceInterval || 7, isOutlier: outlierCustomers.has(c.id) };
+      const isOutlier = outlierCustomers.has(c.id);
+      const missingAddress = !c.address || c.address === 'Added from field';
+      const missingLawn = !c.lawnSize;
+      const needsAttention = isOutlier || missingAddress || missingLawn;
+
+      return { ...c, stats, daysSince: primaryDaysSince, overdueLevel, maxOverdueDays, dueText,
+        intervalDays: c.mowingInterval || c.serviceInterval || 7, isOutlier, needsAttention };
     });
 
     // Filter by active/inactive
@@ -223,12 +248,8 @@ export default function CustomersList() {
       list = list.filter(c => c.status !== 'inactive');
     }
 
-    // Filter by Service Type
-    if (serviceTab === 'fertilizer') {
-      list = list.filter(c => c.services && c.services.some(s => s.id === 's3' && s.active));
-    } else if (serviceTab === 'mowing') {
-      list = list.filter(c => c.services && c.services.some(s => s.id === 's1' && s.active));
-    }
+    // Filter by Service Type (category-based)
+    list = list.filter(activeMode === 'fertilizer' ? isFertClient : isMowingClient);
 
     // Search filter
     const q = searchQuery.toLowerCase().trim();
@@ -256,7 +277,45 @@ export default function CustomersList() {
     });
 
     return list;
-  }, [customers, visitStats, searchQuery, sortBy, showInactive, serviceTab, outlierCustomers]);
+  }, [customers, visitStats, searchQuery, sortBy, showInactive, activeMode, outlierCustomers, allTreatments]);
+
+  // "Needs Attention" = missing address / missing lawn size / bad GPS. Counted from
+  // the mode-filtered list, then optionally used to narrow what's shown.
+  const attentionCount = filteredCustomers.filter(c => c.needsAttention).length;
+  const displayed = needsAttentionOnly ? filteredCustomers.filter(c => c.needsAttention) : filteredCustomers;
+
+  // Table view: independent click-to-sort on columns (leaves the card sort untouched).
+  const priceOfCust = (c) => {
+    const mow = c.services?.find(s => s.id === 's1')?.price ?? c.price ?? 0;
+    const fert = c.services?.find(s => s.id === 's3')?.price ?? 0;
+    return activeMode === 'fertilizer' ? fert : mow;
+  };
+  const tableRows = useMemo(() => {
+    const rows = [...displayed];
+    const dir = tableSort.dir === 'asc' ? 1 : -1;
+    rows.sort((a, b) => {
+      switch (tableSort.col) {
+        case 'phone': return dir * (a.phone || '').localeCompare(b.phone || '');
+        case 'size': return dir * ((parseLawnSizeToSqFt(a.lawnSize) || 0) - (parseLawnSizeToSqFt(b.lawnSize) || 0));
+        case 'price': return dir * (priceOfCust(a) - priceOfCust(b));
+        case 'last': return dir * ((a.stats?.lastExit || 0) - (b.stats?.lastExit || 0));
+        default: return dir * (a.name || '').localeCompare(b.name || '');
+      }
+    });
+    return rows;
+  }, [displayed, tableSort, activeMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleTableSort = (col) => {
+    setTableSort(prev => prev.col === col ? { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: 'asc' });
+  };
+  // Enter jumps to the same column in the next row (spreadsheet-style entry).
+  const focusNextRow = (e, rowIndex, col) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const next = document.querySelector(`[data-cell="${rowIndex + 1}-${col}"]`);
+      if (next) next.focus();
+    }
+  };
 
   const handleToggleStatus = async (e, custId, currentStatus) => {
     e.preventDefault();
@@ -277,6 +336,16 @@ export default function CustomersList() {
       newServices.push({ id: 's3', name: 'Fertilizer', price: 75, active: true });
     }
     
+    await db.customers.update(c.id, { services: newServices });
+  };
+
+  const handleToggleMowing = async (e, c) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const newServices = JSON.parse(JSON.stringify(c.services || DEFAULT_SERVICES));
+    const idx = newServices.findIndex(s => s.id === 's1');
+    if (idx >= 0) newServices[idx].active = !newServices[idx].active;
+    else newServices.push({ id: 's1', name: 'Mowing', price: 50, active: true });
     await db.customers.update(c.id, { services: newServices });
   };
 
@@ -513,7 +582,7 @@ export default function CustomersList() {
           <button className="btn btn-secondary" onClick={() => fileRef.current?.click()}>
             <Upload size={16} /> Import
           </button>
-          <button className="btn btn-primary" onClick={() => navigate(serviceTab === 'fertilizer' ? '/customers/new?service=s3' : '/customers/new')}>
+          <button className="btn btn-primary" onClick={() => navigate(activeMode === 'fertilizer' ? '/customers/new?service=s3' : '/customers/new')}>
             <Plus size={18} /> New
           </button>
         </div>
@@ -552,23 +621,21 @@ export default function CustomersList() {
             {s === 'overdue' && 'Overdue'}
           </button>
         ))}
-        <div style={{ display: 'flex', background: 'var(--color-bg-card)', borderRadius: 'var(--radius-md)', padding: '0.25rem', border: '1px solid var(--color-border)', marginLeft: '0.5rem' }}>
-          {['all', 'mowing', 'fertilizer'].map(tab => (
-            <button 
-              key={tab}
-              onClick={() => setServiceTab(tab)}
-              style={{ 
-                padding: '0.4rem 0.8rem', fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer', textTransform: 'capitalize',
-                background: serviceTab === tab ? 'var(--color-primary)' : 'transparent', 
-                color: serviceTab === tab ? 'white' : 'var(--color-text-muted)',
-                border: 'none', borderRadius: 'var(--radius-sm)', transition: 'all 0.2s'
-              }}
-            >
-              {tab}
-            </button>
-          ))}
-        </div>
         <div style={{ flex: 1 }} />
+        {(attentionCount > 0 || needsAttentionOnly) && (
+          <button
+            onClick={() => setNeedsAttentionOnly(!needsAttentionOnly)}
+            style={{
+              padding: '0.4rem 0.8rem', fontSize: '0.8rem', fontWeight: 600,
+              borderRadius: '999px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.3rem',
+              border: needsAttentionOnly ? '1px solid #f59e0b' : '1px solid var(--color-border)',
+              background: needsAttentionOnly ? 'rgba(245,158,11,0.12)' : 'var(--color-bg-main)',
+              color: needsAttentionOnly ? '#b45309' : 'var(--color-text-muted)'
+            }}
+          >
+            <AlertTriangle size={13} /> {needsAttentionOnly ? 'Needs attention' : `${attentionCount} need attention`}
+          </button>
+        )}
         {inactiveCount > 0 && (
           <button
             onClick={() => setShowInactive(!showInactive)}
@@ -586,7 +653,7 @@ export default function CustomersList() {
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', paddingBottom: '2rem' }}>
-        {filteredCustomers.length === 0 && (
+        {displayed.length === 0 && (
           <div style={{ textAlign: 'center', padding: '4rem 1rem', background: 'var(--color-bg-card)', borderRadius: 'var(--radius-lg)', border: '1px dashed var(--color-border)', boxShadow: 'var(--shadow-sm)' }}>
             <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '72px', height: '72px', borderRadius: '50%', background: 'rgba(16,185,129,0.05)', color: 'var(--color-primary)', marginBottom: '1.5rem', border: '1px solid rgba(16,185,129,0.1)' }}>
               <Users size={32} />
@@ -598,7 +665,7 @@ export default function CustomersList() {
               {searchQuery ? 'Try adjusting your search terms or filters.' : 'Add your first customer manually or import a CSV roster to get started building your route.'}
             </p>
             {!searchQuery && (
-              <button className="btn btn-primary" onClick={() => navigate(serviceTab === 'fertilizer' ? '/customers/new?service=s3' : '/customers/new')}>
+              <button className="btn btn-primary" onClick={() => navigate(activeMode === 'fertilizer' ? '/customers/new?service=s3' : '/customers/new')}>
                 <Plus size={18} /> Add Customer
               </button>
             )}
@@ -606,16 +673,16 @@ export default function CustomersList() {
         )}
         
         {viewMode === 'cards' ? (
-          filteredCustomers.map(c => {
+          displayed.map(c => {
             const isInactive = c.status === 'inactive';
             let borderColor = 'var(--color-border)';
             let overduePill = null;
             if (c.overdueLevel === 2) {
               borderColor = 'rgba(239,68,68,0.5)';
-              overduePill = <span className="pill-tag danger">🔴 {c.daysSince}d overdue</span>;
+              overduePill = <span className="pill-tag danger">🔴 {c.dueText}</span>;
             } else if (c.overdueLevel === 1) {
               borderColor = 'rgba(245,158,11,0.4)';
-              overduePill = <span className="pill-tag warning">🟡 {c.daysSince}d ago</span>;
+              overduePill = <span className="pill-tag warning">🟡 {c.dueText}</span>;
             }
 
             return (
@@ -644,6 +711,9 @@ export default function CustomersList() {
                       <p style={{ margin: '0 0 0.4rem 0', color: 'var(--color-text-muted)', fontSize: '0.85rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.address}</p>
                       
                       <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'nowrap', overflowX: 'auto', scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch', paddingBottom: '2px' }}>
+                        {c.mowableSqFt ? (
+                          <span className="pill-tag success" style={{ whiteSpace: 'nowrap', flexShrink: 0 }} title={`Measured on satellite${c.perimeterFt ? ` · ${Number(c.perimeterFt).toLocaleString()} ft edging` : ''}`}>📐 Measured</span>
+                        ) : null}
                         {c.stats && c.stats.count > 0 ? (
                           <>
                             <span className="pill-tag neutral" style={{ whiteSpace: 'nowrap', flexShrink: 0 }}>{c.stats.count} visit{c.stats.count !== 1 ? 's' : ''}</span>
@@ -682,111 +752,116 @@ export default function CustomersList() {
               </Link>
             );
           })
-        ) : (
+        ) : (() => {
+          const thBase = { padding: '0.7rem 0.8rem', fontSize: '0.78rem', color: 'var(--color-text-muted)', fontWeight: 600, whiteSpace: 'nowrap', position: 'sticky', top: 0, zIndex: 3, background: 'var(--color-bg-main)', borderBottom: '1px solid var(--color-border)' };
+          const arrow = (col) => tableSort.col === col ? (tableSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+          // Plain function (not a component) so headers don't remount on every edit.
+          const sortTh = (label, col, sticky) => (
+            <th key={col} onClick={() => handleTableSort(col)}
+              style={{ ...thBase, cursor: 'pointer', userSelect: 'none', ...(sticky ? { left: 0, zIndex: 4 } : {}) }}>
+              {label}{arrow(col)}
+            </th>
+          );
+          return (
           <div style={{ background: 'var(--color-bg-card)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--color-border)', overflowX: 'auto', boxShadow: 'var(--shadow-sm)' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '600px' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '860px' }}>
               <thead>
-                <tr style={{ background: 'var(--color-bg-main)', borderBottom: '1px solid var(--color-border)' }}>
-                  <th style={{ padding: '0.8rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Name</th>
-                  <th style={{ padding: '0.8rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Address</th>
-                  <th style={{ padding: '0.8rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Lawn Size (sqft)</th>
-                  <th style={{ padding: '0.8rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Mowing Price</th>
-                  <th style={{ padding: '0.8rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Fert Price</th>
-                  <th style={{ padding: '0.8rem', fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600, textAlign: 'center' }}>Fertilizer</th>
+                <tr>
+                  {sortTh('Name', 'name', true)}
+                  {sortTh('Phone', 'phone')}
+                  <th style={thBase}>Address</th>
+                  {sortTh('Lawn Size (sqft)', 'size')}
+                  {sortTh(activeMode === 'fertilizer' ? 'Fert Price' : 'Mowing Price', 'price')}
+                  <th style={{ ...thBase, textAlign: 'right' }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredCustomers.map(c => {
-                  const mowService = c.services?.find(s => s.id === 's1');
-                  const dbPrice = mowService?.price || 0;
-                  const fertService = c.services?.find(s => s.id === 's3');
-                  const dbFertPrice = fertService?.price || 0;
-                  const isFert = fertService?.active || false;
-                  
+                {tableRows.map((c, i) => {
+                  const isMowMode = activeMode === 'mowing';
+                  const targetDbPrice = priceOfCust(c);
                   const pending = pendingEdits[c.id] || {};
                   const currentName = pending.name !== undefined ? pending.name : c.name;
+                  const currentPhone = pending.phone !== undefined ? pending.phone : c.phone;
                   const currentAddress = pending.address !== undefined ? pending.address : c.address;
                   const currentLawnSize = pending.lawnSize !== undefined ? pending.lawnSize : c.lawnSize;
-                  const currentPrice = pending.price !== undefined ? pending.price : dbPrice;
-                  const currentFertPrice = pending.fertPrice !== undefined ? pending.fertPrice : dbFertPrice;
+                  const currentPrice = pending[isMowMode ? 'price' : 'fertPrice'] !== undefined ? pending[isMowMode ? 'price' : 'fertPrice'] : targetDbPrice;
+                  const edited = !!pendingEdits[c.id];
+                  const isInactive = c.status === 'inactive';
+                  const fertActive = c.services?.find(s => s.id === 's3')?.active;
+                  const mowActive = c.services?.find(s => s.id === 's1')?.active;
+                  // Mode-aware toggle: adds/removes the client from the OTHER division.
+                  const otherLabel = isMowMode ? 'Fert' : 'Mow';
+                  const otherActive = isMowMode ? fertActive : mowActive;
+                  const toggleOther = isMowMode ? handleToggleFertilizer : handleToggleMowing;
+                  const statusColor = c.overdueLevel === 2 ? '#ef4444' : c.overdueLevel === 1 ? '#f59e0b' : null;
+                  const nameBorder = edited ? 'var(--color-primary)' : c.isOutlier ? '#ef4444' : 'transparent';
 
                   const handleEdit = (field, val) => {
-                    setPendingEdits(prev => ({
-                      ...prev,
-                      [c.id]: {
-                        ...(prev[c.id] || {}),
-                        [field]: val
-                      }
-                    }));
+                    setPendingEdits(prev => ({ ...prev, [c.id]: { ...(prev[c.id] || {}), [field]: val } }));
                   };
+                  const cellInput = { width: '100%', padding: '0.4rem', border: 'none', background: 'transparent', color: 'var(--color-text-main)' };
 
                   return (
-                    <tr key={c.id} style={{ borderBottom: '1px solid var(--color-border)', background: c.isOutlier ? 'rgba(239,68,68,0.05)' : pendingEdits[c.id] ? 'rgba(16,185,129,0.05)' : 'transparent' }}>
-                      <td style={{ padding: '0.4rem', borderRight: '1px solid var(--color-border)' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                          <input 
-                            value={currentName ?? ''} 
+                    <tr key={c.id} style={{ borderBottom: '1px solid var(--color-border)', background: edited ? 'rgba(16,185,129,0.06)' : c.isOutlier ? 'rgba(239,68,68,0.05)' : 'transparent', opacity: isInactive ? 0.55 : 1 }}>
+                      {/* Name (sticky) */}
+                      <td style={{ padding: '0.4rem', borderRight: '1px solid var(--color-border)', borderLeft: `3px solid ${nameBorder}`, position: 'sticky', left: 0, zIndex: 1, background: 'var(--color-bg-card)' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                          {statusColor && <span title={c.dueText || ''} style={{ width: '8px', height: '8px', borderRadius: '50%', background: statusColor, flexShrink: 0 }} />}
+                          <input value={currentName ?? ''} data-cell={`${i}-name`} onKeyDown={e => focusNextRow(e, i, 'name')}
                             onChange={e => handleEdit('name', e.target.value)}
-                            style={{ width: '100%', padding: '0.4rem', border: 'none', background: 'transparent', fontWeight: 600, color: 'var(--color-text-main)' }}
-                          />
-                          {c.isOutlier && <AlertTriangle size={16} color="#ef4444" title="Bad GPS Pin" style={{ flexShrink: 0, marginRight: '0.4rem' }} />}
-                          {c.address === 'Added from field' && <AlertTriangle size={16} color="var(--color-accent)" title="Missing Info" style={{ flexShrink: 0, marginRight: '0.4rem' }} />}
+                            style={{ ...cellInput, fontWeight: 600 }} />
+                          {c.isOutlier && <AlertTriangle size={15} color="#ef4444" title="Bad GPS Pin" style={{ flexShrink: 0 }} />}
+                          <button onClick={() => navigate(`/customers/${c.id}`)} title="Open customer profile"
+                            style={{ flexShrink: 0, display: 'flex', alignItems: 'center', padding: '0.2rem', border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--color-text-muted)' }}>
+                            <ExternalLink size={14} />
+                          </button>
                         </div>
                       </td>
+                      {/* Phone */}
+                      <td style={{ padding: '0.4rem', borderRight: '1px solid var(--color-border)' }}>
+                        <input value={currentPhone ?? ''} placeholder="—" data-cell={`${i}-phone`} onKeyDown={e => focusNextRow(e, i, 'phone')}
+                          onChange={e => handleEdit('phone', e.target.value)} style={cellInput} />
+                      </td>
+                      {/* Address */}
                       <td style={{ padding: '0.4rem', borderRight: '1px solid var(--color-border)', background: !currentAddress ? 'rgba(239,68,68,0.1)' : 'transparent' }}>
-                        <input 
-                          value={currentAddress ?? ''} 
-                          placeholder="Missing Address"
-                          onChange={e => handleEdit('address', e.target.value)}
-                          style={{ width: '100%', padding: '0.4rem', border: 'none', background: 'transparent', color: 'var(--color-text-main)' }}
-                        />
+                        <input value={currentAddress ?? ''} placeholder="Missing Address" data-cell={`${i}-address`} onKeyDown={e => focusNextRow(e, i, 'address')}
+                          onChange={e => handleEdit('address', e.target.value)} style={cellInput} />
                       </td>
+                      {/* Lawn Size + measured marker */}
                       <td style={{ padding: '0.4rem', borderRight: '1px solid var(--color-border)', background: !currentLawnSize ? 'rgba(245,158,11,0.1)' : 'transparent' }}>
-                        <input 
-                          value={currentLawnSize ?? ''} 
-                          placeholder="e.g. 5000"
-                          onChange={e => handleEdit('lawnSize', e.target.value)}
-                          style={{ width: '100%', padding: '0.4rem', border: 'none', background: 'transparent', color: 'var(--color-text-main)' }}
-                        />
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
+                          <input value={currentLawnSize ?? ''} placeholder="e.g. 5000" data-cell={`${i}-size`} onKeyDown={e => focusNextRow(e, i, 'size')}
+                            onChange={e => handleEdit('lawnSize', e.target.value)} style={cellInput} />
+                          {c.mowableSqFt ? <span title={`Measured on satellite${c.perimeterFt ? ` · ${Number(c.perimeterFt).toLocaleString()} ft edging` : ''}`} style={{ flexShrink: 0, fontSize: '0.9rem' }}>📐</span> : null}
+                        </div>
                       </td>
-                      <td style={{ padding: '0.4rem', borderRight: '1px solid var(--color-border)', background: currentPrice === 0 || currentPrice === '' ? 'rgba(245,158,11,0.1)' : 'transparent' }}>
+                      {/* Price */}
+                      <td style={{ padding: '0.4rem', borderRight: '1px solid var(--color-border)', background: (currentPrice === 0 || currentPrice === '') ? 'rgba(245,158,11,0.1)' : 'transparent' }}>
                         <div style={{ display: 'flex', alignItems: 'center' }}>
                           <span style={{ color: 'var(--color-text-muted)', paddingLeft: '0.4rem', fontWeight: 600 }}>$</span>
-                          <input 
-                            type="number"
-                            value={currentPrice ?? ''} 
-                            onChange={e => handleEdit('price', e.target.value)}
-                            style={{ width: '100%', padding: '0.4rem', border: 'none', background: 'transparent', color: 'var(--color-text-main)', fontWeight: 600 }}
-                          />
+                          <input type="number" value={currentPrice ?? ''} data-cell={`${i}-price`} onKeyDown={e => focusNextRow(e, i, 'price')}
+                            onChange={e => handleEdit(isMowMode ? 'price' : 'fertPrice', e.target.value)} style={{ ...cellInput, fontWeight: 600 }} />
                         </div>
                       </td>
-                      <td style={{ padding: '0.4rem', borderRight: '1px solid var(--color-border)', background: isFert && (currentFertPrice === 0 || currentFertPrice === '') ? 'rgba(245,158,11,0.1)' : 'transparent' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', opacity: isFert ? 1 : 0.4 }}>
-                          <span style={{ color: 'var(--color-text-muted)', paddingLeft: '0.4rem', fontWeight: 600 }}>$</span>
-                          <input 
-                            type="number"
-                            value={currentFertPrice ?? ''} 
-                            onChange={e => handleEdit('fertPrice', e.target.value)}
-                            style={{ width: '100%', padding: '0.4rem', border: 'none', background: 'transparent', color: 'var(--color-text-main)', fontWeight: 600 }}
-                          />
+                      {/* Actions */}
+                      <td style={{ padding: '0.4rem 0.6rem' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.4rem' }}>
+                          <button onClick={(e) => toggleOther(e, c)} title={`Add to ${isMowMode ? 'fertilizer' : 'mowing'} division`}
+                            style={{ padding: '0.25rem 0.5rem', fontSize: '0.68rem', fontWeight: 700, borderRadius: 'var(--radius-sm)', cursor: 'pointer', whiteSpace: 'nowrap',
+                              background: otherActive ? 'rgba(16,185,129,0.1)' : 'transparent',
+                              color: otherActive ? 'var(--color-primary)' : 'var(--color-text-muted)',
+                              border: `1px solid ${otherActive ? 'var(--color-primary)' : 'var(--color-border)'}` }}>
+                            {otherActive ? otherLabel : `+ ${otherLabel}`}
+                          </button>
+                          <button onClick={(e) => handleToggleStatus(e, c.id, c.status)} title={isInactive ? 'Activate' : 'Pause'}
+                            style={{ padding: '0.25rem 0.5rem', fontSize: '0.68rem', fontWeight: 600, borderRadius: 'var(--radius-sm)', cursor: 'pointer', border: '1px solid var(--color-border)', background: 'transparent', color: 'var(--color-text-muted)' }}>
+                            {isInactive ? 'On' : 'Pause'}
+                          </button>
+                          <button onClick={() => navigate(`/customers/${c.id}`)} title="Open profile"
+                            style={{ display: 'flex', alignItems: 'center', padding: '0.2rem', border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--color-text-muted)' }}>
+                            <ChevronRight size={18} />
+                          </button>
                         </div>
-                      </td>
-                      <td style={{ padding: '0.4rem', textAlign: 'center' }}>
-                        <button
-                          onClick={(e) => handleToggleFertilizer(e, c)}
-                          style={{
-                            background: isFert ? 'var(--color-primary)' : 'var(--color-bg-card)',
-                            border: isFert ? '1px solid var(--color-primary)' : '1px solid var(--color-border)',
-                            color: isFert ? '#fff' : 'var(--color-text-muted)',
-                            borderRadius: 'var(--radius-full)',
-                            padding: '0.3rem 0.8rem',
-                            fontSize: '0.75rem',
-                            fontWeight: 700,
-                            cursor: 'pointer'
-                          }}
-                        >
-                          {isFert ? 'ON' : 'OFF'}
-                        </button>
                       </td>
                     </tr>
                   );
@@ -794,7 +869,8 @@ export default function CustomersList() {
               </tbody>
             </table>
           </div>
-        )}
+          );
+        })()}
       </div>
     </div>
   );

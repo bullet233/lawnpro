@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Routes, Route, NavLink, useLocation } from 'react-router-dom';
-import { Users, Map as MapIcon, Route as RouteIcon, FileText, TrendingUp, Home } from 'lucide-react';
+import { Users, Map as MapIcon, Route as RouteIcon, FileText, TrendingUp, Home, Scissors, Droplets } from 'lucide-react';
+import { useServiceMode } from './components/ServiceProvider';
 import Dashboard from './pages/Dashboard';
 import CustomersList from './pages/CustomersList';
 import CustomerDetail from './pages/CustomerDetail';
@@ -10,15 +11,18 @@ import History from './pages/History';
 import Analytics from './pages/Analytics';
 import Settings from './pages/Settings';
 import PrintEpaLog from './pages/PrintEpaLog';
+import Treatments from './pages/Treatments';
 import Toast from './components/Toast';
 import ReloadPrompt from './components/ReloadPrompt';
 import { db } from './db/db';
 import { getSettings, saveSettings } from './db/settings';
+import { ensureDefaultProgram } from './db/treatments';
 
 function App() {
   const location = useLocation();
   const isLive = location.pathname === '/live';
   const isPrint = location.pathname.startsWith('/print-epa');
+  const { activeMode, setActiveMode } = useServiceMode();
 
   useEffect(() => {
     document.body.classList.add('sun-mode');
@@ -105,12 +109,75 @@ function App() {
       localStorage.setItem('services_migrated_v2', 'true');
     };
     
-    runMigration();
+    const runDivisionsMigration = async () => {
+      if (localStorage.getItem('divisions_migrated_v3')) return;
+      const routes = await db.routes.toArray();
+      const visitsList = await db.visits.toArray();
+      const settings = getSettings();
+      const fertServiceIds = (settings.defaultServices || [])
+        .filter(s => s.name.toLowerCase().match(/(fert|weed|spray|chem)/))
+        .map(s => s.id);
+
+      for (const route of routes) {
+        if (!route.division) {
+          await db.routes.update(route.id, { division: 'mowing' });
+        }
+      }
+
+      for (const v of visitsList) {
+        if (!v.division) {
+          const isFert = v.appliedServices && v.appliedServices.some(id => fertServiceIds.includes(id) || id === 's3');
+          await db.visits.update(v.id, { division: isFert ? 'fertilizer' : 'mowing' });
+        }
+      }
+      localStorage.setItem('divisions_migrated_v3', 'true');
+    };
+
+    runMigration()
+      .then(runDivisionsMigration)
+      .then(() => ensureDefaultProgram())
+      .catch(err => console.error('Startup migration/seed failed', err));
   }, []);
 
   return (
     <>
-
+      {/* Global Division Switcher */}
+      {!isLive && !isPrint && (
+        <div style={{ 
+          position: 'sticky', top: 0, zIndex: 100, 
+          background: activeMode === 'fertilizer' ? 'var(--color-primary)' : '#10b981', 
+          padding: '0.5rem 1rem', 
+          borderBottom: 'none', 
+          display: 'flex', justifyContent: 'center',
+          transition: 'background 0.3s ease',
+          boxShadow: activeMode === 'fertilizer' ? '0 4px 12px rgba(59, 130, 246, 0.3)' : '0 4px 12px rgba(16, 185, 129, 0.3)'
+        }}>
+          <div style={{ display: 'flex', background: 'rgba(255,255,255,0.2)', borderRadius: 'var(--radius-full)', padding: '0.2rem' }}>
+            <button
+              onClick={() => setActiveMode('mowing')}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.4rem 1rem', borderRadius: 'var(--radius-full)', border: 'none',
+                background: activeMode === 'mowing' ? '#fff' : 'transparent', 
+                color: activeMode === 'mowing' ? '#10b981' : 'rgba(255,255,255,0.7)', 
+                fontWeight: 600, fontSize: '0.9rem', cursor: 'pointer', transition: 'all 0.2s'
+              }}
+            >
+              <Scissors size={16} /> Mowing
+            </button>
+            <button
+              onClick={() => setActiveMode('fertilizer')}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.4rem 1rem', borderRadius: 'var(--radius-full)', border: 'none',
+                background: activeMode === 'fertilizer' ? '#fff' : 'transparent', 
+                color: activeMode === 'fertilizer' ? 'var(--color-primary)' : 'rgba(255,255,255,0.7)', 
+                fontWeight: 600, fontSize: '0.9rem', cursor: 'pointer', transition: 'all 0.2s'
+              }}
+            >
+              <Droplets size={16} /> Fertilizer
+            </button>
+          </div>
+        </div>
+      )}
 
       <main className={`page-container animate-fade-in ${isLive ? 'live-mode' : ''}`}>
         <Toast />
@@ -125,6 +192,7 @@ function App() {
             <Route path="/customers" element={<CustomersList />} />
             <Route path="/customers/:id" element={<CustomerDetail />} />
             <Route path="/routes" element={<RouteBuilder />} />
+            <Route path="/treatments" element={<Treatments />} />
             <Route path="/history" element={<History />} />
             <Route path="/analytics" element={<Analytics />} />
             <Route path="/settings" element={<Settings />} />

@@ -6,7 +6,9 @@ import DayReviewModal from '../components/DayReviewModal';
 import { getBusinessDayStart, getDaysSince } from '../utils/dateUtils';
 import { getVisitRevenueBreakdown, calculateServiceTotals } from '../utils/revenueUtils';
 import { getSettings } from '../db/settings';
-import { Plus, Sunrise, Sun, Moon, Settings as SettingsIcon, Map as MapIcon, Route as RouteIcon, ClipboardList, Thermometer, CloudSun, CloudRain, Cloud, Users, AlertTriangle, TrendingUp, CheckCircle } from 'lucide-react';
+import { useServiceMode } from '../components/ServiceProvider';
+import { classifyTreatment } from '../db/treatments';
+import { Plus, Sunrise, Sun, Moon, Settings as SettingsIcon, Map as MapIcon, Route as RouteIcon, ClipboardList, Thermometer, CloudSun, CloudRain, Cloud, Users, AlertTriangle, TrendingUp, CheckCircle, Droplets, ChevronRight } from 'lucide-react';
 
 const formatDur = (secs) => {
   if (!secs) return '0m';
@@ -33,20 +35,19 @@ function WeeklyChart({ data }) {
         const h = Math.max(2, (d.revenue / maxVal) * chartH);
         const x = i * (barW + gap);
         const y = chartH - h;
-        const isToday = i === data.length - 1;
         return (
           <g key={i}>
             <rect
               x={x} y={y} width={barW} height={h}
               rx="3"
-              fill={isToday ? 'var(--color-primary)' : 'rgba(16,185,129,0.25)'}
+              fill={d.isToday ? 'var(--color-primary)' : (d.isFuture ? 'rgba(156,163,175,0.1)' : 'rgba(16,185,129,0.25)')}
             />
             <text
               x={x + barW / 2} y={chartH + 13}
               textAnchor="middle"
-              fill="var(--color-text-muted)"
-              fontSize="9"
-              fontWeight={isToday ? '700' : '400'}
+              fill={d.isToday ? 'var(--color-text-main)' : 'var(--color-text-muted)'}
+              fontSize="10"
+              fontWeight={d.isToday ? '700' : '500'}
             >
               {d.label}
             </text>
@@ -59,10 +60,10 @@ function WeeklyChart({ data }) {
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const { activeMode } = useServiceMode();
   const [showDayReview, setShowDayReview] = useState(false);
   const [weather, setWeather] = useState(null);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [dashboardTab, setDashboardTab] = useState('mowing');
 
   // Time-based greeting
   const hour = new Date().getHours();
@@ -72,8 +73,9 @@ export default function Dashboard() {
   // Data fetching
   const activeRoute = useLiveQuery(async () => {
     const routes = await db.routes.where('status').anyOf('pending', 'active').toArray();
-    if (routes.length === 0) return null;
-    const route = routes[0];
+    const modeRoutes = routes.filter(r => r.division === activeMode);
+    if (modeRoutes.length === 0) return null;
+    const route = modeRoutes[0];
     
     if (route && route.stops) {
       const custIds = route.stops.map(s => typeof s === 'object' ? s.customerId : s);
@@ -81,16 +83,22 @@ export default function Dashboard() {
       route.expandedStops = custIds.map(id => customers.find(c => c.id === id)).filter(Boolean);
     }
     return route || null;
-  });
+  }, [activeMode]);
 
   const allCustomers = useLiveQuery(() => db.customers.toArray(), []) || [];
 
   const todayVisits = useLiveQuery(() => {
     const startOfDay = getBusinessDayStart();
-    return db.visits.where('exitTime').aboveOrEqual(startOfDay.getTime()).filter(v => v.status !== 'skipped').toArray();
-  }, []) || [];
+    return db.visits.where('exitTime').aboveOrEqual(startOfDay.getTime()).filter(v => v.status !== 'skipped' && (!v.division || v.division === activeMode)).toArray();
+  }, [activeMode]) || [];
 
   const allVisits = useLiveQuery(() => db.visits.toArray(), []) || [];
+  const allTreatments = useLiveQuery(() => db.treatments.toArray(), []) || [];
+
+  // Memoized filtered allVisits to respect activeMode for weekly revenue
+  const filteredAllVisits = useMemo(() => {
+    return allVisits.filter(v => (!v.division || v.division === activeMode));
+  }, [allVisits, activeMode]);
 
   // Route visits for determining next stop
   const routeVisits = useLiveQuery(async () => {
@@ -217,29 +225,65 @@ export default function Dashboard() {
   const stats = useMemo(() => {
     const revenue = todayVisits.reduce((sum, v) => sum + (v.priceEarned || 0), 0);
     const duration = todayVisits.reduce((sum, v) => sum + (v.durationSecs || 0), 0);
+    const driveTime = todayVisits.reduce((sum, v) => sum + (v.driveTimeSecs || 0), 0);
+    
+    let firstEntry = null;
+    let lastExit = null;
+
+    if (todayVisits.length > 0) {
+      firstEntry = Math.min(...todayVisits.map(v => v.entryTime || v.exitTime || Date.now()));
+      lastExit = Math.max(...todayVisits.map(v => v.exitTime || v.entryTime || Date.now()));
+    }
+
+    const totalShiftSecs = (firstEntry && lastExit) ? Math.floor((lastExit - firstEntry) / 1000) : 0;
+
     const currentSettings = getSettings();
     const serviceBreakdown = calculateServiceTotals(todayVisits, allCustomers || [], currentSettings?.defaultServices || []);
-    return { visits: todayVisits.length, revenue, duration, serviceBreakdown, settings: currentSettings };
+    return { 
+      visits: todayVisits.length, 
+      revenue, 
+      duration, 
+      driveTime,
+      totalShiftSecs,
+      firstEntry,
+      lastExit,
+      serviceBreakdown, 
+      settings: currentSettings 
+    };
   }, [todayVisits, allCustomers]);
 
-  // Weekly earnings data (last 7 days)
+  // Weekly earnings data (current calendar week starting Sunday)
   const weeklyData = useMemo(() => {
     const days = [];
     const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    for (let i = 6; i >= 0; i--) {
-      const startOfDay = getBusinessDayStart();
-      startOfDay.setDate(startOfDay.getDate() - i);
+    
+    const today = getBusinessDayStart();
+    const currentDayOfWeek = today.getDay(); // 0 is Sunday
+    
+    // Find the Sunday of the current week
+    const startOfWeek = new Date(today);
+    startOfWeek.setDate(today.getDate() - currentDayOfWeek);
+
+    for (let i = 0; i < 7; i++) {
+      const startOfDay = new Date(startOfWeek);
+      startOfDay.setDate(startOfWeek.getDate() + i);
       const endOfDay = new Date(startOfDay);
       endOfDay.setDate(endOfDay.getDate() + 1);
       endOfDay.setMilliseconds(-1);
       
-      const dayRevenue = allVisits
+      const dayRevenue = filteredAllVisits
         .filter(v => v.exitTime >= startOfDay.getTime() && v.exitTime <= endOfDay.getTime() && v.status !== 'skipped')
-        .reduce((s, v) => s + (v.priceEarned || 0), 0);
-      days.push({ label: dayNames[startOfDay.getDay()], revenue: dayRevenue });
+        .reduce((s, v) => s + (Number(v.priceEarned) || 0), 0);
+        
+      days.push({ 
+        label: dayNames[startOfDay.getDay()], 
+        revenue: dayRevenue,
+        isFuture: startOfDay > today,
+        isToday: startOfDay.getTime() === today.getTime()
+      });
     }
     return days;
-  }, [allVisits]);
+  }, [filteredAllVisits]);
 
   const weekTotal = weeklyData.reduce((s, d) => s + d.revenue, 0);
 
@@ -274,7 +318,10 @@ export default function Dashboard() {
       // Mowing
       if (isMowingCust) {
         const mInterval = cust.mowingInterval || cust.serviceInterval || 7;
-        const mowVisits = custVisits.filter(v => !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id)));
+        const mowVisits = custVisits.filter(v => 
+          v.division === 'mowing' || 
+          (!v.division && (!v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id))))
+        );
         
         if (mowVisits.length === 0) {
           mDue.push({ ...cust, daysSince: 999, isNew: true, intervalDays: mInterval });
@@ -290,7 +337,10 @@ export default function Dashboard() {
       // Fertilizer
       if (isFertCust) {
         const fInterval = cust.fertilizerInterval || 30;
-        const fertVisits = custVisits.filter(v => v.appliedServices && v.appliedServices.some(id => fertServiceIds.includes(id)));
+        const fertVisits = custVisits.filter(v => 
+          v.division === 'fertilizer' || 
+          (!v.division && v.appliedServices && v.appliedServices.some(id => fertServiceIds.includes(id)))
+        );
         
         if (fertVisits.length === 0) {
           fDue.push({ ...cust, daysSince: 999, isNew: true, intervalDays: fInterval });
@@ -310,8 +360,21 @@ export default function Dashboard() {
     return { mowingDue: mDue, fertilizerDue: fDue };
   }, [allCustomers, allVisits]);
 
-  const activeDueList = dashboardTab === 'mowing' ? mowingDue : fertilizerDue;
-  const overdueCount = dashboardTab === 'mowing' ? mowingDue.filter(c => !c.isNew).length : fertilizerDue.filter(c => !c.isNew).length;
+  // Program-based treatments needing attention now (drives fertilizer-mode Dashboard)
+  const treatmentAttention = useMemo(() => {
+    const year = new Date().getFullYear();
+    const now = Date.now();
+    return allTreatments
+      .filter(t => t.year === year && (t.status === 'scheduled' || t.status === 'due'))
+      .map(t => ({ ...t, state: classifyTreatment(t, now) }))
+      .filter(t => t.state === 'overdue' || t.state === 'due')
+      .map(t => ({ ...t, customer: allCustomers.find(c => c.id === t.customerId) }))
+      .filter(t => t.customer)
+      .sort((a, b) => (a.dueDate || 0) - (b.dueDate || 0));
+  }, [allTreatments, allCustomers]);
+
+  const activeDueList = activeMode === 'mowing' ? mowingDue : fertilizerDue;
+  const overdueCount = activeMode === 'mowing' ? mowingDue.filter(c => !c.isNew).length : treatmentAttention.length;
 
   const handleAddToRoute = async (customer) => {
     const defaultIds = customer.services?.filter(s => s.active).slice(0, 1).map(s => s.id) || [];
@@ -497,73 +560,130 @@ export default function Dashboard() {
             )}
           </div>
         </div>
-      </div>
-
-      {/* Needs Attention / Due This Week */}
-      <div style={{ marginTop: '1.5rem' }}>
-        <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.5rem' }}>
-          <button 
-            onClick={() => setDashboardTab('mowing')}
-            style={{ 
-              background: 'transparent', border: 'none', fontSize: '1rem', fontWeight: 600, cursor: 'pointer', padding: '0.4rem 0.8rem', position: 'relative',
-              color: dashboardTab === 'mowing' ? 'var(--color-primary)' : 'var(--color-text-muted)'
-            }}
-          >
-            🌾 Mowing
-            {mowingDue.length > 0 && <span style={{ marginLeft: '0.4rem', fontSize: '0.7rem', background: '#ef4444', color: 'white', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>{mowingDue.length}</span>}
-            {dashboardTab === 'mowing' && <div style={{ position: 'absolute', bottom: '-0.5rem', left: 0, right: 0, height: '3px', background: 'var(--color-primary)', borderRadius: '3px' }} />}
-          </button>
-          
-          <button 
-            onClick={() => setDashboardTab('fertilizer')}
-            style={{ 
-              background: 'transparent', border: 'none', fontSize: '1rem', fontWeight: 600, cursor: 'pointer', padding: '0.4rem 0.8rem', position: 'relative',
-              color: dashboardTab === 'fertilizer' ? 'var(--color-primary)' : 'var(--color-text-muted)'
-            }}
-          >
-            🧪 Fertilizer
-            {fertilizerDue.length > 0 && <span style={{ marginLeft: '0.4rem', fontSize: '0.7rem', background: '#ef4444', color: 'white', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>{fertilizerDue.length}</span>}
-            {dashboardTab === 'fertilizer' && <div style={{ position: 'absolute', bottom: '-0.5rem', left: 0, right: 0, height: '3px', background: 'var(--color-primary)', borderRadius: '3px' }} />}
-          </button>
         </div>
-
-        {activeDueList.length > 0 ? (
-          <div className="glass-card" style={{ padding: '0', maxHeight: '280px', overflowY: 'auto' }}>
-            <div style={{ display: 'flex', flexDirection: 'column' }}>
-              {activeDueList.map(cust => {
-                const isInActiveRoute = activeRoute && activeRoute.stops.some(s => {
-                  const id = typeof s === 'object' ? s.customerId : s;
-                  return id === cust.id;
-                });
-                
-                return (
-                  <div key={cust.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.6rem 0.8rem', borderBottom: '1px solid var(--color-border)' }}>
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--color-text-main)' }}>{cust.name}</div>
-                      <div style={{ fontSize: '0.75rem', marginTop: '0.1rem', color: cust.isNew ? 'var(--color-primary)' : (cust.daysSince > cust.intervalDays + 2 ? '#ef4444' : '#f59e0b'), fontWeight: 500 }}>
-                        {cust.isNew ? '✨ New Client' : `⏳ ${cust.daysSince} days ago`}
-                      </div>
-                    </div>
-                    {isInActiveRoute ? (
-                      <span style={{ fontSize: '0.75rem', color: 'var(--color-primary)', fontWeight: 600 }}>Added ✓</span>
-                    ) : (
-                      <button 
-                        className="btn btn-secondary" 
-                        style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.2rem', background: 'transparent', border: '1px solid var(--color-border)' }}
-                        onClick={() => handleAddToRoute(cust)}
-                      >
-                        <Plus size={12} /> Add
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
+  
+        {/* Working Time Insights */}
+        {(stats.visits > 0 && stats.firstEntry) && (
+          <div style={{ marginTop: '1.5rem' }}>
+            <h3 style={{ margin: '0 0 0.8rem 0', color: 'var(--color-text-main)', fontSize: '1.1rem' }}>Shift Insights</h3>
+            <div className="glass-card" style={{ padding: '1rem', display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.6rem' }}>
+                <span style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)' }}>Clock In & Out</span>
+                <span style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--color-text-main)' }}>
+                  {new Date(stats.firstEntry).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} - {new Date(stats.lastExit).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                </span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.6rem' }}>
+                <span style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)' }}>Billable vs Drive Time</span>
+                <div style={{ textAlign: 'right' }}>
+                  <span style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--color-text-main)' }}>{formatDur(stats.duration)}</span>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginLeft: '0.4rem' }}>({formatDur(stats.driveTime)} drive)</span>
+                </div>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)' }}>True Hourly Rate</span>
+                <span style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--color-text-main)' }}>
+                  ${stats.totalShiftSecs > 0 ? (stats.revenue / (stats.totalShiftSecs / 3600)).toFixed(2) : '0.00'}/hr
+                </span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '-0.3rem' }}>
+                <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>Billable Hourly Rate</span>
+                <span style={{ fontSize: '0.8rem', fontWeight: 500, color: 'var(--color-text-muted)' }}>
+                  ${stats.duration > 0 ? (stats.revenue / (stats.duration / 3600)).toFixed(2) : '0.00'}/hr
+                </span>
+              </div>
             </div>
           </div>
-        ) : (
-          <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--color-text-muted)', background: 'var(--color-bg-card)', borderRadius: 'var(--radius-md)', border: '1px dashed var(--color-border)' }}>
-            No one is currently due for {dashboardTab}.
+        )}
+
+        {/* Needs Attention / Due This Week */}
+      <div style={{ marginTop: '1.5rem' }}>
+        <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.5rem', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div
+            style={{
+              background: 'transparent', border: 'none', fontSize: '1rem', fontWeight: 600, padding: '0.4rem 0.8rem', position: 'relative',
+              color: 'var(--color-primary)'
+            }}
+          >
+            {activeMode === 'mowing' ? '🌾 Mowing' : '🧪 Treatments Due'}
+            {(activeMode === 'mowing' ? activeDueList.length : treatmentAttention.length) > 0 && <span style={{ marginLeft: '0.4rem', fontSize: '0.7rem', background: '#ef4444', color: 'white', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>{activeMode === 'mowing' ? activeDueList.length : treatmentAttention.length}</span>}
+            <div style={{ position: 'absolute', bottom: '-0.5rem', left: 0, right: 0, height: '3px', background: 'var(--color-primary)', borderRadius: '3px' }} />
           </div>
+          {activeMode === 'fertilizer' && (
+            <Link to="/treatments" style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--color-primary)', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
+              Manage <ChevronRight size={14} />
+            </Link>
+          )}
+        </div>
+
+        {activeMode === 'mowing' ? (
+          activeDueList.length > 0 ? (
+            <div className="glass-card" style={{ padding: '0', maxHeight: '280px', overflowY: 'auto' }}>
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                {activeDueList.map(cust => {
+                  const isInActiveRoute = activeRoute && activeRoute.stops.some(s => {
+                    const id = typeof s === 'object' ? s.customerId : s;
+                    return id === cust.id;
+                  });
+
+                  return (
+                    <div key={cust.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.6rem 0.8rem', borderBottom: '1px solid var(--color-border)' }}>
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--color-text-main)' }}>{cust.name}</div>
+                        <div style={{ fontSize: '0.75rem', marginTop: '0.1rem', color: cust.isNew ? 'var(--color-primary)' : (cust.daysSince > cust.intervalDays + 2 ? '#ef4444' : '#f59e0b'), fontWeight: 500 }}>
+                          {cust.isNew ? '✨ New Client' : `⏳ ${cust.daysSince} days ago`}
+                        </div>
+                      </div>
+                      {isInActiveRoute ? (
+                        <span style={{ fontSize: '0.75rem', color: 'var(--color-primary)', fontWeight: 600 }}>Added ✓</span>
+                      ) : (
+                        <button
+                          className="btn btn-secondary"
+                          style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.2rem', background: 'transparent', border: '1px solid var(--color-border)' }}
+                          onClick={() => handleAddToRoute(cust)}
+                        >
+                          <Plus size={12} /> Add
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--color-text-muted)', background: 'var(--color-bg-card)', borderRadius: 'var(--radius-md)', border: '1px dashed var(--color-border)' }}>
+              No one is currently due for mowing.
+            </div>
+          )
+        ) : (
+          treatmentAttention.length > 0 ? (
+            <div className="glass-card" style={{ padding: '0', maxHeight: '300px', overflowY: 'auto' }}>
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                {treatmentAttention.slice(0, 6).map(t => (
+                  <Link key={t.id} to="/treatments" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.6rem 0.8rem', borderBottom: '1px solid var(--color-border)', textDecoration: 'none' }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--color-text-main)' }}>{t.customer.name}</div>
+                      <div style={{ fontSize: '0.75rem', marginTop: '0.1rem', color: 'var(--color-text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {t.stepName}
+                      </div>
+                    </div>
+                    <span style={{ flexShrink: 0, marginLeft: '0.6rem', fontSize: '0.7rem', fontWeight: 700, color: t.state === 'overdue' ? '#ef4444' : '#f59e0b', background: t.state === 'overdue' ? 'rgba(239,68,68,0.1)' : 'rgba(245,158,11,0.12)', padding: '0.15rem 0.5rem', borderRadius: '10px' }}>
+                      {t.state === 'overdue' ? 'Overdue' : 'Due Now'}
+                    </span>
+                  </Link>
+                ))}
+                {treatmentAttention.length > 6 && (
+                  <Link to="/treatments" style={{ padding: '0.6rem 0.8rem', textAlign: 'center', fontSize: '0.8rem', fontWeight: 600, color: 'var(--color-primary)', textDecoration: 'none' }}>
+                    View all {treatmentAttention.length} →
+                  </Link>
+                )}
+              </div>
+            </div>
+          ) : (
+            <Link to="/treatments" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem', padding: '2rem', textAlign: 'center', color: 'var(--color-text-muted)', background: 'var(--color-bg-card)', borderRadius: 'var(--radius-md)', border: '1px dashed var(--color-border)', textDecoration: 'none' }}>
+              <Droplets size={16} /> No treatments due — tap to manage programs
+            </Link>
+          )
         )}
       </div>
 

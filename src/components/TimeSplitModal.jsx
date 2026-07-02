@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo } from 'react';
 import { Clock, CheckCircle, AlertTriangle } from 'lucide-react';
 
 const fmt = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -7,77 +7,95 @@ const fmt = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minut
  * TimeSplitModal
  * Props:
  *   primaryName   — string
- *   companionName — string
+ *   companions    — array of { id, name, dist }
  *   totalSecs     — number: total tracked seconds from primary job
  *   jobStart      — number: timestamp of when the job started (geofence entry)
- *   onConfirm     — ({ primaryMins, companionMins, mode }) => void
+ *   onConfirm     — ({ primaryMins, companionsMins, mode }) => void
  *   onClose       — () => void
  */
-export default function TimeSplitModal({ primaryName, companionName, totalSecs, jobStart, onConfirm, onClose }) {
+export default function TimeSplitModal({ primaryName, companions, totalSecs, jobStart, onConfirm, onClose }) {
   const totalMins = Math.max(1, Math.round(totalSecs / 60));
+  const numProps = 1 + (companions ? companions.length : 0);
 
   const [mode, setMode] = useState('sequential'); // 'sequential' | 'simultaneous'
-  const [primaryMins, setPrimaryMins] = useState(Math.ceil(totalMins / 2));
-  const [companionMins, setCompanionMins] = useState(Math.floor(totalMins / 2));
+  
+  const [primaryMins, setPrimaryMins] = useState(() => Math.ceil(totalMins / numProps));
+  const [companionsMins, setCompanionsMins] = useState(() => {
+    return (companions || []).map(c => ({ id: c.id, mins: Math.floor(totalMins / numProps) }));
+  });
+  
   const [fallbackStart] = useState(() => Date.now() - totalSecs * 1000);
 
   const handleModeChange = (newMode) => {
     setMode(newMode);
     if (newMode === 'simultaneous') {
       setPrimaryMins(totalMins);
-      setCompanionMins(totalMins);
+      setCompanionsMins(companions.map(c => ({ id: c.id, mins: totalMins })));
     } else {
-      setPrimaryMins(Math.ceil(totalMins / 2));
-      setCompanionMins(Math.floor(totalMins / 2));
+      setPrimaryMins(Math.ceil(totalMins / numProps));
+      setCompanionsMins(companions.map(c => ({ id: c.id, mins: Math.floor(totalMins / numProps) })));
     }
   };
 
+  const updateCompMins = (id, newMins) => {
+    setCompanionsMins(prev => prev.map(c => c.id === id ? { ...c, mins: newMins } : c));
+  };
+
   const pm = Math.max(1, Number(primaryMins) || 1);
-  const cm = Math.max(1, Number(companionMins) || 1);
 
   // Live time preview calculation
   const times = useMemo(() => {
     const start = jobStart ?? fallbackStart;
+    const res = { primary: null, companions: {} };
+
     if (mode === 'sequential') {
       const primaryEnd = start + pm * 60000;
-      return {
-        primary:   { entry: start,       exit: primaryEnd },
-        companion: { entry: primaryEnd,  exit: start + totalSecs * 1000 }
-      };
+      res.primary = { entry: start, exit: primaryEnd };
+      
+      let curr = primaryEnd;
+      for (const comp of companionsMins) {
+        const cMins = Math.max(1, Number(comp.mins) || 1);
+        res.companions[comp.id] = { entry: curr, exit: curr + cMins * 60000 };
+        curr += cMins * 60000;
+      }
     } else {
       // Simultaneous: both start together, each has own duration
-      return {
-        primary:   { entry: start, exit: start + pm * 60000 },
-        companion: { entry: start, exit: start + cm * 60000 }
-      };
+      res.primary = { entry: start, exit: start + pm * 60000 };
+      for (const comp of companionsMins) {
+        const cMins = Math.max(1, Number(comp.mins) || 1);
+        res.companions[comp.id] = { entry: start, exit: start + cMins * 60000 };
+      }
     }
-  }, [mode, pm, cm, jobStart, totalSecs]);
+    return res;
+  }, [mode, pm, companionsMins, jobStart, totalSecs]);
 
-  const allocatedMins = pm + cm;
+  const totalCompMins = companionsMins.reduce((s, c) => s + Math.max(1, Number(c.mins) || 1), 0);
+  const allocatedMins = pm + totalCompMins;
+  
   const balanced = allocatedMins === totalMins;
   const overAllocated = mode === 'sequential' && allocatedMins > totalMins;
 
   const handleConfirm = () => {
-    onConfirm({ primaryMins: pm, companionMins: cm, mode });
+    onConfirm({ primaryMins: pm, companionsMins, mode });
     onClose();
   };
 
   return (
     <div className="modal-overlay" style={{ zIndex: 9999 }}>
-      <div className="modal-content" style={{ maxWidth: '400px' }}>
+      <div className="modal-content" style={{ maxWidth: '400px', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}>
 
         {/* Header */}
-        <div style={{ textAlign: 'center', marginBottom: '1.2rem' }}>
-          <div style={{ fontSize: '1.8rem', marginBottom: '0.4rem' }}>⏱</div>
+        <div style={{ textAlign: 'center', marginBottom: '1.2rem', flexShrink: 0 }}>
+          <div style={{ fontSize: '1.8rem', marginBottom: '0.4rem' }}>⏱️</div>
           <h3 style={{ margin: '0 0 0.3rem 0' }}>Split Job Time</h3>
           <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
             Total tracked: <strong>{totalMins} min</strong>
-            {jobStart && <span> · Started {fmt(jobStart)}</span>}
+            {jobStart && <span> • Started {fmt(jobStart)}</span>}
           </p>
         </div>
 
         {/* Mode Toggle */}
-        <div style={{ display: 'flex', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', padding: '4px', marginBottom: '1.2rem', gap: '4px' }}>
+        <div style={{ display: 'flex', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', padding: '4px', marginBottom: '1.2rem', gap: '4px', flexShrink: 0 }}>
           {['sequential', 'simultaneous'].map(m => (
             <button
               key={m}
@@ -90,54 +108,85 @@ export default function TimeSplitModal({ primaryName, companionName, totalSecs, 
                 boxShadow: mode === m ? 'var(--shadow-sm)' : 'none'
               }}
             >
-              {m === 'sequential' ? '▶ Sequential' : '⇌ Simultaneous'}
+              {m === 'sequential' ? '➖ Sequential' : '➕ Simultaneous'}
             </button>
           ))}
         </div>
 
         {/* Mode description */}
-        <p style={{ margin: '0 0 1rem 0', fontSize: '0.78rem', color: 'var(--color-text-muted)', textAlign: 'center' }}>
+        <p style={{ margin: '0 0 1rem 0', fontSize: '0.78rem', color: 'var(--color-text-muted)', textAlign: 'center', flexShrink: 0 }}>
           {mode === 'sequential'
-            ? 'Property A was done first, then Property B.'
-            : 'Both properties were worked at the same time.'}
+            ? 'Properties were done back-to-back.'
+            : 'Properties were worked at the exact same time.'}
         </p>
 
         {/* Property Inputs */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', marginBottom: '1rem' }}>
-          {[
-            { label: primaryName, subtitle: 'Primary job', mins: primaryMins, setMins: setPrimaryMins, times: times.primary, color: 'var(--color-border)' },
-            { label: companionName, subtitle: '📍 Nearby property', mins: companionMins, setMins: setCompanionMins, times: times.companion, color: 'rgba(16,185,129,0.4)' }
-          ].map(({ label, subtitle, mins, setMins, times: t, color }) => (
-            <div key={label} style={{ background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', border: `1px solid ${color}`, padding: '0.8rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{label}</div>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>{subtitle}</div>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                  <input
-                    type="number"
-                    min="1"
-                    value={mins}
-                    onChange={e => setMins(e.target.value)}
-                    className="input-field"
-                    style={{ width: '60px', textAlign: 'center', padding: '0.4rem', fontSize: '1rem', fontWeight: 700 }}
-                  />
-                  <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>min</span>
-                </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', marginBottom: '1rem', overflowY: 'auto', paddingRight: '4px' }}>
+          {/* Primary Input */}
+          <div style={{ background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', border: `1px solid var(--color-border)`, padding: '0.8rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{primaryName}</div>
+                <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>Primary job</div>
               </div>
-              {/* Live time preview */}
-              <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-                <Clock size={11} />
-                {fmt(t.entry)} → {fmt(t.exit)}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                <input
+                  type="number"
+                  min="1"
+                  value={primaryMins}
+                  onChange={e => setPrimaryMins(e.target.value)}
+                  className="input-field"
+                  style={{ width: '60px', textAlign: 'center', padding: '0.4rem', fontSize: '1rem', fontWeight: 700 }}
+                />
+                <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>min</span>
               </div>
             </div>
-          ))}
+            {/* Live time preview */}
+            <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+              <Clock size={11} />
+              {fmt(times.primary.entry)} → {fmt(times.primary.exit)}
+            </div>
+          </div>
+
+          {/* Companions Inputs */}
+          {companions.map(comp => {
+            const compState = companionsMins.find(c => c.id === comp.id);
+            const t = times.companions[comp.id];
+            return (
+              <div key={comp.id} style={{ background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', border: `1px solid rgba(16,185,129,0.4)`, padding: '0.8rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{comp.name}</div>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>🌱 Nearby property</div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <input
+                      type="number"
+                      min="1"
+                      value={compState?.mins || 1}
+                      onChange={e => updateCompMins(comp.id, e.target.value)}
+                      className="input-field"
+                      style={{ width: '60px', textAlign: 'center', padding: '0.4rem', fontSize: '1rem', fontWeight: 700 }}
+                    />
+                    <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>min</span>
+                  </div>
+                </div>
+                {/* Live time preview */}
+                {t && (
+                  <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                    <Clock size={11} />
+                    {fmt(t.entry)} → {fmt(t.exit)}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
 
         {/* Allocation Indicator — sequential only */}
         {mode === 'sequential' && (
           <div style={{
+            flexShrink: 0,
             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem',
             padding: '0.5rem', borderRadius: 'var(--radius-sm)', marginBottom: '1rem',
             background: balanced ? 'rgba(16,185,129,0.1)' : overAllocated ? 'rgba(239,68,68,0.1)' : 'rgba(245,158,11,0.1)',
@@ -155,19 +204,19 @@ export default function TimeSplitModal({ primaryName, companionName, totalSecs, 
         )}
 
         {/* Simultaneous soft warning if either exceeds total */}
-        {mode === 'simultaneous' && (pm > totalMins || cm > totalMins) && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.5rem', borderRadius: 'var(--radius-sm)', marginBottom: '1rem', background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.4)', fontSize: '0.8rem', color: '#f59e0b' }}>
+        {mode === 'simultaneous' && (pm > totalMins || companionsMins.some(c => c.mins > totalMins)) && (
+          <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.5rem', borderRadius: 'var(--radius-sm)', marginBottom: '1rem', background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.4)', fontSize: '0.8rem', color: '#f59e0b' }}>
             <AlertTriangle size={13} /> One property exceeds the tracked total of {totalMins} min
           </div>
         )}
 
         {/* Actions */}
-        <div style={{ display: 'flex', gap: '0.8rem' }}>
+        <div style={{ display: 'flex', gap: '0.8rem', flexShrink: 0 }}>
           <button className="btn btn-secondary" style={{ flex: 1 }} onClick={onClose}>
             Cancel
           </button>
           <button className="btn btn-primary" style={{ flex: 2 }} onClick={handleConfirm}>
-            <Clock size={16} /> Log Both Properties
+            <Clock size={16} /> Log All {numProps} Properties
           </button>
         </div>
       </div>

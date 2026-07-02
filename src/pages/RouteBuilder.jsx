@@ -9,6 +9,7 @@ import { trackApiCall } from '../utils/apiTracker';
 import WeeklyScheduler from '../components/WeeklyScheduler';
 import { calculateTieredMatrix, parseLawnSizeToSqFt } from '../utils/matrix';
 import { getSettings } from '../db/settings';
+import { useServiceMode } from '../components/ServiceProvider';
 
 const mapContainerStyle = { width: '100%', height: '300px', borderRadius: 'var(--radius-md)', marginTop: '1rem' };
 
@@ -21,7 +22,7 @@ export default function RouteBuilder() {
   const tieredMatrixData = useMemo(() => calculateTieredMatrix(allVisits, customers), [allVisits, customers]);
 
   const [activeTab,     setActiveTab]     = useState('build');
-  const [customerTab,   setCustomerTab]   = useState('mowing');
+  const { activeMode } = useServiceMode();
 
   const [selectedStops, setSelectedStops] = useState([]);
   const [showMap,       setShowMap]       = useState(false);
@@ -58,10 +59,10 @@ export default function RouteBuilder() {
   const addStop = (customer) => {
     let defaultIds = [];
     if (customer.services) {
-      if (customerTab === 'fertilizer') {
+      if (activeMode === 'fertilizer') {
         const fertService = customer.services.find(s => s.active && (s.id === 's3' || (s.name && s.name.toLowerCase().includes('fertil'))));
         if (fertService) defaultIds = [fertService.id];
-      } else if (customerTab === 'mowing') {
+      } else if (activeMode === 'mowing') {
         const mowService = customer.services.find(s => s.active && (s.id === 's1' || (s.name && s.name.toLowerCase().includes('mow'))));
         if (mowService) defaultIds = [mowService.id];
       }
@@ -265,6 +266,7 @@ export default function RouteBuilder() {
       date: new Date().toISOString(),
       status: 'pending',
       isTemplate: 0,
+      division: activeMode,
       plannedDistanceMiles,
       stops: selectedStops.map(s => ({
         customerId: s.customer.id,
@@ -316,6 +318,7 @@ export default function RouteBuilder() {
       name,
       date: new Date().toISOString(),
       isTemplate: 1,
+      division: activeMode,
       stops: selectedStops.map(s => ({
         customerId: s.customer.id,
         plannedServiceIds: s.plannedServiceIds
@@ -455,24 +458,6 @@ export default function RouteBuilder() {
             <div className="glass-card" style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 240px)', minHeight: '400px' }}>
               <h3 style={{ margin: '0 0 1rem 0', fontSize: '1.1rem' }}>Available Clients</h3>
               
-              <div style={{ display: 'flex', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-md)', padding: '0.25rem', marginBottom: '1rem' }}>
-                {['all', 'mowing', 'fertilizer'].map(tab => (
-                  <button 
-                    key={tab}
-                    onClick={() => setCustomerTab(tab)}
-                    style={{ 
-                      flex: 1,
-                      background: customerTab === tab ? 'var(--color-primary)' : 'transparent', 
-                      color: customerTab === tab ? 'white' : 'var(--color-text-muted)',
-                      border: 'none', borderRadius: 'var(--radius-sm)', padding: '0.4rem', fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer', textTransform: 'capitalize',
-                      transition: 'all 0.2s'
-                    }}
-                  >
-                    {tab}
-                  </button>
-                ))}
-              </div>
-              
               <input
                 type="text"
                 className="input-field"
@@ -488,8 +473,8 @@ export default function RouteBuilder() {
                   const filtered = q 
                     ? availableCustomers.filter(c => c.name.toLowerCase().includes(q) || (c.address || '').toLowerCase().includes(q))
                     : availableCustomers.filter(c => {
-                        if (customerTab === 'mowing') return c.services && c.services.some(s => s.active && (s.id === 's1' || (s.name && s.name.toLowerCase().includes('mow'))));
-                        if (customerTab === 'fertilizer') return c.services && c.services.some(s => s.active && (s.id === 's3' || (s.name && s.name.toLowerCase().includes('fertil'))));
+                        if (activeMode === 'mowing') return c.services && c.services.some(s => s.active && (s.id === 's1' || (s.name && s.name.toLowerCase().includes('mow'))));
+                        if (activeMode === 'fertilizer') return c.services && c.services.some(s => s.active && (s.id === 's3' || (s.name && s.name.toLowerCase().includes('fertil'))));
                         return true;
                     });
                     

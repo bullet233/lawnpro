@@ -2,7 +2,8 @@ import { useState, useMemo } from 'react';
 import { db } from '../db/db';
 import { parseLawnSizeToSqFt } from '../utils/matrix';
 import { getDaysSince } from '../utils/dateUtils';
-import { ChevronDown } from 'lucide-react';
+import { ChevronDown, Moon } from 'lucide-react';
+import { useServiceMode } from './ServiceProvider';
 
 const DAYS = ['Unassigned', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
@@ -11,23 +12,31 @@ export default function WeeklyScheduler({ customers, tieredMatrixData, settings,
   const [dragOverDay, setDragOverDay] = useState(null);
   const [now] = useState(() => Date.now());
   const [openDropdownId, setOpenDropdownId] = useState(null);
+  const { activeMode } = useServiceMode();
 
   // Group customers by day
   const columns = useMemo(() => {
     const cols = { Unassigned: [] };
     DAYS.forEach(d => { cols[d] = []; });
-    
-    const defaultServices = settings?.defaultServices || [];
-    const mowingServiceIds = defaultServices.filter(s => s.category === 'Mowing' || s.id === 's1').map(s => s.id);
-    
+
     (customers || []).forEach(c => {
       if (c.status === 'inactive') return; // Don't schedule inactive clients
+
+      // Filter customers based on the active global mode
+      let hasActiveService;
+      if (activeMode === 'fertilizer') {
+        hasActiveService = c.services && c.services.some(s => {
+          const n = s.name.toLowerCase();
+          return (n.includes('fert') || n.includes('spray') || n.includes('weed') || n.includes('chem')) && s.active;
+        });
+      } else {
+        hasActiveService = !c.services || c.services.length === 0 || c.services.some(s => {
+          const n = s.name.toLowerCase();
+          return (n.includes('mow') || n.includes('cut') || n.includes('yard')) && s.active;
+        });
+      }
       
-      // Exclude non-mowing customers (e.g. fertilizer only) from the weekly scheduler
-      const hasMowing = !c.services || c.services.length === 0 || c.services.some(s => 
-        s.active && (s.id === 's1' || mowingServiceIds.includes(s.id) || (s.name && s.name.toLowerCase().includes('mow')))
-      );
-      if (!hasMowing) return;
+      if (!hasActiveService) return;
 
       const day = c.preferredDay || 'Unassigned';
       if (cols[day]) {
@@ -36,9 +45,18 @@ export default function WeeklyScheduler({ customers, tieredMatrixData, settings,
         cols.Unassigned.push(c);
       }
     });
-    
+
+    // Snoozed clients sink to the bottom of each day so active work stays on top
+    Object.keys(cols).forEach(d => {
+      cols[d].sort((a, b) => {
+        const aS = a.snoozedUntil && a.snoozedUntil > now ? 1 : 0;
+        const bS = b.snoozedUntil && b.snoozedUntil > now ? 1 : 0;
+        return aS - bS;
+      });
+    });
+
     return cols;
-  }, [customers, settings]);
+  }, [customers, activeMode, now]);
 
   const calculateDayCapacity = (dayCustomers) => {
     if (!tieredMatrixData || tieredMatrixData.length === 0) return 0;
@@ -118,6 +136,7 @@ export default function WeeklyScheduler({ customers, tieredMatrixData, settings,
     <div style={{ display: 'flex', gap: '1.5rem', overflowX: 'auto', paddingBottom: '1rem', alignItems: 'flex-start', minHeight: 'calc(100vh - 150px)' }}>
       {DAYS.map(day => {
         const dayCusts = columns[day] || [];
+        const snoozedCount = dayCusts.filter(c => c.snoozedUntil && c.snoozedUntil > now).length;
         const capacityMins = calculateDayCapacity(dayCusts);
         const capacityHours = (capacityMins / 60).toFixed(1);
         const isOverbooked = capacityMins > 480; // 8 hours
@@ -151,9 +170,16 @@ export default function WeeklyScheduler({ customers, tieredMatrixData, settings,
                 <h3 style={{ margin: 0, fontSize: '1rem', color: isOverbooked ? '#ef4444' : 'var(--color-text-main)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
                   {day}
                 </h3>
-                <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '0.2rem 0.6rem', borderRadius: 'var(--radius-full)' }}>
-                  {dayCusts.length}
-                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  {snoozedCount > 0 && (
+                    <span title="Snoozed clients" style={{ fontSize: '0.7rem', fontWeight: 700, color: '#b45309', background: 'rgba(245,158,11,0.15)', padding: '0.2rem 0.5rem', borderRadius: 'var(--radius-full)', display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
+                      <Moon size={11} /> {snoozedCount}
+                    </span>
+                  )}
+                  <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '0.2rem 0.6rem', borderRadius: 'var(--radius-full)' }}>
+                    {dayCusts.length}
+                  </span>
+                </div>
               </div>
               
               {day !== 'Unassigned' && (
@@ -187,20 +213,38 @@ export default function WeeklyScheduler({ customers, tieredMatrixData, settings,
               {dayCusts.map(cust => {
                 const isSnoozed = cust.snoozedUntil && cust.snoozedUntil > now;
                 
-                // Find last mowed
-                let lastMowedDays = null;
-                if (allVisits) {
-                  const defaultServices = settings?.defaultServices || [];
-                  const mowingServiceIds = defaultServices.filter(s => s.category === 'Mowing' || s.id === 's1').map(s => s.id);
-                  
-                  const custVisits = allVisits.filter(v => {
-                    if (v.customerId !== cust.id || v.status !== 'completed') return false;
-                    const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id));
-                    return isMow;
-                  });
+                // Find last service
+                let lastServiceDays = null;
+                let lastServiceDate = null;
+                let isOverdue = false;
+                  if (allVisits) {
+                    const custVisits = allVisits.filter(v => {
+                      if (v.customerId !== cust.id || v.status !== 'completed') return false;
+                      
+                      // Explicit division check if available
+                      if (v.division) return v.division === activeMode;
+                      
+                      // Fallback for older visits before division was added
+                      const svcIds = v.appliedServices || [];
+                      const defaultServices = settings?.defaultServices || [];
+                      if (activeMode === 'mowing') {
+                        const mowIds = defaultServices.filter(s => s.category === 'Mowing' || s.id === 's1').map(s => s.id);
+                        return svcIds.length === 0 || svcIds.some(id => mowIds.includes(id));
+                      } else {
+                        const fertIds = defaultServices.filter(s => s.category === 'Fertilizer' || s.id === 's3').map(s => s.id);
+                        return svcIds.some(id => fertIds.includes(id));
+                      }
+                    });
                   if (custVisits.length > 0) {
                     custVisits.sort((a, b) => b.exitTime - a.exitTime);
-                    lastMowedDays = getDaysSince(custVisits[0].exitTime);
+                    lastServiceDate = custVisits[0].exitTime;
+                    lastServiceDays = getDaysSince(custVisits[0].exitTime);
+                  }
+                  
+                  // Simple overdue logic
+                  const svcInterval = activeMode === 'fertilizer' ? (cust.fertilizerInterval || 30) : (cust.mowingInterval || cust.serviceInterval || 7);
+                  if (lastServiceDays !== null && lastServiceDays >= svcInterval) {
+                    isOverdue = true;
                   }
                 }
 
@@ -213,13 +257,13 @@ export default function WeeklyScheduler({ customers, tieredMatrixData, settings,
                     style={{
                       background: 'var(--color-bg-card)',
                       border: '1px solid var(--color-border)',
-                      borderLeft: '3px solid var(--color-primary)',
+                      borderLeft: `3px solid ${isSnoozed ? 'var(--color-warning)' : (isOverdue ? '#ef4444' : 'var(--color-primary)')}`,
                       borderRadius: 'var(--radius-sm)',
                       padding: '0.8rem 1rem',
                       cursor: 'grab',
                       boxShadow: 'var(--shadow-sm)',
-                      opacity: draggedCustId === cust.id || isSnoozed ? 0.6 : 1,
-                      filter: isSnoozed ? 'grayscale(100%)' : 'none',
+                      opacity: draggedCustId === cust.id ? 0.5 : (isSnoozed ? 0.8 : 1),
+                      filter: 'none',
                       transition: 'all 0.15s',
                       position: 'relative'
                     }}
@@ -245,31 +289,39 @@ export default function WeeklyScheduler({ customers, tieredMatrixData, settings,
                             transition: 'all 0.15s'
                           }}
                         >
-                          {isSnoozed ? 'Snoozed' : 'Snooze'}
+                          {isSnoozed ? 'Wake' : 'Snooze'}
                         </button>
                       </div>
-                      
+
                       <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginTop: '0.2rem' }}>
                         {cust.address || 'No Address'}
                       </div>
-                      
-                      {lastMowedDays === null ? (
-                        <div style={{ 
-                          fontSize: '0.75rem', 
-                          marginTop: '0.5rem', 
+
+                      {lastServiceDays === null ? (
+                        <div style={{
+                          fontSize: '0.75rem',
+                          marginTop: '0.5rem',
                           color: '#f59e0b',
                           fontWeight: 600
                         }}>
-                          Never mowed
+                          Never serviced
                         </div>
                       ) : (
-                        <div style={{ 
-                          fontSize: '0.75rem', 
-                          marginTop: '0.5rem', 
-                          color: lastMowedDays >= 7 ? '#ef4444' : (lastMowedDays >= 5 ? '#f59e0b' : 'var(--color-text-muted)'),
-                          fontWeight: lastMowedDays >= 5 ? 600 : 400
+                        <div style={{
+                          fontSize: '0.75rem',
+                          marginTop: '0.5rem',
+                          color: isOverdue ? '#ef4444' : 'var(--color-text-muted)',
+                          fontWeight: isOverdue ? 700 : 400
                         }}>
-                          {lastMowedDays === 0 ? 'Mowed today' : `Last cut ${lastMowedDays} days ago`}
+                          {lastServiceDays === 0
+                            ? 'Serviced today'
+                            : `${new Date(lastServiceDate).toLocaleDateString([], { month: 'short', day: 'numeric' })} · ${lastServiceDays}d ago`}
+                        </div>
+                      )}
+
+                      {isSnoozed && (
+                        <div style={{ fontSize: '0.75rem', marginTop: '0.4rem', color: '#b45309', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                          <Moon size={12} /> Snoozed until {new Date(cust.snoozedUntil).toLocaleDateString([], { month: 'short', day: 'numeric' })}
                         </div>
                       )}
                       

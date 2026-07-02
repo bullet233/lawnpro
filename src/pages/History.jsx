@@ -8,6 +8,7 @@ import ComplianceLogModal from '../components/ComplianceLogModal';
 import { getSettings } from '../db/settings';
 import { getBusinessDateString } from '../utils/dateUtils';
 import { calculateServiceTotals, getVisitRevenueBreakdown } from '../utils/revenueUtils';
+import { useServiceMode } from '../components/ServiceProvider';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const fmt = (secs) => { 
@@ -49,6 +50,7 @@ export default function History() {
   const [showDayReview,  setShowDayReview]  = useState(false);
   const [dialog,         setDialog]         = useState(null);
   const [activeEpaJob,   setActiveEpaJob]   = useState(null);
+  const { activeMode } = useServiceMode();
   const [settings, setSettings] = useState(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [viewMode, setViewMode] = useState('list');
@@ -88,6 +90,9 @@ export default function History() {
   // ── Filter + join ─────────────────────────────────────────────────────────
   const historyLog = useMemo(() => {
     return allVisits.filter(visit => {
+      // Must match global activeMode
+      if (visit.division && visit.division !== activeMode) return false;
+      
       if (customerFilter !== 'all' && visit.customerId !== Number(customerFilter)) return false;
       if (statusFilter !== 'all' && visit.status !== statusFilter) return false;
       if (serviceFilter !== 'all') {
@@ -125,7 +130,7 @@ export default function History() {
       const cust = allCustomers.find(c => c.id === visit.customerId) || {};
       return { ...visit, custName: cust.name || 'Unknown', custObj: cust, priceEarned: visit.priceEarned || 0, appliedServices: visit.appliedServices || [] };
     }).sort((a, b) => b.exitTime - a.exitTime);
-  }, [allVisits, allCustomers, timeFilter, customerFilter, statusFilter, serviceFilter, customStartDate, customEndDate]);
+  }, [allVisits, allCustomers, customerFilter, statusFilter, serviceFilter, timeFilter, customStartDate, customEndDate, activeMode]);
 
   // ── Group by day ──────────────────────────────────────────────────────────
   const groupedDays = useMemo(() => {
@@ -605,6 +610,17 @@ export default function History() {
                                     <span style={{ fontSize: '0.75rem', color: 'var(--color-primary)', fontWeight: 800 }}>${((((job.driveTimeSecs || 0) + (job.durationSecs || 0)) / 3600) * settings.targetHourlyRate).toFixed(2)}</span>
                                   </div>
 
+                                </div>
+                              )}
+
+                              {/* Conditions */}
+                              {job.conditions && job.conditions.length > 0 && (
+                                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginTop: '0.6rem' }}>
+                                  {job.conditions.map(cond => (
+                                    <span key={cond} style={{ padding: '0.2rem 0.5rem', background: 'var(--color-bg-alt)', borderRadius: 'var(--radius-sm)', fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-text-main)', border: '1px solid var(--color-border)', textTransform: 'capitalize' }}>
+                                      {cond}
+                                    </span>
+                                  ))}
                                 </div>
                               )}
                               

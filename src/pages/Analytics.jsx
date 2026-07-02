@@ -2,11 +2,12 @@ import { useState, useMemo, useEffect, useRef, Fragment } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/db';
 import { getSettings } from '../db/settings';
-import { parseLawnSizeToSqFt, calculateTieredMatrix } from '../utils/matrix';
+import { parseLawnSizeToSqFt, calculateTieredMatrix, calculatePowerModel, predictTrendMins } from '../utils/matrix';
 import { trackApiCall } from '../utils/apiTracker';
 import { GOOGLE_MAPS_API_KEY } from '../components/MapProvider';
 import { TrendingUp, Calculator, AlertCircle, Fuel, DollarSign, ArrowUp, ArrowDown, Edit2, Save, X, MapPin, AlertTriangle } from 'lucide-react';
 import { Autocomplete } from '@react-google-maps/api';
+import { useServiceMode } from '../components/ServiceProvider';
 
 // Haversine distance helper
 const haversineDistance = (lat1, lon1, lat2, lon2) => {
@@ -416,17 +417,19 @@ function BucketHistoryModal({ bucket, minSqft, allVisits, allCustomers, onClose,
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export default function Analytics() {
+  const { activeMode } = useServiceMode();
   const allVisitsRaw = useLiveQuery(() => db.visits.toArray(), []) || [];
   const allCustomersRaw = useLiveQuery(() => db.customers.toArray(), []) || [];
   
   const { allVisits, allCustomers } = useMemo(() => {
     const custs = allCustomersRaw.filter(c => !c.excludeFromAnalytics);
     const validIds = new Set(custs.map(c => c.id));
-    const visits = allVisitsRaw.filter(v => validIds.has(v.customerId));
+    const visits = allVisitsRaw.filter(v => validIds.has(v.customerId) && (!v.division || v.division === activeMode));
     return { allCustomers: custs, allVisits: visits };
-  }, [allVisitsRaw, allCustomersRaw]);
+  }, [allVisitsRaw, allCustomersRaw, activeMode]);
   const allFuelLogs = useLiveQuery(() => db.fuelLogs.toArray(), []) || [];
   const [activeTab, setActiveTab] = useState('overview'); // overview, bidding, expenses
+  const [pricingModel, setPricingModel] = useState(() => localStorage.getItem('pricing_model') || 'bucket'); // 'bucket' | 'linear'
   const [settings, setSettings] = useState(null);
   const [targetSqFt, setTargetSqFt] = useState('');
   const [targetAddress, setTargetAddress] = useState('');
@@ -543,6 +546,22 @@ export default function Analytics() {
   // 1.6 Tiered Matrix Math (Beta)
   const tieredMatrixData = useMemo(() => calculateTieredMatrix(allVisits, allCustomers), [allVisits, allCustomers]);
 
+  // 1.7 Trend curve pricing model (beta alternative — A/B toggle). Power-law fit.
+  const trendModel = useMemo(() => calculatePowerModel(allVisits, allCustomers), [allVisits, allCustomers]);
+  // When 'linear' (the trend curve) is selected but there isn't enough data to fit, fall back to buckets.
+  const usingTrend = pricingModel === 'linear' && !!trendModel;
+
+  useEffect(() => { localStorage.setItem('pricing_model', pricingModel); }, [pricingModel]);
+
+  // Clean base minutes for a lawn size under the active pricing model (difficulty
+  // modifiers + drive time are added on top of this by callers, identically for both).
+  const getBaseMins = (sqft) => {
+    if (usingTrend) return predictTrendMins(trendModel, sqft);
+    if (!tieredMatrixData) return 0;
+    const bucket = tieredMatrixData.find(b => sqft <= b.maxSqft) || tieredMatrixData[tieredMatrixData.length - 1];
+    return bucket.pace ? sqft / bucket.pace : 0;
+  };
+
   const targetSizes = [...Array(44).keys()].map(i => (i + 1) * 1000); // 1k to 44k
 
   const groupedBuckets = useMemo(() => {
@@ -597,24 +616,26 @@ export default function Analytics() {
     setIsCalculating(true);
 
     try {
-      // Find the right bucket
+      // Base (clean) mow time from the active pricing model
       const bucket = tieredMatrixData.find(b => parsedTarget <= b.maxSqft) || tieredMatrixData[tieredMatrixData.length - 1];
-      let baseMins = parsedTarget / bucket.pace;
+      let baseMins = getBaseMins(parsedTarget);
 
       const obstacles = parseInt(targetObstacles, 10) || 0;
       let difficultyMins = 0;
-      
+
       // Apply Difficulty Modifiers
       if (targetTerrain === 'moderate') difficultyMins += (baseMins * 0.15);
       else if (targetTerrain === 'hilly') difficultyMins += (baseMins * 0.3);
-      
+
       if (targetFenced) difficultyMins += 3;
       if (obstacles > 0) difficultyMins += (obstacles * 1.5);
-      
+
 
 
       let driveMins = 0;
-      const parts = [`Uses ${bucket.label} bucket (${Math.round(bucket.pace)} sqft/m).`];
+      const parts = [usingTrend
+        ? `Trend curve — priced faster per sq ft as lawns grow (R²=${trendModel.r2.toFixed(2)}, ${trendModel.n} visits).`
+        : `Uses ${bucket.label} bucket (${Math.round(bucket.pace)} sqft/m).`];
       if (obstacles > 0) parts.push(`+${Math.round(obstacles * 1.5)} min for obstacles.`);
       if (targetTerrain !== 'flat') parts.push(`+${targetTerrain === 'moderate' ? '15%' : '30%'} terrain penalty.`);
       if (targetFenced) parts.push(`+3 min fenced yard penalty.`);
@@ -775,6 +796,59 @@ export default function Analytics() {
     return results.sort((a, b) => b.hourlyRate - a.hourlyRate);
   }, [allVisits, allCustomers]);
 
+  // ── Slow-for-size flag ──────────────────────────────────────────────────
+  // Flags lawns whose average mow time runs well above what the trend curve
+  // predicts for a lawn of their size (i.e. slower than similar-size peers).
+  // Always mowing-based and independent of the active mode / pricing toggle.
+  // A lawn can be permanently dismissed (customer.slowMowExpected) when it just
+  // genuinely runs long — e.g. heavy trimming — which we don't capture as a field.
+  const SLOW_RATIO = 1.4;   // 40%+ slower than expected
+  const SLOW_MIN_VISITS = 3; // need a few visits before trusting the average
+  const slowModel = useMemo(() => calculatePowerModel(allVisitsRaw, allCustomersRaw), [allVisitsRaw, allCustomersRaw]);
+  const slowLawns = useMemo(() => {
+    if (!slowModel) return { flagged: [], dismissed: [] };
+    const s = getSettings();
+    const mowIds = (s.defaultServices || []).filter(x => x.category === 'Mowing' || x.id === 's1').map(x => x.id);
+    const custMap = new Map(allCustomersRaw.map(c => [c.id, c]));
+    const per = {};
+    allVisitsRaw.forEach(v => {
+      if (v.status !== 'completed' || !v.durationSecs || v.durationSecs < 60) return;
+      const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowIds.includes(id));
+      if (!isMow) return;
+      const c = custMap.get(v.customerId);
+      if (!c || c.excludeFromAnalytics || c.status === 'inactive') return;
+      const sq = parseLawnSizeToSqFt(c.lawnSize);
+      if (!sq) return;
+      // difficulty-normalize the same way the model does, so we flag only
+      // slowness NOT already explained by obstacles / fenced / terrain.
+      let m = v.durationSecs / 60;
+      const o = parseInt(c.obstacleCount, 10) || 0;
+      if (o > 0) m -= o * 1.5;
+      if (c.fencedBackyard) m -= 3;
+      if (c.terrain === 'moderate') m /= 1.15;
+      else if (c.terrain === 'hilly') m /= 1.30;
+      m = Math.max(0.5, m);
+      if (!per[c.id]) per[c.id] = { cust: c, sq, sum: 0, n: 0 };
+      per[c.id].sum += m; per[c.id].n += 1;
+    });
+    const flagged = [], dismissed = [];
+    Object.values(per).forEach(p => {
+      if (p.n < SLOW_MIN_VISITS) return;
+      const actual = p.sum / p.n;
+      const exp = predictTrendMins(slowModel, p.sq);
+      const ratio = exp > 0 ? actual / exp : 0;
+      if (ratio < SLOW_RATIO) return;
+      const row = { id: p.cust.id, name: p.cust.name, sq: p.sq, actual, exp, ratio, n: p.n };
+      (p.cust.slowMowExpected ? dismissed : flagged).push(row);
+    });
+    flagged.sort((a, b) => b.ratio - a.ratio);
+    dismissed.sort((a, b) => b.ratio - a.ratio);
+    return { flagged, dismissed };
+  }, [slowModel, allVisitsRaw, allCustomersRaw]);
+
+  const dismissSlowFlag = (id) => db.customers.update(id, { slowMowExpected: true });
+  const restoreSlowFlag = (id) => db.customers.update(id, { slowMowExpected: false });
+
   const targetRate = settings?.targetHourlyRate || 0;
 
   return (
@@ -812,7 +886,70 @@ export default function Analytics() {
       {/* OVERVIEW TAB */}
       {activeTab === 'overview' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem', marginTop: '1rem' }}>
-            
+
+            {/* Slow-for-size flags */}
+            {(slowLawns.flagged.length > 0 || slowLawns.dismissed.length > 0) && (
+              <div>
+                <h2 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--color-text-muted)', marginBottom: '1rem', marginTop: 0, fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <AlertTriangle size={15} color="#f59e0b" /> Taking Longer Than Similar Lawns
+                </h2>
+
+                {slowLawns.flagged.length === 0 ? (
+                  <div style={{ padding: '1rem', border: '1px dashed var(--color-border)', borderRadius: 'var(--radius-md)', color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+                    No lawns are running slow for their size right now.
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                    {slowLawns.flagged.map(l => (
+                      <div key={l.id} className="glass-card" style={{ padding: '0.85rem 1rem', borderLeft: '4px solid #f59e0b', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.8rem' }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontWeight: 700, color: 'var(--color-text-main)' }}>{l.name}</div>
+                          <div style={{ fontSize: '0.78rem', color: 'var(--color-text-muted)', marginTop: '0.15rem' }}>
+                            {Math.round(l.actual)} min vs ~{Math.round(l.exp)} min for {l.sq.toLocaleString()} sq ft
+                            <span style={{ color: '#f59e0b', fontWeight: 700, marginLeft: '0.4rem' }}>{l.ratio.toFixed(1)}× slower</span>
+                            <span style={{ opacity: 0.6 }}> · {l.n} visits</span>
+                          </div>
+                        </div>
+                        <button
+                          className="btn btn-secondary"
+                          style={{ padding: '0.4rem 0.7rem', fontSize: '0.78rem', whiteSpace: 'nowrap', flexShrink: 0 }}
+                          onClick={() => dismissSlowFlag(l.id)}
+                          title="This lawn just runs long — stop flagging it"
+                        >
+                          Mark as expected
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {slowLawns.dismissed.length > 0 && (
+                  <div style={{ marginTop: '0.8rem' }}>
+                    <div style={{ fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--color-text-muted)', fontWeight: 700, marginBottom: '0.4rem' }}>
+                      Marked as expected ({slowLawns.dismissed.length})
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                      {slowLawns.dismissed.map(l => (
+                        <div key={l.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.6rem', padding: '0.5rem 0.8rem', background: 'var(--color-bg-main)', border: '1px dashed var(--color-border)', borderRadius: 'var(--radius-sm)', fontSize: '0.82rem' }}>
+                          <span style={{ color: 'var(--color-text-muted)' }}>
+                            {l.name} <span style={{ opacity: 0.7 }}>· {l.ratio.toFixed(1)}× ({Math.round(l.actual)} min)</span>
+                          </span>
+                          <button
+                            className="btn btn-secondary"
+                            style={{ padding: '0.25rem 0.55rem', fontSize: '0.72rem', whiteSpace: 'nowrap' }}
+                            onClick={() => restoreSlowFlag(l.id)}
+                            title="Flag this lawn again"
+                          >
+                            Flag again
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Efficiency & Pace Box */}
             <div>
               <h2 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--color-text-muted)', marginBottom: '1rem', marginTop: 0, fontWeight: 700 }}>Efficiency & True Pace</h2>
@@ -1083,6 +1220,39 @@ export default function Analytics() {
       {/* BIDDING TAB */}
       {activeTab === 'bidding' && (
         <>
+          {/* Pricing model A/B switch */}
+          <div className="glass-card" style={{ padding: '0.9rem 1rem', marginBottom: '1rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
+              <div>
+                <div style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--color-text-main)' }}>Pricing Model</div>
+                <div style={{ fontSize: '0.78rem', color: 'var(--color-text-muted)', marginTop: '0.15rem' }}>
+                  {pricingModel === 'linear'
+                    ? (trendModel
+                        ? `Curve fit — larger lawns priced faster per sq ft · R² ${trendModel.r2.toFixed(2)} · ${trendModel.n} visits`
+                        : 'Not enough data to fit the curve yet — using buckets.')
+                    : 'Independent pace per size tier (original).'}
+                </div>
+              </div>
+              <div style={{ display: 'flex', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-full)', padding: '0.2rem', border: '1px solid var(--color-border)' }}>
+                {[['bucket', 'Buckets'], ['linear', 'Curve'], ].map(([val, label]) => (
+                  <button
+                    key={val}
+                    onClick={() => setPricingModel(val)}
+                    style={{
+                      padding: '0.4rem 0.9rem', borderRadius: 'var(--radius-full)', border: 'none', cursor: 'pointer',
+                      fontSize: '0.82rem', fontWeight: 600,
+                      background: pricingModel === val ? 'var(--color-primary)' : 'transparent',
+                      color: pricingModel === val ? '#fff' : 'var(--color-text-muted)',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    {label}{val === 'linear' && ' ✨'}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
           {/* Calculator Card */}
           <div className="glass-card" style={{ padding: '1.2rem', marginBottom: '1.5rem' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.8rem' }}>
@@ -1259,16 +1429,18 @@ export default function Analytics() {
                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                               <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: group.color }}></div>
                               <span style={{ fontWeight: 700, color: 'var(--color-text-main)' }}>{group.label}</span>
-                              <span style={{ fontWeight: 400, fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
-                                ({Math.round(group.pace)} sqft/m){!group.rawHasData && '*'}
-                              </span>
+                              {!usingTrend && (
+                                <span style={{ fontWeight: 400, fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
+                                  ({Math.round(group.pace)} sqft/m){!group.rawHasData && '*'}
+                                </span>
+                              )}
                             </div>
                           </td>
                         </tr>
                         
                         {/* Rows */}
                         {group.rows.map(sqft => {
-                          let mins = sqft / group.pace;
+                          let mins = getBaseMins(sqft);
 
                           const rawPrice = (mins / 60) * (settings?.targetHourlyRate || 60);
                           const minFee = settings?.minStopFee ?? 30;
@@ -1287,7 +1459,9 @@ export default function Analytics() {
                   </tbody>
                 </table>
                 <div style={{ padding: '0.6rem 0.8rem', fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', position: 'sticky', bottom: 0, borderTop: '1px solid var(--color-border)' }}>
-                  * Denotes estimated pace borrowed from nearest bucket. Minimum stop fee: ${settings?.minStopFee ?? 30}. Tap a category header to view history graph.
+                  {usingTrend
+                    ? `Prices from the trend curve model. Minimum stop fee: $${settings?.minStopFee ?? 30}. Tap a category header to view history graph.`
+                    : `* Denotes estimated pace borrowed from nearest bucket. Minimum stop fee: $${settings?.minStopFee ?? 30}. Tap a category header to view history graph.`}
                 </div>
               </div>
             ) : (

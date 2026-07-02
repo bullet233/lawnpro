@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lawn Measure</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.24.0/dist/tabler-icons.min.css" />
+  <!-- cache-bust local CSS so edits always show without a hard reload -->
+  <script>document.write('<link rel="stylesheet" href="styles.css?t=' + Date.now() + '">');</script>
+</head>
+<body>
+  <div id="app">
+    <main id="map-wrap">
+      <div id="keyWarning" class="key-warning" style="display:none">
+        <h2>Add your Google Maps API key</h2>
+        <p>Open <code>config.js</code> and paste your key, then reload over
+           <code>http://localhost</code>. See <code>README.md</code> for the 2-minute setup.</p>
+      </div>
+      <div id="map"></div>
+
+      <!-- Onboarding overlay: shown when no categories exist -->
+      <div id="onboardCard" class="onboard-card" hidden>
+        <div class="onboard-icon"><i class="ti ti-map-pin-plus"></i></div>
+        <h2 class="onboard-title">Welcome to Lawn Measure</h2>
+        <p class="onboard-desc">Start by creating a category for your areas — like <strong>Lawn</strong>, <strong>Beds</strong>, or <strong>Gravel</strong> — then draw directly on the map.</p>
+        <button class="onboard-btn" onclick="addGroup()"><i class="ti ti-folder-plus"></i> Add Your First Category</button>
+      </div>
+
+      <div id="searchBar" class="floating">
+        <i class="ti ti-search" aria-hidden="true"></i>
+        <input id="addressInput" type="text" placeholder="Find your home…" disabled />
+      </div>
+
+      <div id="drawHint" class="draw-hint" hidden>
+        <i class="ti ti-pencil" aria-hidden="true"></i>
+        <span id="drawHintText"></span>
+      </div>
+    </main>
+
+    <aside id="panel"></aside>
+  </div>
+
+  <script src="config.js"></script>
+  <!-- cache-bust app.js so code edits always load (no stale cached JS) -->
+  <script>document.write('<scr' + 'ipt src="app.js?t=' + Date.now() + '"><\/scr' + 'ipt>');</script>
+  <!-- embed bridge: only active when the tool is iframed inside the route tracker -->
+  <script>document.write('<scr' + 'ipt src="embed.js?t=' + Date.now() + '"><\/scr' + 'ipt>');</script>
+  <script>
+    (function () {
+      var key = (window.LAWN_CONFIG && window.LAWN_CONFIG.GOOGLE_MAPS_API_KEY) || "";
+      if (!key || key === "PASTE_YOUR_KEY_HERE") {
+        document.getElementById("keyWarning").style.display = "flex";
+        return;
+      }
+      var s = document.createElement("script");
+      s.src = "https://maps.googleapis.com/maps/api/js?key=" + encodeURIComponent(key) +
+              "&libraries=geometry,places&callback=initApp&v=weekly";
+      s.async = true;
+      s.onerror = function () { document.getElementById("keyWarning").style.display = "flex"; };
+      document.head.appendChild(s);
+    })();
+  </script>
+</body>
+</html>

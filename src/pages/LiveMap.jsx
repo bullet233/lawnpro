@@ -10,6 +10,7 @@ import DrivebyPromptModal from '../components/livemap/DrivebyPromptModal';
 import RouteListPanel from '../components/livemap/RouteListPanel';
 import LiveTimerPanel from '../components/livemap/LiveTimerPanel';
 import PendingArrivalAlert from '../components/livemap/PendingArrivalAlert';
+import CustomerDetailsDropdown from '../components/livemap/CustomerDetailsDropdown';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/db';
 import { GeofenceEngine } from '../engine/GeofenceEngine';
@@ -28,8 +29,9 @@ import EditJobModal from '../components/EditJobModal';
 import QuickAddModal from '../components/QuickAddModal';
 import { getSettings } from '../db/settings';
 import { trackApiCall } from '../utils/apiTracker';
+import { useServiceMode } from '../components/ServiceProvider';
 
-const mapContainerStyle = { width: '100%', height: 'calc(100vh - 6rem)', borderRadius: 'var(--radius-md)' };
+const mapContainerStyle = { width: '100%', height: 'calc(100dvh - var(--nav-h))', borderRadius: 'var(--radius-md)' };
 
 // Haversine formula to calculate distance in meters
 const getDistance = (lat1, lon1, lat2, lon2) => {
@@ -41,6 +43,7 @@ const getDistance = (lat1, lon1, lat2, lon2) => {
 
 export default function LiveMap() {
   const navigate = useNavigate();
+  const { activeMode } = useServiceMode();
 
   const { position, positionRef, speed, heading, poorGps, accuracy } = useGeolocation();
   const { weather, weatherRef } = useWeatherTracker(positionRef);
@@ -106,6 +109,8 @@ export default function LiveMap() {
   const poorGpsRef          = useRef(false);
   const capturedDriveTimeSecsRef = useRef(0);
   const panelNoteRef        = useRef('');
+  const panelConditionsRef  = useRef([]); // mirrors JobCompletionModal selections so the auto-dismiss timer can flush them
+  const panelServicesRef    = useRef([]);
 
   useEffect(() => { panelNoteRef.current = panelNote; }, [panelNote]);
 
@@ -114,8 +119,10 @@ export default function LiveMap() {
   const allCustomers = useLiveQuery(() => db.customers.toArray(), []) || [];
   const activeRoute = useLiveQuery(async () => {
     const routes = await db.routes.where('status').anyOf('pending', 'active').toArray();
-    if (routes.length === 0) return null;
-    const route = routes[0];
+    // Filter active routes by the global division
+    const modeRoutes = routes.filter(r => r.division === activeMode);
+    if (modeRoutes.length === 0) return null;
+    const route = modeRoutes[0];
 
     // Migration shim: support old plain-ID stops AND new { customerId, plannedServiceIds } stops
     const normalizedStops = route.stops.map(s =>
@@ -587,18 +594,36 @@ export default function LiveMap() {
       weather: weatherRef.current || null,
       priceEarned: priceEarned || 0,
       appliedServices: appliedServices || [],
-      note: note || ''
+      note: note || '',
+      division: activeMode
     });
 
     // Show completion panel only for completed jobs
     if (status === 'completed') {
       // Detect nearby customers (within 150m) that haven't been visited yet
-      let nearbyCandidate = null;
+      let nearbyCandidates = [];
+      let historicalAverageSecs = null;
+        
       if (currentPosition) {
+        const allDbVisits = await db.visits.toArray();
         const alreadyVisitedIds = new Set(
-          (await db.visits.where({ routeId: activeRoute?.id ?? null }).toArray()).map(v => v.customerId)
+          allDbVisits.filter(v => v.routeId === (activeRoute?.id ?? null)).map(v => v.customerId)
         );
         alreadyVisitedIds.add(customer.id);
+
+        // Calculate historical average for this specific mode
+        const priorVisits = allDbVisits.filter(v => 
+          v.customerId === customer.id && 
+          v.status === 'completed' && 
+          v.durationSecs > 0 && 
+          v.id !== visitId &&
+          (!v.division || v.division === activeMode)
+        );
+        
+        if (priorVisits.length > 0) {
+          const sum = priorVisits.reduce((acc, v) => acc + v.durationSecs, 0);
+          historicalAverageSecs = Math.round(sum / priorVisits.length);
+        }
 
         const nearby = allCustomers
           .filter(c => c.id !== customer.id && !alreadyVisitedIds.has(c.id))
@@ -612,18 +637,23 @@ export default function LiveMap() {
           .filter(c => c && c.dist <= 150)
           .sort((a, b) => a.dist - b.dist);
 
-        if (nearby.length > 0) nearbyCandidate = nearby[0];
+        if (nearby.length > 0) nearbyCandidates = nearby.slice(0, 5); // Limit to top 5
       }
 
       setPanelNote(note || '');
-      setCompletionPanel({ 
-        custName: customer.name, 
-        durationSecs, 
-        priceEarned, 
-        weather, 
-        visitId, 
-        nearbyCandidate, 
-        primaryCustomer: customer, 
+      // Seed the selection refs to match the panel's initial state so an
+      // auto-dismiss before the user touches anything is a no-op.
+      panelConditionsRef.current = [];
+      panelServicesRef.current = appliedServices || [];
+      setCompletionPanel({
+        custName: customer.name,
+        durationSecs,
+        priceEarned,
+        weather,
+        visitId,
+        nearbyCandidates,
+        historicalAverageSecs,
+        primaryCustomer: customer,
         exitTime: Date.now(),
         appliedServices
       });
@@ -632,19 +662,13 @@ export default function LiveMap() {
         if (panelNoteActiveRef.current) {
           // Retry in 5 seconds if user is actively typing
           completionTimerRef.current = setTimeout(async () => {
-            // Save note on final auto-dismiss so typed text is never lost
-            const currentNote = (panelNoteRef.current || '').trim();
-            if (currentNote && visitId) {
-              await db.visits.update(visitId, { note: currentNote });
-            }
+            // Flush note + conditions/services on final auto-dismiss so nothing is lost
+            await flushCompletionDetails(visitId);
             setCompletionPanel(null);
           }, 5000);
         } else {
-          // Save note on auto-dismiss so typed text is never lost
-          const currentNote = (panelNoteRef.current || '').trim();
-          if (currentNote && visitId) {
-            await db.visits.update(visitId, { note: currentNote });
-          }
+          // Flush note + conditions/services on auto-dismiss so nothing is lost
+          await flushCompletionDetails(visitId);
           setCompletionPanel(null);
         }
       }, 12000);
@@ -668,10 +692,27 @@ export default function LiveMap() {
     }
   };
 
-  const handleSaveNote = async () => {
-    if (completionPanel?.visitId && panelNote.trim()) {
-      await db.visits.update(completionPanel.visitId, { note: panelNote.trim() });
+  // Persist whatever the user has entered/selected on the completion panel.
+  // Used by both the explicit "Done" button and the auto-dismiss timer.
+  const flushCompletionDetails = async (visitId, details) => {
+    if (!visitId) return;
+    const note = (details?.note ?? panelNoteRef.current ?? '').trim();
+    const appliedServices = details?.appliedServices ?? panelServicesRef.current;
+    const conditions = details?.conditions ?? panelConditionsRef.current;
+
+    const updateObj = {};
+    if (note) updateObj.note = note;
+    if (appliedServices) updateObj.appliedServices = appliedServices;
+    if (conditions && conditions.length > 0) updateObj.conditions = conditions;
+
+    if (Object.keys(updateObj).length > 0) {
+      await db.visits.update(visitId, updateObj);
     }
+  };
+
+  const handleSaveCompletion = async (details) => {
+    if (!completionPanel?.visitId) return;
+    await flushCompletionDetails(completionPanel.visitId, details);
     if (completionTimerRef.current) clearTimeout(completionTimerRef.current);
     setCompletionPanel(null);
   };
@@ -739,28 +780,16 @@ export default function LiveMap() {
   };
 
 
-  const handleTimeSplitConfirm = async ({ primaryMins, companionMins, mode }) => {
+  const handleTimeSplitConfirm = async ({ primaryMins, companionsMins, mode }) => {
     if (!timeSplit) return;
-    const { primaryVisitId, nearbyCustomer, primaryCustomer, primaryExitTime, durationSecs } = timeSplit;
+    const { primaryVisitId, companions, primaryCustomer, primaryExitTime, durationSecs } = timeSplit;
 
     const originalExitTime = primaryExitTime ?? Date.now();
     const jobStart = originalExitTime - (durationSecs * 1000);
 
-    let primaryEntryTime, primaryExitUpdated, companionEntryTime, companionExitTime;
-
-    if (mode === 'simultaneous') {
-      // Both properties run in parallel from the same start time
-      primaryEntryTime  = jobStart;
-      primaryExitUpdated  = jobStart + (primaryMins * 60 * 1000);
-      companionEntryTime  = jobStart;
-      companionExitTime   = jobStart + (companionMins * 60 * 1000);
-    } else {
-      // Sequential: Property A first, then Property B
-      primaryEntryTime  = jobStart;
-      primaryExitUpdated  = jobStart + (primaryMins * 60 * 1000);
-      companionEntryTime  = primaryExitUpdated;
-      companionExitTime   = originalExitTime;
-    }
+    // Primary
+    const primaryEntryTime = jobStart;
+    const primaryExitUpdated = jobStart + (primaryMins * 60 * 1000);
 
     // Update primary visit with corrected duration and times
     await db.visits.update(primaryVisitId, {
@@ -769,32 +798,50 @@ export default function LiveMap() {
       exitTime: primaryExitUpdated
     });
 
-    // Build companion services from route plan or fallback to first active
-    let companionPrice = 0;
-    let companionServices = [];
-    if (nearbyCustomer.services) {
-      const routeStop = activeRoute?.normalizedStops?.find(s => s.customerId === nearbyCustomer.id);
-      const plannedIds = routeStop?.plannedServiceIds || [];
-      const services = plannedIds.length > 0
-        ? nearbyCustomer.services.filter(s => plannedIds.includes(s.id))
-        : nearbyCustomer.services.filter(s => s.active).slice(0, 1);
-      companionServices = services.map(s => s.id);
-      companionPrice = services.reduce((sum, s) => sum + s.price, 0);
-    }
+    let currentSeqTime = primaryExitUpdated;
 
-    await db.visits.add({
-      routeId: activeRoute?.id ?? null,
-      customerId: nearbyCustomer.id,
-      status: 'completed',
-      durationSecs: companionMins * 60,
-      driveTimeSecs: 0,
-      entryTime: companionEntryTime,
-      exitTime: companionExitTime,
-      weather,
-      priceEarned: companionPrice,
-      appliedServices: companionServices,
-      note: `${mode === 'simultaneous' ? 'Simultaneous' : 'Split'} visit with ${primaryCustomer?.name ?? 'adjacent property'}`
-    });
+    for (const compData of companionsMins) {
+      const compCust = companions.find(c => c.id === compData.id);
+      if (!compCust) continue;
+
+      let compEntry, compExit;
+      if (mode === 'simultaneous') {
+        compEntry = jobStart;
+        compExit = jobStart + (compData.mins * 60 * 1000);
+      } else {
+        compEntry = currentSeqTime;
+        compExit = currentSeqTime + (compData.mins * 60 * 1000);
+        currentSeqTime = compExit;
+      }
+
+      // Build companion services from route plan or fallback to first active
+      let companionPrice = 0;
+      let companionServices = [];
+      if (compCust.services) {
+        const routeStop = activeRoute?.normalizedStops?.find(s => s.customerId === compCust.id);
+        const plannedIds = routeStop?.plannedServiceIds || [];
+        const services = plannedIds.length > 0
+          ? compCust.services.filter(s => plannedIds.includes(s.id))
+          : compCust.services.filter(s => s.active).slice(0, 1);
+        companionServices = services.map(s => s.id);
+        companionPrice = services.reduce((sum, s) => sum + s.price, 0);
+      }
+
+      await db.visits.add({
+        routeId: activeRoute?.id ?? null,
+        customerId: compCust.id,
+        status: 'completed',
+        durationSecs: compData.mins * 60,
+        driveTimeSecs: 0,
+        entryTime: compEntry,
+        exitTime: compExit,
+        weather,
+        priceEarned: companionPrice,
+        appliedServices: companionServices,
+        division: activeMode,
+        note: `${mode === 'simultaneous' ? 'Simultaneous' : 'Split'} visit with ${primaryCustomer?.name ?? 'adjacent property'}`
+      });
+    }
 
     setTimeSplit(null);
     setCompletionPanel(null);
@@ -806,6 +853,7 @@ export default function LiveMap() {
         name: 'Ad-hoc Route',
         status: 'active',
         isTemplate: 0,
+        division: activeMode,
         stops: [{ customerId: customer.id, plannedServiceIds: [] }],
         createdAt: Date.now()
       });
@@ -862,7 +910,7 @@ export default function LiveMap() {
       {timeSplit && (
         <TimeSplitModal
           primaryName={timeSplit.primaryCustomer?.name}
-          companionName={timeSplit.nearbyCustomer?.name}
+          companions={timeSplit.companions}
           totalSecs={timeSplit.durationSecs}
           jobStart={timeSplit.primaryExitTime ? timeSplit.primaryExitTime - timeSplit.durationSecs * 1000 : null}
           onConfirm={handleTimeSplitConfirm}
@@ -938,7 +986,11 @@ export default function LiveMap() {
         setTimeSplit={setTimeSplit}
         setIsEditJobOpen={setIsEditJobOpen}
         setActiveEpaJob={setActiveEpaJob}
-        handleSaveNote={handleSaveNote}
+        handleSaveCompletion={handleSaveCompletion}
+        onSelectionsChange={(conditions, appliedServices) => {
+          panelConditionsRef.current = conditions;
+          panelServicesRef.current = appliedServices;
+        }}
       />
 
       {isEditJobOpen && completionPanel && (
@@ -972,6 +1024,8 @@ export default function LiveMap() {
             setDialog={setDialog}
             togglePause={togglePause}
             handleManualDone={handleManualDone}
+            allVisits={allVisits}
+            globalPace={globalPace}
             onCancelJob={() => {
               activeGeofenceIdRef.current = null;
               setActiveGeofence(null);
@@ -990,113 +1044,99 @@ export default function LiveMap() {
           activeRoute ? (() => {
             if (activeRoute.status === 'pending') {
               return (
-                <div className="card animate-fade-in" style={{ padding: '1rem', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}>
-                  <div style={{ textAlign: 'center', marginBottom: '1rem' }}>
-                    <div style={{ fontSize: '0.85rem', color: 'var(--color-primary)', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '1px' }}>Pending Route</div>
-                    <strong style={{ fontSize: '1.4rem', display: 'block', color: 'var(--color-text-main)', marginTop: '0.3rem' }}>{activeRoute.name || 'Unnamed Route'}</strong>
-                    <div style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', marginTop: '0.2rem' }}>{activeRoute.expandedStops.length} Stops</div>
+                <div className="card animate-fade-in" style={{ padding: '1.3rem 1rem 1.1rem', borderRadius: '1.5rem', boxShadow: '0 4px 16px rgba(0,0,0,0.1)' }}>
+                  <div style={{ textAlign: 'center', marginBottom: '1.1rem' }}>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--color-primary)', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '1.2px' }}>Pending route</div>
+                    <strong style={{ fontSize: '1.5rem', display: 'block', color: 'var(--color-text-main)', marginTop: '0.3rem' }}>{activeRoute.name || 'Unnamed Route'}</strong>
+                    <div style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', marginTop: '0.2rem' }}>{activeRoute.expandedStops.length} stops</div>
                   </div>
-                  <button className="btn btn-primary" style={{ width: '100%', padding: '1rem', fontSize: '1.1rem', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', borderRadius: 'var(--radius-md)' }} onClick={async () => {
+                  <button style={{ width: '100%', height: '56px', border: 'none', borderRadius: '16px', background: 'var(--color-primary)', color: '#fff', fontSize: '1.1rem', fontWeight: 700, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }} onClick={async () => {
                      await db.routes.update(activeRoute.id, { status: 'active' });
-                     
+
                      // Tie the driving timer explicitly to this Start Route action!
                      resetDriveTimer(true);
                   }}>
-                    <Play fill="currentColor" size={20} /> START ROUTE
+                    <Play fill="currentColor" size={20} /> Start route
                   </button>
                 </div>
               );
             }
 
             if (nextStop) {
+              const wcode = weather?.code ?? 0;
+              let WIcon = CloudRain;
+              if (wcode === 0) WIcon = Sun;
+              else if (wcode <= 2) WIcon = CloudSun;
+              else if (wcode === 3 || wcode <= 49) WIcon = Cloud;
+              else if (wcode <= 55) WIcon = CloudDrizzle;
+              else if (wcode <= 77 || wcode <= 86) WIcon = CloudSnow;
+              else if (wcode <= 99) WIcon = CloudLightning;
+              const driveColor = isDrivingPaused ? 'var(--color-warning)' : 'var(--color-primary)';
               return (
-                <div className="card animate-fade-in" style={{ padding: '0.8rem', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}>
+                <div className="card animate-fade-in" style={{ padding: '0.9rem 1rem 1rem', borderRadius: '1.5rem', boxShadow: '0 4px 16px rgba(0,0,0,0.1)' }}>
                   {pendingArrival && (
-                    <div style={{ marginBottom: '0.6rem', padding: '0.5rem 0.8rem', borderRadius: 'var(--radius-sm)', background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.35)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--color-primary)' }}>📍 Arriving at {pendingArrival.name}...</span>
+                    <div style={{ marginBottom: '0.7rem', padding: '0.5rem 0.8rem', borderRadius: 'var(--radius-sm)', background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.35)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '0.82rem', fontWeight: 700, color: 'var(--color-primary)' }}>Arriving at {pendingArrival.name}…</span>
                       <span style={{ fontSize: '0.85rem', fontWeight: 800, fontFamily: 'monospace', color: 'var(--color-primary)' }}>{pendingArrival.secondsLeft}s</span>
                     </div>
                   )}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.8rem' }}>
-                    <div>
-                      <div style={{ fontSize: '0.75rem', color: 'var(--color-primary)', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '2px' }}>Next Job</div>
-                      <strong style={{ fontSize: '1.2rem', display: 'block', color: 'var(--color-text-main)', lineHeight: 1.2 }}>{nextStop.name}</strong>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', marginTop: '2px' }}>{nextStop.address}</div>
-                      {weather && (() => {
-                        const code = weather.code ?? 0;
-                        let Icon = CloudRain;
-                        if (code === 0) Icon = Sun;
-                        else if (code <= 2) Icon = CloudSun;
-                        else if (code === 3 || code <= 49) Icon = Cloud;
-                        else if (code <= 55) Icon = CloudDrizzle;
-                        else if (code <= 77 || code <= 86) Icon = CloudSnow;
-                        else if (code <= 99) Icon = CloudLightning;
-                        return (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', marginTop: '0.4rem', color: 'var(--color-text-muted)', fontSize: '0.8rem', fontWeight: 600 }}>
-                            <Icon size={14} color="var(--color-primary)" />
-                            <span>{weather.temp}°F · {weather.wind} mph</span>
-                          </div>
-                        );
-                      })()}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: '0.7rem', color: 'var(--color-primary)', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '1.2px' }}>Next job</div>
+                      <strong style={{ fontSize: '1.4rem', display: 'block', color: 'var(--color-text-main)', lineHeight: 1.1 }}>{nextStop.name}</strong>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>{nextStop.address}</div>
+                      {weather && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', marginTop: '0.4rem', color: 'var(--color-text-muted)', fontSize: '0.8rem', fontWeight: 600 }}>
+                          <WIcon size={14} color="var(--color-primary)" />
+                          <span>{weather.temp}°F · {weather.wind} mph</span>
+                        </div>
+                      )}
                     </div>
-                    <div style={{ textAlign: 'right', display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-                      <div style={{ 
-                        background: isDrivingPaused ? 'rgba(245,158,11,0.1)' : 'rgba(16,185,129,0.1)', 
-                        border: `1px solid ${isDrivingPaused ? 'rgba(245,158,11,0.3)' : 'rgba(16,185,129,0.3)'}`,
-                        borderRadius: 'var(--radius-full)', 
-                        padding: '0.2rem 0.6rem', 
-                        display: 'flex', 
-                        alignItems: 'center', 
-                        gap: '0.4rem',
-                        marginBottom: '0.4rem'
-                      }}>
-                        <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: isDrivingPaused ? 'var(--color-warning)' : 'var(--color-primary)' }} />
-                        <span style={{ fontSize: '1.1rem', fontWeight: 800, fontFamily: 'monospace', color: isDrivingPaused ? 'var(--color-warning)' : 'var(--color-primary)', fontVariantNumeric: 'tabular-nums' }}>
-                          {formatLiveTimer(drivingDuration)}
-                        </span>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', justifyContent: 'flex-end', marginTop: '0.2rem' }}>
-                        {isDrivingPaused && drivingDuration === 0 ? (
-                          <button 
-                            className="btn btn-primary"
-                            style={{ padding: '0.2rem 0.6rem', fontSize: '0.75rem', fontWeight: 700, borderRadius: '4px' }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              resetDriveTimer(true);
-                            }}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0 }}>
+                      {isDrivingPaused && drivingDuration === 0 ? (
+                        <button
+                          style={{ padding: '0.4rem 0.8rem', fontSize: '0.75rem', fontWeight: 700, borderRadius: '12px', background: 'var(--color-primary)', color: '#fff', border: 'none', display: 'flex', alignItems: 'center', gap: '0.3rem', cursor: 'pointer' }}
+                          onClick={(e) => { e.stopPropagation(); resetDriveTimer(true); }}
+                        >
+                          <Play size={12} fill="currentColor" /> START DRIVING
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            aria-label={isDrivingPaused ? 'Resume driving' : 'Pause driving'}
+                            style={{ width: '34px', height: '34px', borderRadius: '50%', background: 'var(--color-bg-main)', color: driveColor, border: '1px solid var(--color-border)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}
+                            onClick={(e) => { e.stopPropagation(); toggleDrivePause(); }}
                           >
-                            <Play size={12} fill="currentColor" style={{ marginRight: '4px' }}/> START DRIVING
+                            {isDrivingPaused ? <Play size={16} fill="currentColor" /> : <Pause size={16} fill="currentColor" />}
                           </button>
-                        ) : (
-                          <button 
-                            className="btn"
-                            style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem', borderRadius: 'var(--radius-md)', background: isDrivingPaused ? 'var(--color-primary)' : 'var(--color-bg-card)', color: isDrivingPaused ? '#fff' : 'var(--color-text-main)', border: `1px solid ${isDrivingPaused ? 'var(--color-primary)' : 'var(--color-border)'}`, display: 'flex', alignItems: 'center', gap: '0.3rem' }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              toggleDrivePause();
-                            }}
-                          >
-                            {isDrivingPaused ? <Play size={14} fill="currentColor" /> : <Pause size={14} fill="currentColor" />}
-                            {isDrivingPaused ? 'RESUME' : 'PAUSE'}
-                          </button>
-                        )}
-                      </div>
+                          <div style={{ background: 'var(--color-bg-main)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-full)', padding: '0.25rem 0.7rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: driveColor }} />
+                            <span style={{ fontSize: '1.05rem', fontWeight: 800, fontFamily: 'monospace', color: driveColor, fontVariantNumeric: 'tabular-nums' }}>
+                              {formatLiveTimer(drivingDuration)}
+                            </span>
+                          </div>
+                        </>
+                      )}
                     </div>
                   </div>
 
-                  <div style={{ display: 'flex', gap: '0.6rem' }}>
-                    <button className="btn btn-primary" style={{ flex: 2, padding: '0.6rem', fontSize: '0.95rem', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.4rem' }} onClick={() => {
+                  <div style={{ display: 'flex', gap: '0.6rem', marginTop: '0.9rem' }}>
+                    <button style={{ flex: 2, height: '54px', border: 'none', borderRadius: '16px', background: 'var(--color-primary)', color: '#fff', fontSize: '1rem', fontWeight: 700, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }} onClick={() => {
                       anchorGeofenceRef.current = currentPosition ? { lat: currentPosition.lat, lng: currentPosition.lng } : 'no-gps';
                       dismissedOpportunitiesRef.current.clear();
                       if (engineRef.current) {
                         engineRef.current.manualStartJob(nextStop);
                       }
                     }}>
-                      <Play fill="currentColor" size={16} /> START JOB
+                      <Play fill="currentColor" size={18} /> Start job
                     </button>
-                    <button className="btn btn-secondary" style={{ flex: 1, padding: '0.6rem', fontSize: '0.9rem', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.4rem' }} onClick={() => handleSkipStop(nextStop)}>
-                      <SkipForward size={14} /> SKIP
+                    <button style={{ flex: 1, height: '54px', borderRadius: '16px', background: 'var(--color-bg-main)', color: 'var(--color-text-main)', border: '1px solid var(--color-border)', fontSize: '0.9rem', fontWeight: 600, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }} onClick={() => handleSkipStop(nextStop)}>
+                      <SkipForward size={16} /> Skip
                     </button>
+                  </div>
+
+                  <div style={{ marginTop: '0.5rem' }}>
+                    <CustomerDetailsDropdown customer={nextStop} allVisits={allVisits} globalPace={globalPace} darkTheme={true} />
                   </div>
                 </div>
               );

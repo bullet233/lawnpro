@@ -8,12 +8,26 @@ const fmtInputTime = (d) => {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 };
 
+const fmtInputDate = (d) => {
+  if (!d) return '';
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+};
+
+const CONDITIONS = [
+  { id: 'overgrown', label: 'Overgrown' },
+  { id: 'wet', label: 'Wet/Soggy' },
+  { id: 'debris', label: 'Lots of Debris' },
+  { id: 'dry', label: 'Dry/Burnt' }
+];
+
 const VisitEditModal = ({ job, customer, defaultServices, onClose, onSave }) => {
   const [editingServices, setEditingServices] = useState([]);
+  const [editingConditions, setEditingConditions] = useState([]);
   const [editingNote, setEditingNote] = useState('');
   const [editingDuration, setEditingDuration] = useState('');
   const [editingDrive, setEditingDrive] = useState('');
   const [editingPrice, setEditingPrice] = useState('');
+  const [editingDate, setEditingDate] = useState('');
   const [editingEntryTime, setEditingEntryTime] = useState('');
   const [editingExitTime, setEditingExitTime] = useState('');
 
@@ -24,10 +38,12 @@ const VisitEditModal = ({ job, customer, defaultServices, onClose, onSave }) => 
   useEffect(() => {
     if (job) {
       setEditingServices(job.appliedServices || []);
+      setEditingConditions(job.conditions || []);
       setEditingPrice(job.priceEarned != null ? job.priceEarned.toString() : '0');
       setEditingDuration(Math.floor((job.durationSecs || 0) / 60).toString());
       setEditingDrive(Math.floor((job.driveTimeSecs || 0) / 60).toString());
       setEditingNote(job.note || '');
+      setEditingDate(job.exitTime ? fmtInputDate(new Date(job.exitTime)) : '');
       setEditingEntryTime(job.entryTime ? fmtInputTime(new Date(job.entryTime)) : '');
       setEditingExitTime(job.exitTime ? fmtInputTime(new Date(job.exitTime)) : '');
     }
@@ -102,18 +118,30 @@ const VisitEditModal = ({ job, customer, defaultServices, onClose, onSave }) => 
     }
 
     let updatedEntryTime = job.entryTime;
-    if (editingEntryTime) {
-      const [h, m] = editingEntryTime.split(':');
+    if (editingDate || editingEntryTime) {
       const d = job.entryTime ? new Date(job.entryTime) : new Date(job.createdAt || Date.now());
-      d.setHours(parseInt(h), parseInt(m), 0);
+      if (editingDate) {
+        const [y, mo, da] = editingDate.split('-');
+        d.setFullYear(parseInt(y), parseInt(mo) - 1, parseInt(da));
+      }
+      if (editingEntryTime) {
+        const [h, m] = editingEntryTime.split(':');
+        d.setHours(parseInt(h), parseInt(m), 0);
+      }
       updatedEntryTime = d.getTime();
     }
 
     let updatedExitTime = job.exitTime;
-    if (editingExitTime) {
-      const [h, m] = editingExitTime.split(':');
+    if (editingDate || editingExitTime) {
       const d = job.exitTime ? new Date(job.exitTime) : new Date(job.createdAt || Date.now());
-      d.setHours(parseInt(h), parseInt(m), 0);
+      if (editingDate) {
+        const [y, mo, da] = editingDate.split('-');
+        d.setFullYear(parseInt(y), parseInt(mo) - 1, parseInt(da));
+      }
+      if (editingExitTime) {
+        const [h, m] = editingExitTime.split(':');
+        d.setHours(parseInt(h), parseInt(m), 0);
+      }
       updatedExitTime = d.getTime();
     }
 
@@ -124,6 +152,7 @@ const VisitEditModal = ({ job, customer, defaultServices, onClose, onSave }) => 
       entryTime: updatedEntryTime,
       exitTime: updatedExitTime,
       appliedServices: editingServices,
+      conditions: editingConditions,
       note: editingNote || undefined
     };
 
@@ -163,16 +192,23 @@ const VisitEditModal = ({ job, customer, defaultServices, onClose, onSave }) => 
           </button>
         </div>
       <div>
-        <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
-          <div style={{ flex: 1, minWidth: '100px' }}>
+        <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem' }}>
+          <div style={{ flex: 1 }}>
+            <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.75rem' }}>Date</label>
+            <input type="date" className="input-field" style={{ width: '100%', padding: '0.4rem' }} value={editingDate} onChange={e => setEditingDate(e.target.value)} />
+          </div>
+          <div style={{ flex: 1, minWidth: '80px' }}>
             <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.75rem' }}>Price ($)</label>
             <input type="number" step="0.01" className="input-field" style={{ width: '100%', padding: '0.4rem' }} value={editingPrice} onChange={e => setEditingPrice(e.target.value)} />
           </div>
-          <div style={{ flex: 1, minWidth: '100px' }}>
+        </div>
+
+        <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem' }}>
+          <div style={{ flex: 1 }}>
             <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.75rem' }}>Start Time</label>
             <input type="time" className="input-field" style={{ width: '100%', padding: '0.4rem' }} value={editingEntryTime} onChange={e => handleTimeChange('entry', e.target.value)} />
           </div>
-          <div style={{ flex: 1, minWidth: '100px' }}>
+          <div style={{ flex: 1 }}>
             <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem', fontSize: '0.75rem' }}>End Time</label>
             <input type="time" className="input-field" style={{ width: '100%', padding: '0.4rem' }} value={editingExitTime} onChange={e => handleTimeChange('exit', e.target.value)} />
           </div>
@@ -234,6 +270,30 @@ const VisitEditModal = ({ job, customer, defaultServices, onClose, onSave }) => 
             })}
           </div>
         )}
+
+        <div style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', marginBottom: '0.5rem', marginTop: '1rem' }}>
+          Conditions:
+        </div>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '1.5rem' }}>
+          {CONDITIONS.map(c => {
+            const checked = editingConditions.includes(c.id);
+            return (
+              <label key={c.id} style={{
+                display: 'flex', alignItems: 'center', gap: '0.3rem', padding: '0.3rem 0.7rem',
+                borderRadius: '999px', border: `1px solid ${checked ? 'var(--color-primary)' : 'var(--color-border)'}`,
+                background: checked ? 'rgba(16,185,129,0.1)' : 'var(--color-bg-card)',
+                cursor: 'pointer', fontSize: '0.82rem', userSelect: 'none', transition: 'all 0.15s'
+              }}>
+                <input type="checkbox" checked={checked} onChange={e => {
+                  const isChecked = e.target.checked;
+                  setEditingConditions(p => isChecked ? [...p, c.id] : p.filter(id => id !== c.id));
+                }} style={{ display: 'none' }} />
+                {checked && <CheckCircle size={12} color="var(--color-primary)" />}
+                {c.label}
+              </label>
+            );
+          })}
+        </div>
 
         <div style={{ display: 'flex', gap: '0.5rem' }}>
           <button className="btn btn-secondary" style={{ flex: 1, padding: '0.8rem' }} onClick={onClose}>
