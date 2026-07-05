@@ -81,11 +81,28 @@ export function deleteProgram(id) {
 // Seed the built-in program if the user has none. Idempotent — safe to call on
 // every app launch (covers both fresh installs and upgraded DBs, since Dexie
 // .upgrade() does not run for brand-new databases).
-export async function ensureDefaultProgram() {
-  const count = await db.treatmentPrograms.count();
-  if (count === 0) {
-    await db.treatmentPrograms.add({ ...STANDARD_5_STEP });
+//
+// Guarded two ways: a module-level in-flight promise dedupes concurrent calls
+// (React StrictMode double-invokes the startup effect, which previously raced
+// two count===0 checks into two inserts), and any pre-existing duplicates from
+// that old bug are collapsed to one on the next launch.
+let _seedPromise = null;
+export function ensureDefaultProgram() {
+  if (!_seedPromise) {
+    _seedPromise = (async () => {
+      const all = await db.treatmentPrograms.toArray();
+      if (all.length === 0) {
+        await db.treatmentPrograms.add({ ...STANDARD_5_STEP });
+        return;
+      }
+      // Clean up duplicate built-ins seeded by the earlier race.
+      const builtIns = all.filter(p => p.name === STANDARD_5_STEP.name);
+      if (builtIns.length > 1) {
+        await db.treatmentPrograms.bulkDelete(builtIns.slice(1).map(p => p.id));
+      }
+    })().catch(err => { _seedPromise = null; throw err; });
   }
+  return _seedPromise;
 }
 
 // ── Enrollment + schedule generation ─────────────────────────────────────────
@@ -99,11 +116,16 @@ export async function enrollCustomer(customerId, programId, year = new Date().ge
   await db.customers.update(customerId, { treatmentProgramId: programId, treatmentProgramYear: year });
 
   const existing = await db.treatments.where({ customerId }).toArray();
+  const now = Date.now();
   const toCreate = [];
   for (const step of program.steps || []) {
     const already = existing.some(t => t.programId === programId && t.stepId === step.id && t.year === year);
     if (already) continue;
     const { start, end } = stepWindow(step, year);
+    // Enrolling mid-season: steps whose window already fully passed are recorded
+    // as auto-skipped rather than 'scheduled', so they don't flood Needs Attention
+    // with overdue alerts for applications that were never going to happen.
+    const windowPassed = end < now;
     toCreate.push({
       customerId,
       programId,
@@ -112,7 +134,7 @@ export async function enrollCustomer(customerId, programId, year = new Date().ge
       stepOrder: step.order,
       category: step.category,
       year,
-      status: 'scheduled',
+      status: windowPassed ? 'skipped' : 'scheduled',
       dueDate: start,
       dueWindowStart: start,
       dueWindowEnd: end,
@@ -121,7 +143,7 @@ export async function enrollCustomer(customerId, programId, year = new Date().ge
       durationSecs: 0,
       weather: null,
       complianceLog: null,
-      note: ''
+      note: windowPassed ? 'Auto-skipped — enrolled after this step’s window' : ''
     });
   }
   if (toCreate.length) await db.treatments.bulkAdd(toCreate);

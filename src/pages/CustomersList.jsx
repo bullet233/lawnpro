@@ -571,7 +571,7 @@ export default function CustomersList() {
             </div>
           )}
         </div>
-        <div style={{ display: 'flex', gap: '0.6rem' }}>
+        <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
           <button className="btn btn-secondary" onClick={() => setViewMode(viewMode === 'cards' ? 'table' : 'cards')}>
             {viewMode === 'cards' ? 'Table View' : 'Card View'}
           </button>

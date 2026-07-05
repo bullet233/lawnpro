@@ -6,7 +6,7 @@ import { parseLawnSizeToSqFt, calculateTieredMatrix, calculatePowerModel, predic
 import { trackApiCall } from '../utils/apiTracker';
 import { GOOGLE_MAPS_API_KEY } from '../components/MapProvider';
 import { TrendingUp, Calculator, AlertCircle, Fuel, DollarSign, ArrowUp, ArrowDown, Edit2, Save, X, MapPin, AlertTriangle } from 'lucide-react';
-import { Autocomplete } from '@react-google-maps/api';
+import AddressAutocomplete from '../components/AddressAutocomplete';
 import { useServiceMode } from '../components/ServiceProvider';
 import { toast } from '../utils/toast';
 
@@ -1316,7 +1316,7 @@ export default function Analytics() {
               />
               <div style={{ position: 'relative', flex: '1.5 1 200px' }}>
                 <MapPin size={16} color="var(--color-text-muted)" style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', zIndex: 1 }} />
-                <Autocomplete onLoad={onAutocompleteLoad} onPlaceChanged={onPlaceChanged}>
+                <AddressAutocomplete onLoad={onAutocompleteLoad} onPlaceChanged={onPlaceChanged}>
                   <input
                     type="text"
                     className="input-field"
@@ -1326,7 +1326,7 @@ export default function Analytics() {
                     onKeyDown={e => e.key === 'Enter' && handleCalculateBid()}
                     style={{ width: '100%', paddingLeft: '2.2rem' }}
                   />
-                </Autocomplete>
+                </AddressAutocomplete>
               </div>
             </div>
             <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.8rem', flexWrap: 'wrap' }}>

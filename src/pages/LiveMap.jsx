@@ -21,7 +21,7 @@ import { parseLawnSizeToSqFt } from '../utils/parseLawnSize';
 import ComplianceLogModal from '../components/ComplianceLogModal';
 
 
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import DayReviewModal from '../components/DayReviewModal';
 import AppDialog from '../components/AppDialog';
 import TimeSplitModal from '../components/TimeSplitModal';
@@ -43,9 +43,22 @@ const getDistance = (lat1, lon1, lat2, lon2) => {
 
 export default function LiveMap() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { activeMode } = useServiceMode();
 
-  const { position, positionRef, speed, heading, poorGps, accuracy } = useGeolocation();
+  // LiveMap stays mounted on every route to preserve job/timer state, so only
+  // run the GPS watch when it's actually useful: the Live view is showing, or a
+  // route is currently running (so background auto-tracking survives a tab
+  // switch mid-workday). Otherwise the radio stays off — no battery drain / error
+  // spam while browsing Stats or Clients at home.
+  const isLiveView = location.pathname === '/live';
+  const hasRunningRoute = useLiveQuery(async () => {
+    const running = await db.routes.where('status').equals('active').toArray();
+    return running.length > 0;
+  }, []) || false;
+  const trackingEnabled = isLiveView || hasRunningRoute;
+
+  const { position, positionRef, speed, heading, poorGps, accuracy } = useGeolocation(trackingEnabled);
   const { weather, weatherRef } = useWeatherTracker(positionRef);
   
   const { 

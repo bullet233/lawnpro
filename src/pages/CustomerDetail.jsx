@@ -4,7 +4,7 @@ import { db } from '../db/db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { MapPin, Save, ArrowLeft, Trash2, BarChart3, Clock, DollarSign, Calendar, Hash, Edit2 } from 'lucide-react';
 import GeofenceEditor from '../components/GeofenceEditor';
-import { Autocomplete } from '@react-google-maps/api';
+import AddressAutocomplete from '../components/AddressAutocomplete';
 import AppDialog from '../components/AppDialog';
 import VisitEditModal from '../components/VisitEditModal';
 import ManualVisitModal from '../components/ManualVisitModal';
@@ -456,16 +456,16 @@ export default function CustomerDetail() {
             
             <div className="input-group">
               <label className="input-label">Property Address</label>
-              <Autocomplete onLoad={onAutocompleteLoad} onPlaceChanged={onPlaceChanged}>
-                <input 
-                  type="text" 
-                  className="input-field" 
-                  value={formData.address} 
-                  onChange={e => setFormData({ ...formData, address: e.target.value })} 
+              <AddressAutocomplete onLoad={onAutocompleteLoad} onPlaceChanged={onPlaceChanged}>
+                <input
+                  type="text"
+                  className="input-field"
+                  value={formData.address}
+                  onChange={e => setFormData({ ...formData, address: e.target.value })}
                   placeholder="123 Main St"
                   style={{ width: '100%' }}
                 />
-              </Autocomplete>
+              </AddressAutocomplete>
             </div>
             </div>
 

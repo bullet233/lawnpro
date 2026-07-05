@@ -248,6 +248,22 @@ button:focus-visible {
   animation: fadeIn 0.4s ease-out forwards;
 }
 
+/* Route Builder: two columns (clients | route) on tablet+, stacked on phones
+   so the route you're building isn't pushed off-screen. */
+.route-build-grid {
+  grid-template-columns: 1fr;
+}
+/* Grid items default to min-width:auto, which lets a wide child (long address
+   rows) push the column past the viewport. Allow the columns to shrink. */
+.route-build-grid > * {
+  min-width: 0;
+}
+@media (min-width: 768px) {
+  .route-build-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
 /* Bottom Navigation */
 .bottom-nav {
   position: fixed;

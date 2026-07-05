@@ -408,7 +408,7 @@ export default function RouteBuilder() {
       )}
 
       {activeTab === 'build' && (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', alignItems: 'start' }}>
+        <div className="route-build-grid" style={{ display: 'grid', gap: '1rem', alignItems: 'start' }}>
           
           {/* COLUMN 1: Templates & Available Clients */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>

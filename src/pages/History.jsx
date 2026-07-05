@@ -43,7 +43,9 @@ export default function History() {
   const allVisits    = useLiveQuery(() => db.visits.toArray(),    []) || [];
   const allCustomers = useLiveQuery(() => db.customers.toArray(), []) || [];
 
-  const [timeFilter,     setTimeFilter]     = useState('today');
+  // Default to the last 7 days, not 'today' — Logs opened first thing in the
+  // morning (before any work) would otherwise be empty every day.
+  const [timeFilter,     setTimeFilter]     = useState('week');
   const [customerFilter, setCustomerFilter] = useState('all');
   const [statusFilter,   setStatusFilter]   = useState('all');
   const [serviceFilter,  setServiceFilter]  = useState('all');
@@ -464,17 +466,24 @@ export default function History() {
                 <div style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-primary)', borderBottom: '4px solid var(--color-primary)', borderRadius: 'var(--radius-md)', padding: '1.2rem', textAlign: 'center', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
                   <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px', marginBottom: '0.3rem', fontWeight: 700 }}>Total Revenue</div>
                   <div style={{ fontWeight: 800, fontSize: '1.6rem', color: 'var(--color-primary)', lineHeight: 1, marginBottom: '0.5rem' }}>${totals.revenue.toFixed(2)}</div>
-                  {Object.keys(totals.serviceBreakdown || {}).length > 0 && (
+                  {Object.entries(totals.serviceBreakdown || {}).filter(([, amt]) => amt >= 0.01).length > 0 && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', borderTop: '1px solid rgba(16,185,129,0.2)', paddingTop: '0.5rem', marginTop: '0.2rem' }}>
-                      {Object.entries(totals.serviceBreakdown).sort((a, b) => b[1] - a[1]).map(([sId, amt]) => {
-                        const sName = settings?.defaultServices?.find(s => s.id === sId)?.name || sId;
-                        return (
-                          <div key={sId} style={{ fontSize: '0.75rem', display: 'flex', justifyContent: 'space-between', color: 'var(--color-text-main)' }}>
-                            <span style={{ opacity: 0.8 }}>{sName}</span>
-                            <span style={{ fontWeight: 600 }}>${amt.toFixed(2)}</span>
-                          </div>
-                        );
-                      })}
+                      {Object.entries(totals.serviceBreakdown)
+                        .filter(([, amt]) => amt >= 0.01) // hide $0 rows (e.g. inactive/legacy service ids)
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([sId, amt]) => {
+                          // Resolve the display name: default templates, then any customer's
+                          // custom service with that id, else a friendly "Other" (never a raw id).
+                          const sName = settings?.defaultServices?.find(s => s.id === sId)?.name
+                            || (allCustomers || []).flatMap(c => c.services || []).find(s => s.id === sId)?.name
+                            || 'Other';
+                          return (
+                            <div key={sId} style={{ fontSize: '0.75rem', display: 'flex', justifyContent: 'space-between', color: 'var(--color-text-main)' }}>
+                              <span style={{ opacity: 0.8 }}>{sName}</span>
+                              <span style={{ fontWeight: 600 }}>${amt.toFixed(2)}</span>
+                            </div>
+                          );
+                        })}
                     </div>
                   )}
                 </div>

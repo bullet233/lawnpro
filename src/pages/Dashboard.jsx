@@ -252,34 +252,31 @@ export default function Dashboard() {
     };
   }, [todayVisits, allCustomers]);
 
-  // Weekly earnings data (current calendar week starting Sunday)
+  // Rolling last 7 days ending today (not the Sunday-anchored calendar week),
+  // so the chart still shows a full week of work early in the week instead of
+  // reading $0 every Sunday/Monday morning.
   const weeklyData = useMemo(() => {
     const days = [];
     const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    
-    const today = getBusinessDayStart();
-    const currentDayOfWeek = today.getDay(); // 0 is Sunday
-    
-    // Find the Sunday of the current week
-    const startOfWeek = new Date(today);
-    startOfWeek.setDate(today.getDate() - currentDayOfWeek);
 
-    for (let i = 0; i < 7; i++) {
-      const startOfDay = new Date(startOfWeek);
-      startOfDay.setDate(startOfWeek.getDate() + i);
+    const today = getBusinessDayStart();
+
+    for (let i = 6; i >= 0; i--) {
+      const startOfDay = new Date(today);
+      startOfDay.setDate(today.getDate() - i);
       const endOfDay = new Date(startOfDay);
       endOfDay.setDate(endOfDay.getDate() + 1);
       endOfDay.setMilliseconds(-1);
-      
+
       const dayRevenue = filteredAllVisits
         .filter(v => v.exitTime >= startOfDay.getTime() && v.exitTime <= endOfDay.getTime() && v.status !== 'skipped')
         .reduce((s, v) => s + (Number(v.priceEarned) || 0), 0);
-        
-      days.push({ 
-        label: dayNames[startOfDay.getDay()], 
+
+      days.push({
+        label: dayNames[startOfDay.getDay()],
         revenue: dayRevenue,
-        isFuture: startOfDay > today,
-        isToday: startOfDay.getTime() === today.getTime()
+        isFuture: false,
+        isToday: i === 0
       });
     }
     return days;
@@ -728,7 +725,7 @@ export default function Dashboard() {
       {/* Weekly Earnings */}
       <div style={{ marginTop: '1.5rem' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem' }}>
-          <h3 style={{ margin: 0, color: 'var(--color-text-main)', fontSize: '1.1rem' }}>This Week</h3>
+          <h3 style={{ margin: 0, color: 'var(--color-text-main)', fontSize: '1.1rem' }}>Last 7 Days</h3>
           <span style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--color-primary)' }}>${weekTotal.toFixed(2)}</span>
         </div>
         <div className="glass-card" style={{ padding: '1rem 0.8rem 0.5rem' }}>
