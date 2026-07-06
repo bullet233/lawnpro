@@ -208,7 +208,7 @@ function disarmDraw() {
   $("drawHint").hidden = true;
 }
 function currentHint() {
-  if (state.drawShape === "line") return "Click points along the line. Double-click to finish (Backspace to undo a point, Esc to cancel).";
+  if (state.drawShape === "line") return "Click points along the line. Tap the last point again (or double-click) to finish.";
   const role = state.drawMode === "boundary" ? "the area" : "the part to remove";
   if (state.drawShape === "rectangle") return "Click two opposite corners of " + role + ".";
   if (state.drawShape === "circle") return "Click the centre of " + role + ", then click again to set the size.";
@@ -234,10 +234,11 @@ function armDraw(cb) {
   drawerListeners.push(map.addListener("dblclick", drawerDblHandler));
   // FIX (Ghost Drag): Google Maps can get stuck thinking the mouse button is held down
   // and then permanently suppresses its own "mousemove" events, freezing the preview
-  // line. Bypass it entirely — listen to the RAW DOM mousemove on the map container,
-  // which the browser always fires, and convert pixels→LatLng via the projection bridge.
+  // line. Bypass it entirely — listen to the RAW DOM pointermove on the map container
+  // (fires for mouse AND touch, so phones get the live preview too), and convert
+  // pixels→LatLng via the projection bridge.
   const mapEl = document.getElementById("map");
-  drawerListeners.push(google.maps.event.addDomListener(mapEl, "mousemove", domMove));
+  drawerListeners.push(google.maps.event.addDomListener(mapEl, "pointermove", domMove));
   $("drawHintText").textContent = currentHint();
   $("drawHint").hidden = false;
 }
@@ -250,16 +251,36 @@ function finishLine() {
   if (tempPts.length < 2) return;
   finishShape({ type: "line", path: tempPts.map((p) => ({ lat: p.lat(), lng: p.lng() })) });
 }
-// Remove the last-placed point of an in-progress line (Backspace / Undo while drawing).
-function removeLastLinePoint() {
-  if (state.drawShape !== "line" || !tempPts.length) return;
+// Remove the last-placed point of an in-progress trace — line OR polygon corner
+// (Backspace / toolbar Undo while drawing). Before this, a mis-tapped polygon
+// corner meant cancelling and re-tracing the whole boundary.
+function removeLastTracePoint() {
+  if (!tempPts.length || (state.drawShape !== "line" && state.drawShape !== "polygon")) return;
   tempPts.pop();
   const m = tempMarkers.pop(); if (m) m.setMap(null);
   if (tempOverlay) tempOverlay.setPath(tempPts);
-  const ht = $("drawHintText");
-  if (ht) ht.textContent = tempPts.length
-    ? "Line: " + fmtLen(lineLength(tempPts.map((p) => ({ lat: p.lat(), lng: p.lng() })))) + " — double-click to finish."
-    : currentHint();
+  updateTraceHint(null);
+  syncUndoBtn();
+}
+// Live hint while tracing: running length for lines, running AREA for polygons —
+// so a quick ballpark is readable before the shape is even closed.
+function updateTraceHint(cursorLL) {
+  const ht = $("drawHintText"); if (!ht) return;
+  const pts = cursorLL ? tempPts.concat([cursorLL]) : tempPts;
+  if (state.drawShape === "line") {
+    ht.textContent = pts.length >= 2
+      ? "Line: " + fmtLen(lineLength(pts.map((p) => ({ lat: p.lat(), lng: p.lng() })))) + " — tap the last point to finish."
+      : currentHint();
+  } else if (state.drawShape === "polygon") {
+    ht.textContent = pts.length >= 3
+      ? "Area: " + fmtArea(google.maps.geometry.spherical.computeArea(pts)) + " — tap the first dot to close."
+      : currentHint();
+  }
+}
+// The toolbar Undo button doubles as "remove last point" mid-trace, so it must
+// light up while points are placed even though the undo stack is untouched.
+function syncUndoBtn() {
+  const ub = $("undoBtn"); if (ub) ub.disabled = !(tempPts.length || undoStack.length);
 }
 // Raw-DOM mousemove handler: convert browser pixels → LatLng using the invisible
 // projOverlay, then feed our normal preview pipeline. Immune to the Ghost Drag freeze.
@@ -290,6 +311,9 @@ function metersPerPixel() {
   const lat = map.getCenter().lat();
   return 156543.03392 * Math.cos((lat * Math.PI) / 180) / Math.pow(2, map.getZoom());
 }
+// Snap/close radius in screen pixels. Fingertips are far less precise than a mouse
+// cursor, so touch devices get a wider target for closing shapes and magnetic snap.
+const SNAP_PX = (typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches) ? 24 : 14;
 // The first vertex is a static target dot — grows to a large green ring when close enough to snap shut.
 function setFirstDotStyle(snap) {
   const m = tempMarkers[0];
@@ -333,7 +357,7 @@ function getMagneticSnap(ll) {
   if (state.settings.magneticSnap === false || !snapCandidates.length) return ll;
   const lat = ll.lat(), lng = ll.lng();
   const mLat = 111320, mLng = 111320 * Math.cos((lat * Math.PI) / 180);
-  const thr = 14 * metersPerPixel(), thr2 = thr * thr;
+  const thr = SNAP_PX * metersPerPixel(), thr2 = thr * thr;
   let best = null, bestD2 = thr2;
   for (let i = 0; i < snapCandidates.length; i++) {
     const c = snapCandidates[i];
@@ -347,8 +371,16 @@ function getMagneticSnap(ll) {
 function drawerClick(e) {
   const ll = getMagneticSnap(e.latLng);
   if (state.drawShape === "line") {
+    // Tapping the LAST placed point finishes the line — the touch-friendly
+    // counterpart to double-click, which double-tap zoom eats on phones.
+    if (tempPts.length >= 2 &&
+        google.maps.geometry.spherical.computeDistanceBetween(ll, tempPts[tempPts.length - 1]) < SNAP_PX * metersPerPixel()) {
+      finishLine(); return;
+    }
     tempPts.push(ll); ensureTemp(); tempOverlay.setPath(tempPts);
     tempMarkers.push(vertexDot(ll));
+    updateTraceHint(null);
+    syncUndoBtn();
     return;
   }
   if (state.drawShape === "polygon") {
@@ -356,12 +388,14 @@ function drawerClick(e) {
     // via the snap flag) so it works even when placing points quickly without a
     // mousemove in between. Redundant points are cleaned up by simplifyGeom on commit.
     if (tempPts.length >= 3 &&
-        (snapping || google.maps.geometry.spherical.computeDistanceBetween(ll, tempPts[0]) < 14 * metersPerPixel())) {
+        (snapping || google.maps.geometry.spherical.computeDistanceBetween(ll, tempPts[0]) < SNAP_PX * metersPerPixel())) {
       finishShape({ type: "polygon", path: tempPts.map((p) => ({ lat: p.lat(), lng: p.lng() })) }); return;
     }
     tempPts.push(ll); ensureTemp(); tempOverlay.setPath(tempPts);
     tempMarkers.push(vertexDot(ll));
     if (tempPts.length === 1) setFirstDotStyle(false);
+    updateTraceHint(null);
+    syncUndoBtn();
   } else if (state.drawShape === "rectangle") {
     if (!tempStart) { tempStart = ll; ensureTemp(); }
     else finishShape({ type: "rectangle", bounds: rectBounds(tempStart, ll) });
@@ -386,23 +420,28 @@ function processMove() {
       if (!tempPts.length) return;
       ensureTemp();
       tempOverlay.setPath(tempPts.concat([ll]));
-      const ht = $("drawHintText"); if (ht) ht.textContent = "Line: " + fmtLen(lineLength(tempPts.concat([ll]).map(p => ({ lat: p.lat(), lng: p.lng() })))) + " — double-click to finish.";
+      updateTraceHint(ll);
       return;
     }
     if (state.drawShape === "polygon") {
       if (!tempPts.length) return;
       ensureTemp();
       let snap = false, preview = tempPts.concat([ll]);
-      if (tempPts.length >= 3 && google.maps.geometry.spherical.computeDistanceBetween(ll, tempPts[0]) < 14 * metersPerPixel()) {
+      if (tempPts.length >= 3 && google.maps.geometry.spherical.computeDistanceBetween(ll, tempPts[0]) < SNAP_PX * metersPerPixel()) {
         snap = true; preview = tempPts.concat([tempPts[0]]);
       }
       tempOverlay.setPath(preview);
       snapping = snap;
-      if (snap !== _prevSnapping) { // only touch cursor/hint/dot when the state flips
+      if (snap !== _prevSnapping) { // only touch cursor/dot when the state flips
         _prevSnapping = snap;
         setFirstDotStyle(snap);
         map.setOptions({ draggableCursor: snap ? "pointer" : "crosshair" });
-        const ht = $("drawHintText"); if (ht) ht.textContent = snap ? "Click the green dot to close the shape." : currentHint();
+      }
+      // Hint: snapping wins; otherwise show the live running area under the cursor.
+      const ht = $("drawHintText");
+      if (ht) {
+        if (snap) ht.textContent = "Click the green dot to close the shape.";
+        else updateTraceHint(ll);
       }
     }
     else if (state.drawShape === "rectangle") { if (tempStart) { ensureTemp(); tempOverlay.setBounds(rectBounds(tempStart, ll)); } }
@@ -510,7 +549,8 @@ function pushUndo() {
   redoStack.length = 0;
 }
 function undo() {
-  if (state.lineDraft && state.drawShape === "line") { removeLastLinePoint(); return; }
+  // Mid-trace: Undo removes the last placed point (line or polygon corner).
+  if (tempPts.length && (state.drawShape === "line" || state.drawShape === "polygon")) { removeLastTracePoint(); return; }
   if (!undoStack.length) return;
   redoStack.push(clone({ boundary: state.draft.boundary, cutouts: state.draft.cutouts }));
   const s = undoStack.pop(); state.draft.boundary = s.boundary; state.draft.cutouts = s.cutouts;
@@ -1989,6 +2029,9 @@ function initApp() {
     center: { lat: 39.5, lng: -98.35 }, zoom: 5, mapTypeId: "hybrid", tilt: 0,
     streetViewControl: false, fullscreenControl: false, rotateControl: false,
     mapTypeControl: true, mapTypeControlOptions: { position: google.maps.ControlPosition.BOTTOM_LEFT },
+    // One-finger pan on touch. Without this the iframe embed falls back to
+    // "cooperative" on mobile, which ignores single-finger drags entirely.
+    gestureHandling: "greedy",
   });
 
   // Projection bridge: an invisible OverlayView whose only job is to expose
@@ -2037,12 +2080,13 @@ function initApp() {
       }
       return;
     }
-    // Backspace removes the last placed point of an in-progress line.
-    if ((e.key === "Backspace" || e.key === "Delete") && state.lineDraft && state.drawShape === "line") {
+    // Backspace removes the last placed point of an in-progress trace (line or polygon).
+    if ((e.key === "Backspace" || e.key === "Delete") && tempPts.length &&
+        (state.drawShape === "line" || state.drawShape === "polygon")) {
       const tag = (e.target && e.target.tagName) || "";
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       e.preventDefault();
-      removeLastLinePoint();
+      removeLastTracePoint();
     }
   });
 

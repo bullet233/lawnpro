@@ -776,6 +776,21 @@ code { background: var(--panel-3); padding: 2px 6px; border-radius: 5px; font-fa
   .ov-sub { padding-left: 4px; padding-right: 4px; }
 }
 
+/* ===== Phone layout: stack map over panel. The desktop grid reserves a fixed
+   480px side column — on a phone that's wider than the screen, so the map's 1fr
+   column collapses to nothing and the tool is unusable. ===== */
+@media (max-width: 700px) {
+  #app {
+    grid-template-columns: 1fr;
+    grid-template-rows: 52vh minmax(0, 1fr);
+    grid-template-rows: 52dvh minmax(0, 1fr); /* dvh: correct under mobile URL bars */
+    height: 100vh;
+    height: 100dvh;
+  }
+  #panel { border-left: none; border-top: 1px solid var(--border-soft); }
+  #searchBar { width: calc(100vw - 32px); max-width: calc(100vw - 32px); }
+}
+
 /* ===== Material calculator (Apple sheet) ===== */
 .cal-backdrop { position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.32); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
 .cal-sheet { width: 452px; max-width: calc(100vw - 28px); max-height: 92vh; overflow-y: auto; background: var(--panel); border-radius: 22px; padding: 12px 22px 22px; box-shadow: 0 24px 60px rgba(0,0,0,.28); }
