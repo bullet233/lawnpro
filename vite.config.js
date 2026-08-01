@@ -9,6 +9,12 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
+      workbox: {
+        // The embedded Lawn Measure tool loads in an iframe (a navigation
+        // request). Without this, the SW's SPA navigate-fallback serves the
+        // React app INTO that iframe instead of lawn-measure/index.html.
+        navigateFallbackDenylist: [/\/lawn-measure\//],
+      },
       manifest: {
         name: 'Lawn Route Tracker',
         short_name: 'Lawn Tracker',
