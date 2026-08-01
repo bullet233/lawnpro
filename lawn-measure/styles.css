@@ -802,7 +802,11 @@ code { background: var(--panel-3); padding: 2px 6px; border-radius: 5px; font-fa
    reticle) — desktop never shows them, the side panel has the full toolset. */
 #mapFab, #traceBar, #fabCatSheet, #xhairMark { display: none; }
 
-@media (max-width: 700px) {
+/* "Mobile" = narrow screen OR any touch-first device (phones AND tablets —
+   the tablet runs LawnPro in the field, so it gets the phone layout too).
+   Desktop with a mouse keeps the side-panel layout. Keep this media list in
+   sync with isMobile() in index.html and the two matchMedia calls in app.js. */
+@media (max-width: 700px), (pointer: coarse) {
   /* Home-indicator phones: grow the peek bar into the safe area. */
   :root { --sheet-peek: calc(34px + env(safe-area-inset-bottom, 0px)); }
 

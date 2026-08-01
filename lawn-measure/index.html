@@ -82,7 +82,8 @@
     var catSheet = document.getElementById('fabCatSheet');
     var embedded = false;
     try { embedded = window.parent !== window; } catch (e) { embedded = true; }
-    function isMobile() { return window.matchMedia('(max-width: 700px)').matches; }
+    /* Mobile = narrow OR touch-first (tablets included) — must match styles.css. */
+    function isMobile() { return window.matchMedia('(max-width: 700px), (pointer: coarse)').matches; }
 
     /* ── Sheet: closed → half → full ─────────────────────────────── */
     var sheet = 'closed';
@@ -332,7 +333,7 @@
     }, 250);
 
     // Reset when crossing the mobile/desktop breakpoint.
-    window.matchMedia('(max-width: 700px)').addEventListener('change', function () {
+    window.matchMedia('(max-width: 700px), (pointer: coarse)').addEventListener('change', function () {
       setSheet('closed'); tuneMapControls();
       if (sb) sb.classList.remove('expanded');
     });

@@ -625,7 +625,7 @@ function openEditor(id, groupId = null) {
     state.activeId = "a" + state.seq++;
     // Phones: the cutouts sub-list starts collapsed so area cards stay one row
     // tall; desktop keeps the expanded default.
-    const startCollapsed = typeof matchMedia === "function" && matchMedia("(max-width: 700px)").matches;
+    const startCollapsed = typeof matchMedia === "function" && matchMedia("(max-width: 700px), (pointer: coarse)").matches;
     state.draft = { id: state.activeId, name: base + " " + (countInGroup + 1), color, opacity, boundary: null, cutouts: [], collapsed: startCollapsed, hidden: false, net: 0, groupId: groupId };
   }
   undoStack.length = 0; redoStack.length = 0;
@@ -1867,7 +1867,7 @@ function openAreaCategoryMenu(rowEl) {
   // Phones: an anchored popover is fiddly near the screen edge — reuse the FAB's
   // bottom-sheet picker (#fabCatSheet + .fcs-* styles live in index.html/styles.css).
   const sheet = document.getElementById("fabCatSheet");
-  if (sheet && typeof matchMedia === "function" && matchMedia("(max-width: 700px)").matches) {
+  if (sheet && typeof matchMedia === "function" && matchMedia("(max-width: 700px), (pointer: coarse)").matches) {
     const rows = state.groups.map(g =>
       '<button type="button" data-gid="' + g.id + '"><span class="fcs-dot" style="background:' + g.color + '"></span>' + esc(g.name) +
       (g.id === cur ? '<i class="ti ti-check" style="margin-left:auto"></i>' : '') + '</button>'
