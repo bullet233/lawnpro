@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
   <title>Lawn Measure</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.24.0/dist/tabler-icons.min.css" />
   <!-- cache-bust local CSS so edits always show without a hard reload -->
@@ -38,7 +38,307 @@
     </main>
 
     <aside id="panel"></aside>
+
+    <!-- Mobile-only: grab handle that opens/closes the bottom-sheet panel.
+         Hidden on desktop via CSS. -->
+    <div id="sheetHandle" role="button" tabindex="0" aria-label="Toggle measurements panel">
+      <span class="grab"></span>
+      <span class="sheet-cap">Measurements</span>
+    </div>
+
+    <!-- Mobile-only: one-tap trace start, floating on the map. -->
+    <button id="mapFab" hidden><i class="ti ti-plus"></i> Measure</button>
+
+    <!-- Mobile-only: in-trace controls, shown while drawing-mode is active.
+         The ⌖ button toggles crosshair placement: pan the map under a fixed
+         center reticle and tap "Drop point" — nothing hides under a finger. -->
+    <div id="traceBar" hidden>
+      <button id="tbUndo" type="button"><i class="ti ti-arrow-back-up"></i><span class="tb-lbl">&nbsp;Undo</span></button>
+      <button id="tbDrop" type="button"><i class="ti ti-plus"></i>&nbsp;Drop point</button>
+      <button id="tbFinish" type="button"><i class="ti ti-check"></i><span class="tb-lbl">&nbsp;Finish</span></button>
+      <button id="tbXhair" type="button" aria-label="Crosshair placement"><i class="ti ti-crosshair"></i></button>
+      <button id="tbCancel" type="button" aria-label="Cancel trace"><i class="ti ti-x"></i></button>
+    </div>
+
+    <!-- Fixed center reticle for crosshair placement mode. -->
+    <div id="xhairMark" hidden><span class="xh-dot"></span></div>
+
+    <!-- Mobile-only: category picker for the FAB when several categories exist. -->
+    <div id="fabCatSheet" hidden></div>
   </div>
+
+  <!-- Mobile bottom-sheet controller (3 stops: peek / half / full), Measure FAB,
+       and the in-trace Undo/Finish/Cancel bar. Talks to app.js only through its
+       classic-script globals (state, openEditor, tempPts, …) — never edits it. -->
+  <script>
+  (function () {
+    var app = document.getElementById('app');
+    var handle = document.getElementById('sheetHandle');
+    if (!app || !handle) return;
+    var cap = handle.querySelector('.sheet-cap');
+    var mw = document.getElementById('map-wrap');
+    var fab = document.getElementById('mapFab');
+    var traceBar = document.getElementById('traceBar');
+    var catSheet = document.getElementById('fabCatSheet');
+    var embedded = false;
+    try { embedded = window.parent !== window; } catch (e) { embedded = true; }
+    function isMobile() { return window.matchMedia('(max-width: 700px)').matches; }
+
+    /* ── Sheet: closed → half → full ─────────────────────────────── */
+    var sheet = 'closed';
+    function setSheet(s) {
+      sheet = s;
+      app.classList.toggle('sheet-open', s === 'full');
+      app.classList.toggle('sheet-half', s === 'half');
+      cap.textContent = s === 'full' ? 'Close' : s === 'half' ? 'More' : capTotal();
+      syncFloaters();
+    }
+    function stepUp()   { setSheet(sheet === 'closed' ? 'half' : 'full'); }
+    function stepDown() { setSheet(sheet === 'full' ? 'half' : 'closed'); }
+
+    // Collapsed peek bar shows the LIVE running total instead of a static label —
+    // glance at the bottom of the map and you know where the measurement stands.
+    // (totalDisplay/sqftOnly are app.js globals; guard until it has booted.)
+    function capTotal() {
+      try {
+        if (typeof totalDisplay === 'function' && typeof sqftOnly === 'function') {
+          var m2 = totalDisplay();
+          if (m2 > 0) {
+            var unit = (typeof state !== 'undefined' && state.settings && state.settings.units === 'metric') ? 'm²' : 'sq ft';
+            return sqftOnly(m2) + ' ' + unit + '  ·  open';
+          }
+        }
+      } catch (e) {}
+      return 'Measurements';
+    }
+    setInterval(function () { if (sheet === 'closed') cap.textContent = capTotal(); }, 800);
+
+    /* ── Drawing hooks ───────────────────────────────────────────── */
+    // When app.js arms a trace it tags #map-wrap with .drawing-mode: collapse the
+    // sheet so the whole screen is drawable and swap the FAB for the trace bar.
+    // When the trace ends, rise to HALF — map + fresh shape + its stats together.
+    var suppressOpen = false;
+    function drawing() { return mw && mw.classList.contains('drawing-mode'); }
+    if (mw && window.MutationObserver) {
+      var wasDrawing = drawing();
+      new MutationObserver(function () {
+        var d = drawing();
+        if (d === wasDrawing) return;
+        wasDrawing = d;
+        if (!isMobile()) return;
+        if (d) setSheet('closed');
+        else if (suppressOpen) { suppressOpen = false; syncFloaters(); }
+        else setSheet('half');
+      }).observe(mw, { attributes: true, attributeFilter: ['class'] });
+    }
+
+    // Tapping the sliver of map above the open sheet = "get it out of the way".
+    if (mw) mw.addEventListener('pointerdown', function () {
+      if (isMobile() && sheet !== 'closed') setSheet('closed');
+    });
+
+    /* ── Measure FAB + in-trace bar visibility ───────────────────── */
+    function syncFloaters() {
+      var mob = isMobile();
+      var d = drawing();
+      // FAB: standalone phones only, map view, not mid-trace. (In the LawnPro
+      // iframe the embed bridge auto-starts tracing and owns the bottom bar.)
+      fab.hidden = !(mob && !embedded && sheet === 'closed' && !d);
+      traceBar.hidden = !(mob && d);
+      traceBar.classList.toggle('embedded', embedded);
+      if (!traceBar.hidden) syncTraceButtons();
+      else applyXhair(); // trace ended → hide the reticle + detach its pan listener
+    }
+    setInterval(syncFloaters, 500);
+
+    function startMeasure(shape) {
+      try {
+        if (typeof state === 'undefined' || typeof openEditor !== 'function') return;
+        if (shape) state.drawShape = shape;             // long-press picked rect/circle
+        if (!state.groups.length) { openCategoryModal(true); return; }   // pick → auto-arms trace
+        if (state.groups.length === 1) { openEditor(null, state.groups[0].id); return; }
+        showCatChooser();
+      } catch (e) {}
+    }
+    // Tap = trace corners. Long-press = shape picker (rectangle / circle live
+    // here now instead of cluttering the idle toolbar).
+    var fabTimer = null, fabLong = false;
+    fab.addEventListener('pointerdown', function () {
+      fabLong = false; clearTimeout(fabTimer);
+      fabTimer = setTimeout(function () { fabLong = true; showShapeChooser(); }, 450);
+    });
+    fab.addEventListener('pointerup', function () { clearTimeout(fabTimer); });
+    fab.addEventListener('pointerleave', function () { clearTimeout(fabTimer); });
+    fab.addEventListener('click', function () {
+      if (fabLong) { fabLong = false; return; }
+      startMeasure('polygon');
+    });
+    function showShapeChooser() {
+      catSheet.innerHTML = '<div class="fcs-panel"><div class="fcs-grab"></div>' +
+        '<div class="fcs-title">Draw with…</div>' +
+        '<button type="button" data-shape="polygon"><i class="ti ti-vector"></i> Trace corners</button>' +
+        '<button type="button" data-shape="rectangle"><i class="ti ti-square"></i> Rectangle</button>' +
+        '<button type="button" data-shape="circle"><i class="ti ti-circle"></i> Circle</button></div>';
+      catSheet.hidden = false;
+      catSheet.onclick = function (e) {
+        var btn = e.target.closest ? e.target.closest('button') : null;
+        if (btn && btn.dataset.shape) { catSheet.hidden = true; startMeasure(btn.dataset.shape); }
+        else if (e.target === catSheet) catSheet.hidden = true;
+      };
+    }
+
+    /* ── Search: icon by default, expands on tap (map keeps its top edge) ── */
+    var sb = document.getElementById('searchBar');
+    if (sb) {
+      var sbInput = sb.querySelector('input');
+      sb.addEventListener('click', function () {
+        if (!isMobile() || sb.classList.contains('expanded')) return;
+        sb.classList.add('expanded');
+        if (sbInput) setTimeout(function () { sbInput.focus(); }, 80);
+      });
+      if (sbInput) sbInput.addEventListener('blur', function () {
+        // Delay so a tap on an autocomplete suggestion lands first.
+        setTimeout(function () { if (isMobile()) sb.classList.remove('expanded'); }, 250);
+      });
+    }
+
+    // 2+ categories: quick bottom picker — tap one, trace starts in it.
+    function showCatChooser() {
+      var rows = state.groups.map(function (g) {
+        return '<button type="button" data-gid="' + g.id + '"><span class="fcs-dot" style="background:' + g.color + '"></span>' + esc(g.name) + '</button>';
+      }).join('');
+      catSheet.innerHTML = '<div class="fcs-panel"><div class="fcs-grab"></div>' +
+        '<div class="fcs-title">Measure into…</div>' + rows +
+        '<button type="button" class="fcs-new"><i class="ti ti-plus"></i> New category</button></div>';
+      catSheet.hidden = false;
+      catSheet.onclick = function (e) {
+        var btn = e.target.closest ? e.target.closest('button') : null;
+        if (btn && btn.dataset.gid) { catSheet.hidden = true; openEditor(null, btn.dataset.gid); }
+        else if (btn && btn.classList.contains('fcs-new')) { catSheet.hidden = true; openCategoryModal(true); }
+        else if (e.target === catSheet) catSheet.hidden = true;
+      };
+    }
+    function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+    /* ── Crosshair placement: pan the map under a fixed reticle, then tap
+       "Drop point" — the corner lands dead-center instead of under a finger.
+       Preference sticks across traces (localStorage).  ─────────────────── */
+    var xhairMark = document.getElementById('xhairMark');
+    var xhairOn = false;
+    try { xhairOn = localStorage.getItem('lm-xhair') === '1'; } catch (e) {}
+    var xhairCenterL = null;
+    function applyXhair() {
+      var active = isMobile() && drawing() && xhairOn;
+      xhairMark.hidden = !active;
+      traceBar.classList.toggle('xhair', active);
+      document.getElementById('tbXhair').classList.toggle('on', active);
+      if (active && !xhairCenterL && typeof map !== 'undefined' && map) {
+        // Live rubber-band + snap feedback follows the reticle while panning.
+        xhairCenterL = map.addListener('center_changed', function () {
+          try { drawerMove({ latLng: map.getCenter() }); } catch (e) {}
+        });
+        try { drawerMove({ latLng: map.getCenter() }); } catch (e) {}
+      } else if (!active && xhairCenterL) {
+        try { google.maps.event.removeListener(xhairCenterL); } catch (e) {}
+        xhairCenterL = null;
+      }
+    }
+    document.getElementById('tbXhair').addEventListener('click', function () {
+      xhairOn = !xhairOn;
+      try { localStorage.setItem('lm-xhair', xhairOn ? '1' : '0'); } catch (e) {}
+      applyXhair();
+    });
+    document.getElementById('tbDrop').addEventListener('click', function () {
+      try { drawerClick({ latLng: map.getCenter() }); } catch (e) {}
+      syncTraceButtons();
+    });
+
+    /* ── In-trace bar: Undo point / Finish shape / Cancel ────────── */
+    function syncTraceButtons() {
+      try {
+        var shape = (typeof state !== 'undefined') ? state.drawShape : 'polygon';
+        var pts = (typeof tempPts !== 'undefined') ? tempPts.length : 0;
+        var undoable = pts > 0 && (shape === 'line' || shape === 'polygon');
+        document.getElementById('tbUndo').disabled = !undoable;
+        var fin = document.getElementById('tbFinish');
+        // Rect + circle finish themselves on the second tap — no button needed.
+        fin.style.display = (shape === 'rectangle' || shape === 'circle') ? 'none' : '';
+        fin.disabled = shape === 'line' ? pts < 2 : pts < 3;
+      } catch (e) {}
+      applyXhair();
+    }
+    document.getElementById('tbUndo').addEventListener('click', function () {
+      try { if (typeof removeLastTracePoint === 'function') removeLastTracePoint(); } catch (e) {}
+      syncTraceButtons();
+    });
+    document.getElementById('tbFinish').addEventListener('click', function () {
+      try {
+        if (state.drawShape === 'line') { finishLine(); return; }
+        if (state.drawShape === 'polygon' && tempPts.length >= 3) {
+          finishShape({ type: 'polygon', path: tempPts.map(function (p) { return { lat: p.lat(), lng: p.lng() }; }) });
+        }
+      } catch (e) {}
+    });
+    document.getElementById('tbCancel').addEventListener('click', function () {
+      try {
+        suppressOpen = true; // cancelled → user wants the map, not the sheet
+        // Mirror app.js's Escape handling exactly.
+        if (state.lineDraft) cancelLineDraft();
+        else if (state.draft) {
+          if (!state.draft.boundary) closeEditor();
+          else { armSelect(); renderMap(); }
+        }
+      } catch (e) {}
+    });
+
+    /* ── Handle: tap steps up (closed→half→full→closed), drag steps ── */
+    var moved = false;
+    handle.addEventListener('click', function () {
+      if (!moved) (sheet === 'full' ? setSheet('closed') : stepUp());
+      moved = false;
+    });
+    handle.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sheet === 'full' ? setSheet('closed') : stepUp(); }
+    });
+    var startY = null;
+    handle.addEventListener('pointerdown', function (e) { startY = e.clientY; moved = false; try { handle.setPointerCapture(e.pointerId); } catch (_) {} });
+    handle.addEventListener('pointermove', function (e) {
+      if (startY === null) return;
+      if (Math.abs(e.clientY - startY) > 8) moved = true;
+    });
+    handle.addEventListener('pointerup', function (e) {
+      if (startY === null) return;
+      var dy = e.clientY - startY;
+      if (dy < -160) setSheet('full');            // big flick: straight to the top
+      else if (dy > 160) setSheet('closed');      // big flick down: all the way out
+      else if (dy < -30) stepUp();
+      else if (dy > 30) stepDown();
+      startY = null;
+    });
+
+    // On phones Google's Map/Satellite buttons sit exactly where the Measure FAB
+    // lives — and the Settings modal already offers the same Hybrid/Satellite
+    // switch. Same for the zoom +/- (camera) control: pinch is the phone gesture,
+    // and the buttons eat the right edge where locate + the trace bar live.
+    // Drop both on mobile; desktop keeps them.
+    function tuneMapControls() {
+      try {
+        if (typeof map !== 'undefined' && map)
+          map.setOptions({ mapTypeControl: !isMobile(), zoomControl: !isMobile(), cameraControl: !isMobile() });
+      } catch (e) {}
+    }
+    var mapPoll = setInterval(function () {
+      if (typeof map !== 'undefined' && map) { clearInterval(mapPoll); tuneMapControls(); }
+    }, 250);
+
+    // Reset when crossing the mobile/desktop breakpoint.
+    window.matchMedia('(max-width: 700px)').addEventListener('change', function () {
+      setSheet('closed'); tuneMapControls();
+      if (sb) sb.classList.remove('expanded');
+    });
+    syncFloaters();
+  })();
+  </script>
 
   <script src="config.js"></script>
   <!-- cache-bust app.js so code edits always load (no stale cached JS) -->

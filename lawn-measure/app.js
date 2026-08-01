@@ -623,7 +623,10 @@ function openEditor(id, groupId = null) {
     const color = grp && grp.color ? grp.color : (state.settings ? state.settings.defaultColor : SWATCHES[0]);
     const opacity = state.settings ? state.settings.defaultOpacity : 0.35;
     state.activeId = "a" + state.seq++;
-    state.draft = { id: state.activeId, name: base + " " + (countInGroup + 1), color, opacity, boundary: null, cutouts: [], collapsed: false, hidden: false, net: 0, groupId: groupId };
+    // Phones: the cutouts sub-list starts collapsed so area cards stay one row
+    // tall; desktop keeps the expanded default.
+    const startCollapsed = typeof matchMedia === "function" && matchMedia("(max-width: 700px)").matches;
+    state.draft = { id: state.activeId, name: base + " " + (countInGroup + 1), color, opacity, boundary: null, cutouts: [], collapsed: startCollapsed, hidden: false, net: 0, groupId: groupId };
   }
   undoStack.length = 0; redoStack.length = 0;
   state.drawMode = state.draft.boundary ? "select" : "boundary";
@@ -792,15 +795,15 @@ function onLineDraw(geom) {
 function deleteLine(id) {
   const l = state.lines.find((x) => x.id === id);
   if (!l) return;
-  if (!confirm('Delete "' + l.name + '"?')) return;
+  const snap = docSnapshot();
   state.lines = state.lines.filter((x) => x.id !== id);
   save(); renderMap(); renderPanel();
+  undoToast('Deleted "' + l.name + '"', snap);
 }
 function renameLine(id) {
   const l = state.lines.find((x) => x.id === id);
   if (!l) return;
-  const n = prompt("Rename line:", l.name);
-  if (n && n.trim()) { l.name = n.trim(); save(); renderMap(); renderPanel(); }
+  promptSheet("Rename line", l.name, (n) => { l.name = n; save(); renderMap(); renderPanel(); });
 }
 function toggleLineHidden(id) {
   const l = state.lines.find((x) => x.id === id);
@@ -964,7 +967,7 @@ function renderPanel() {
           '<button class="add-cat-pill" onclick="addGroup()"><i class="ti ti-folder-plus"></i> Add Category</button>' +
         '</div>' +
       '</div>' +
-      '<div class="tree' + (state.draft && state.activeId ? ' has-active' : '') + '">' + treeHtml + "</div>" +
+      '<div class="tree' + (state.draft && state.activeId ? ' has-active' : '') + (state.groups.length === 1 ? ' one-group' : '') + '">' + treeHtml + "</div>" +
       '<div class="ov-data">' +
         '<button id="exportBtn"><i class="ti ti-download"></i> Export</button>' +
         '<button id="importBtn"><i class="ti ti-upload"></i> Import</button>' +
@@ -1043,8 +1046,9 @@ function treeGroupHtml(g, areas, lines) {
   h += '</div>';
   if (g) {
     const col = g.color || "#34c759";
+    // With a single category, "to <name>" is organizational noise — just "Add Area".
     h += '<button class="tz-add-area tz-add-area-btn" data-add-to="' + g.id + '" style="--gc:' + col + '">' +
-         '<i class="ti ti-plus"></i> Add Area to ' + esc(g.name) + '</button>';
+         '<i class="ti ti-plus"></i> Add Area' + (state.groups.length === 1 ? '' : ' to ' + esc(g.name)) + '</button>';
   }
   h += '</div>';
   return h;
@@ -1131,7 +1135,7 @@ function openSettingsModal() {
     <div class="cal-row set-cat-row">
       <label class="set-cat-color" style="background:${g.color}" title="Change color"><input type="color" value="${g.color}" onchange="updateCatColor('${g.id}', this.value)"></label>
       <span class="cal-lbl">${esc(g.name)}</span>
-      <button class="set-icon-btn" onclick="renameGroup('${g.id}'); openSettingsModal();" aria-label="Rename ${esc(g.name)}"><i class="ti ti-pencil"></i></button>
+      <button class="set-icon-btn" onclick="renameGroup('${g.id}')" aria-label="Rename ${esc(g.name)}"><i class="ti ti-pencil"></i></button>
       <button class="set-icon-btn" onclick="deleteGroup('${g.id}'); openSettingsModal();" aria-label="Delete ${esc(g.name)}"><i class="ti ti-trash"></i></button>
     </div>`).join('');
 
@@ -1170,6 +1174,16 @@ function openSettingsModal() {
         <div class="cal-sec-label">Categories</div>
         <div class="cal-group">
           ${catRows || '<div class="cal-row"><span class="cal-lbl" style="color:var(--text-dim)">No categories yet.</span></div>'}
+        </div>
+
+        <!-- Phones only (CSS-gated): the sheet's Export/Import/Clear row is
+             hidden on mobile — file juggling is a rare action there, so it
+             lives here instead of permanent UI. -->
+        <div class="cal-sec-label set-data-only">Data</div>
+        <div class="cal-group set-data-only">
+          <div class="cal-row cal-row-menu" onclick="closeSettingsModal();exportJSON()"><span class="cal-lbl">Export backup file</span><i class="ti ti-download cal-menu-chev"></i></div>
+          <div class="cal-row cal-row-menu" onclick="closeSettingsModal();var f=document.getElementById('importFile');if(f)f.click()"><span class="cal-lbl">Import backup file</span><i class="ti ti-upload cal-menu-chev"></i></div>
+          <div class="cal-row cal-row-menu" onclick="closeSettingsModal();clearAll()"><span class="cal-lbl" style="color:var(--danger)">Clear everything</span><i class="ti ti-trash cal-menu-chev" style="color:var(--danger)"></i></div>
         </div>
       </div>
     </div>`;
@@ -1555,8 +1569,10 @@ function addGroup() {
 function renameGroup(id) {
   const g = state.groups.find(x => x.id === id);
   if (!g) return;
-  const name = prompt("Rename category:", g.name);
-  if (name && name.trim()) { g.name = name.trim(); renderPanel(); save(); }
+  promptSheet("Rename category", g.name, (name) => {
+    g.name = name; renderPanel(); save();
+    if ($("setModalOverlay")) openSettingsModal(); // refresh the open Settings list
+  });
 }
 function deleteGroup(id) {
   const g = state.groups.find(x => x.id === id);
@@ -1566,10 +1582,7 @@ function deleteGroup(id) {
   const parts = [];
   if (containedAreas.length) parts.push(containedAreas.length + " area(s)");
   if (containedLines.length) parts.push(containedLines.length + " line(s)");
-  const msg = parts.length
-    ? `Delete "${g.name}" and all ${parts.join(" and ")} inside it? This cannot be undone.`
-    : `Delete "${g.name}"?`;
-  if (!confirm(msg)) return;
+  const snap = docSnapshot();
   // If any contained area is currently being edited, close the editor first
   if (state.activeId && containedAreas.some(a => a.id === state.activeId)) {
     disarmDraw();
@@ -1583,6 +1596,7 @@ function deleteGroup(id) {
   state.lines = state.lines.filter(l => l.groupId !== id);
   state.groups = state.groups.filter(g => g.id !== id);
   save(); renderMap(); renderPanel();
+  undoToast('Deleted "' + g.name + '"' + (parts.length ? " and " + parts.join(" + ") : ""), snap);
 }
 
 function treeAreaHtml(a) {
@@ -1601,7 +1615,7 @@ function treeAreaHtml(a) {
   h += '<div class="tz-card-hdr" data-area="' + a.id + '">' +
     '<div class="tz-card-info">' +
       '<div class="tz-card-title"><span class="tz-card-name">' + esc(src.name) + '</span>' + (active ? '<span class="tz-active-badge">ACTIVE</span>' : '') + '</div>' +
-      '<div class="tz-card-stats">Gross ' + sqftOnly(gross) + ' &middot; Cutouts <span class="danger">' + sqftOnly(gross - net) + '</span> &middot; Net <span style="color:' + src.color + ';">' + sqftOnly(net) + '</span></div>' +
+      '<div class="tz-card-stats' + (cuts.length ? '' : ' no-cuts') + '">Gross ' + sqftOnly(gross) + ' &middot; Cutouts <span class="danger">' + sqftOnly(gross - net) + '</span> &middot; Net <span style="color:' + src.color + ';">' + sqftOnly(net) + '</span></div>' +
     '</div>' +
     '<div class="tz-card-net"><div class="tz-card-net-val">' + sqftOnly(net) + '</div><div class="tz-card-net-unit">' + unitSuffix() + '</div></div>' +
     '<div class="tz-card-sep"></div>' +
@@ -1745,6 +1759,66 @@ function toast(msg) {
   clearTimeout(_toastTimer);
   _toastTimer = setTimeout(() => t.classList.remove("show"), 2400);
 }
+
+/* ── Undo-toast + prompt sheet: replacements for confirm()/prompt() ────────
+ * Native dialogs look foreign on phones, and some Android webviews (like the
+ * LawnPro embed) suppress them entirely — the delete/rename would silently do
+ * nothing. Deletes now apply immediately and offer a 6-second Undo that
+ * restores a snapshot of the whole document; renames use an in-app sheet.   */
+let _undoToastTimer = null;
+function docSnapshot() {
+  return clone({ areas: state.areas, lines: state.lines, groups: state.groups,
+    seq: state.seq, cutSeq: state.cutSeq, grpSeq: state.grpSeq, lineSeq: state.lineSeq });
+}
+function docRestore(snap) {
+  if (state.lineDraft) cancelLineDraft();
+  if (state.draft) { disarmDraw(); state.draft = null; state.activeId = null; undoStack.length = 0; redoStack.length = 0; }
+  Object.assign(state, snap);
+  state.areas.forEach(refreshArea);
+  save(); renderMap(); renderPanel();
+  if ($("setModalOverlay")) openSettingsModal(); // keep the open Settings list in sync
+}
+function undoToast(msg, snap) {
+  let t = document.getElementById("undoToast");
+  if (!t) {
+    t = document.createElement("div");
+    t.id = "undoToast";
+    t.className = "app-toast undo-toast";
+    document.body.appendChild(t);
+  }
+  t.innerHTML = '<span class="ut-msg"></span><button type="button" class="ut-btn">Undo</button>';
+  t.querySelector(".ut-msg").textContent = msg;
+  t.querySelector(".ut-btn").onclick = () => { t.classList.remove("show"); docRestore(snap); };
+  t.classList.add("show");
+  clearTimeout(_undoToastTimer);
+  _undoToastTimer = setTimeout(() => t.classList.remove("show"), 6000);
+}
+function promptSheet(title, value, cb) {
+  const old = document.getElementById("promptSheetOverlay"); if (old) old.remove();
+  document.body.insertAdjacentHTML("beforeend",
+    '<div id="promptSheetOverlay" class="cal-backdrop">' +
+      '<div class="cal-sheet" style="width:360px" role="dialog" aria-label="' + esc(title) + '">' +
+        '<div class="cal-grab"></div>' +
+        '<div class="cal-head"><span class="cal-title">' + esc(title) + '</span>' +
+          '<button type="button" class="cal-close" id="promptSheetX" aria-label="Cancel"><i class="ti ti-x"></i></button></div>' +
+        '<div class="cal-group"><div class="cal-row">' +
+          '<input type="text" id="promptSheetInput" class="cal-edit cat-custom" />' +
+          '<button type="button" class="cal-add-btn" id="promptSheetOk">Save</button>' +
+        '</div></div>' +
+      '</div></div>');
+  const ov = $("promptSheetOverlay"), input = $("promptSheetInput");
+  input.value = value || "";
+  const done = (commit) => {
+    const v = input.value;
+    ov.remove();
+    if (commit && v && v.trim()) cb(v.trim());
+  };
+  $("promptSheetOk").onclick = () => done(true);
+  $("promptSheetX").onclick = () => done(false);
+  ov.onclick = (e) => { if (e.target === ov) done(false); };
+  input.onkeydown = (e) => { if (e.key === "Enter") done(true); if (e.key === "Escape") done(false); };
+  input.focus(); input.select();
+}
 function statCell(id, inner, cls, label) {
   return '<div class="asc-stat"><div class="asc-stat-val ' + (cls || "") + '" id="' + id + '">' + inner + '</div>' +
          '<div class="asc-stat-lbl">' + label + '</div></div>';
@@ -1790,6 +1864,26 @@ function settingsCardHtml(d) {
 function openAreaCategoryMenu(rowEl) {
   calcCloseMenu();
   const cur = state.draft ? (state.draft.groupId || "") : "";
+  // Phones: an anchored popover is fiddly near the screen edge — reuse the FAB's
+  // bottom-sheet picker (#fabCatSheet + .fcs-* styles live in index.html/styles.css).
+  const sheet = document.getElementById("fabCatSheet");
+  if (sheet && typeof matchMedia === "function" && matchMedia("(max-width: 700px)").matches) {
+    const rows = state.groups.map(g =>
+      '<button type="button" data-gid="' + g.id + '"><span class="fcs-dot" style="background:' + g.color + '"></span>' + esc(g.name) +
+      (g.id === cur ? '<i class="ti ti-check" style="margin-left:auto"></i>' : '') + '</button>'
+    ).join("");
+    sheet.innerHTML = '<div class="fcs-panel"><div class="fcs-grab"></div>' +
+      '<div class="fcs-title">Category</div>' + rows +
+      '<button type="button" data-gid=""><span class="fcs-dot" style="background:#d1d1d6"></span>None' +
+      (cur === "" ? '<i class="ti ti-check" style="margin-left:auto"></i>' : '') + '</button></div>';
+    sheet.hidden = false;
+    sheet.onclick = (e) => {
+      const btn = e.target.closest ? e.target.closest("button") : null;
+      if (btn && btn.dataset.gid !== undefined) { sheet.hidden = true; pickAreaCategory(btn.dataset.gid); }
+      else if (e.target === sheet) sheet.hidden = true;
+    };
+    return;
+  }
   let inner = state.groups.map(g =>
     '<div class="cal-mn-item' + (g.id === cur ? " on" : "") + '" onclick="pickAreaCategory(\'' + g.id + '\')">' +
       '<span class="cal-mn-dot" style="background:' + g.color + '"></span>' +
@@ -1925,7 +2019,7 @@ function deleteArea(id) {
   const isDraft = state.activeId === id;
   const area = isDraft ? state.draft : state.areas.find(x => x.id === id);
   if (!area) return;
-  if (!confirm('Delete "' + area.name + '"? This cannot be undone.')) return;
+  const snap = docSnapshot();
   // If currently editing this area, cleanly tear down the editor first
   if (isDraft) {
     disarmDraw();
@@ -1937,10 +2031,11 @@ function deleteArea(id) {
   // Remove from committed areas (no-op if it was only a draft)
   state.areas = state.areas.filter(x => x.id !== id);
   save(); renderMap(); renderPanel();
+  undoToast('Deleted "' + area.name + '"', snap);
 }
 function clearAll() {
   if (!state.areas.length && !state.groups.length && !state.lines.length) return;
-  if (!confirm("Delete all areas, lines and categories? Save a file first if you want a backup.")) return;
+  const snap = docSnapshot();
   if (state.lineDraft) cancelLineDraft();
   if (state.draft) closeEditor();
   state.areas = [];
@@ -1951,6 +2046,7 @@ function clearAll() {
   state.cutSeq = 1;
   state.lineSeq = 1;
   renderMap(); renderPanel(); save();
+  undoToast("Cleared all measurements", snap);
 }
 const save = debounce(() => {
   const data = { areas: state.areas, lines: state.lines, groups: state.groups, seq: state.seq, cutSeq: state.cutSeq, grpSeq: state.grpSeq, lineSeq: state.lineSeq, settings: state.settings,

@@ -118,6 +118,9 @@ code { background: var(--panel-3); padding: 2px 6px; border-radius: 5px; font-fa
   display: flex; align-items: center; gap: 9px; padding: 11px 18px; border-radius: 999px;
   background: var(--ink); color: #fff; font-size: 15px; box-shadow: 0 4px 16px rgba(0,0,0,.25);
 }
+/* display:flex above would beat the [hidden] attribute and leave an empty dark
+   pill floating on the map — force it off. */
+.draw-hint[hidden] { display: none; }
 .draw-hint .ti { font-size: 17px; }
 
 /* PANEL = persistent tree (top) + docked editor (bottom) */
@@ -645,6 +648,14 @@ code { background: var(--panel-3); padding: 2px 6px; border-radius: 5px; font-fa
   box-shadow: 0 8px 24px rgba(0,0,0,.28); opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; z-index: 10000;
 }
 .app-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+/* Undo variant: message + tappable Undo action (replaces confirm() dialogs) */
+.undo-toast { display: flex; align-items: center; gap: 14px; max-width: calc(100vw - 24px); }
+.undo-toast.show { pointer-events: auto; }
+.undo-toast .ut-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.undo-toast .ut-btn { background: none; border: none; color: #6db3ff; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer; padding: 4px 2px; flex: none; }
+/* The Settings modal's Data section only exists on phones (the sheet row is
+   hidden there); desktop keeps the always-visible Export/Import/Clear row. */
+.set-data-only { display: none; }
 
 /* ===== v2 mockup match: category = grey rounded container ===== */
 .tree { display: flex; flex-direction: column; gap: 14px; padding: 0 16px 24px; }
@@ -712,6 +723,9 @@ code { background: var(--panel-3); padding: 2px 6px; border-radius: 5px; font-fa
 
 /* Editing cards must not shrink or the stats labels get clipped */
 #panel > .card { flex-shrink: 0; }
+/* The Style popout is a panel child too — without this it gets flex-squashed
+   and the Fill-opacity row disappears when space is tight. */
+.style-panel { flex-shrink: 0; }
 
 /* ===== Narrow panel overrides — only apply on small screens ===== */
 @media (max-width: 540px) {
@@ -739,7 +753,7 @@ code { background: var(--panel-3); padding: 2px 6px; border-radius: 5px; font-fa
   .tz-card-net-unit { font-size: 9px; }
   .tz-card-sep { margin: 0; }
   .tz-card-actions { padding-left: 6px; gap: 0; }
-  .tz-act-btn { width: 33px; padding: 4px 2px; }
+  .tz-act-btn { width: 36px; min-height: 40px; padding: 4px 2px; }
   .tz-act-btn i { font-size: 15px; }
   .tz-act-btn span { font-size: 9px; }
 
@@ -776,19 +790,273 @@ code { background: var(--panel-3); padding: 2px 6px; border-radius: 5px; font-fa
   .ov-sub { padding-left: 4px; padding-right: 4px; }
 }
 
-/* ===== Phone layout: stack map over panel. The desktop grid reserves a fixed
-  /* 480px side column — on a phone that's wider than the screen, so the map's 1fr
-  /* column collapses to nothing and the tool is unusable. ===== */
+/* ===== Phone layout =====
+   The desktop grid reserves a fixed 480px side column — wider than a phone, so
+   the map's 1fr column collapses to nothing. On phones we drop the grid entirely:
+   the MAP fills the screen (it's the thing you're working on) and the panel becomes
+   a bottom SHEET that slides up over it. A grab handle peeks at the bottom; tap or
+   drag it up to reveal stats / settings / layers, drag down to get the map back. */
+:root { --sheet-peek: 34px; }
+#sheetHandle { display: none; }
+/* Phone-only floating controls (Measure FAB + in-trace toolbar + crosshair
+   reticle) — desktop never shows them, the side panel has the full toolset. */
+#mapFab, #traceBar, #fabCatSheet, #xhairMark { display: none; }
+
 @media (max-width: 700px) {
-  #app {
-  /*  grid-template-columns: 1fr;
-  /*  grid-template-rows: 52vh minmax(0, 1fr);
-  /*  grid-template-rows: 52dvh minmax(0, 1fr); /* dvh: correct under mobile URL bars */
-  /*  height: 100vh;
-  /*  height: 100dvh;
+  /* Home-indicator phones: grow the peek bar into the safe area. */
+  :root { --sheet-peek: calc(34px + env(safe-area-inset-bottom, 0px)); }
+
+  /* Kill the two-column grid; map owns the viewport. */
+  #app { display: block; height: 100vh; height: 100dvh; }
+  #map-wrap { position: fixed; inset: 0; height: 100vh; height: 100dvh; }
+  /* Stop the map (and Google's own Map/Satellite + camera controls, which pin to
+     its bottom corners) short of the peeking sheet so nothing hides behind it. */
+  #map { bottom: var(--sheet-peek); }
+
+  /* Rapid taps on controls must never trigger double-tap zoom (placing polygon
+     corners quickly, toggling tools). The map handles its own gestures. */
+  button, .tz-card-hdr, .tz-group-hdr, #sheetHandle { touch-action: manipulation; }
+
+  /* iOS Safari auto-zooms the page when a focused input's text is under 16px —
+     hold every text field at 16px on phones so focusing never zooms the layout. */
+  .ed-input, .cal-step-val, .cal-edit, #searchBar input { font-size: 16px; }
+
+  /* Panel = bottom sheet. Peeks by --sheet-peek px; slides fully open on .sheet-open. */
+  #panel {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+    height: 86vh; height: 86dvh;
+    border-left: none; border-top: none;
+    border-radius: 20px 20px 0 0;
+    box-shadow: 0 -10px 34px rgba(0,0,0,.20);
+    /* Top padding = handle height: the fixed grab bar sits over the sheet's
+       top edge, so content must start below it or the first card gets clipped. */
+    padding: var(--sheet-peek) 12px calc(24px + env(safe-area-inset-bottom));
+    gap: 10px;
+    transform: translateY(calc(100% - var(--sheet-peek)));
+    transition: transform .34s cubic-bezier(.22,1,.36,1);
+    overscroll-behavior: contain;
   }
-  #panel { border-left: none; border-top: 1px solid var(--border-soft); }
-  #searchBar { width: calc(100vw - 32px); max-width: calc(100vw - 32px); }
+  #app.sheet-open #panel { transform: translateY(0); }
+  /* HALF state: sheet rises to ~46% so the map, the shape you just traced and
+     its stats are all on screen together. Height (not transform) shrinks the
+     scrollport, so every row stays reachable by scrolling even at half. */
+  #app.sheet-half #panel { transform: translateY(0); height: 46vh; height: 46dvh; }
+  #panel { transition: transform .34s cubic-bezier(.22,1,.36,1), height .34s cubic-bezier(.22,1,.36,1); }
+  /* While collapsed, don't let the hidden panel eat touches meant for the map. */
+  #panel { touch-action: pan-y; }
+
+  /* Grab handle — a fixed bar pinned to the sheet's top edge (two discrete
+     positions, animated to match the sheet). Full-width tap target. */
+  #sheetHandle {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    position: fixed; left: 0; right: 0; z-index: 31;
+    height: var(--sheet-peek); padding-bottom: env(safe-area-inset-bottom, 0px);
+    box-sizing: border-box; cursor: pointer; user-select: none;
+    background: var(--bg-panel);
+    border-radius: 20px 20px 0 0;
+    box-shadow: 0 -10px 34px rgba(0,0,0,.20);
+    bottom: 0;
+    transition: bottom .34s cubic-bezier(.22,1,.36,1);
+    touch-action: none;
+  }
+  #app.sheet-open #sheetHandle { bottom: calc(86dvh - var(--sheet-peek)); box-shadow: none; }
+  #app.sheet-half #sheetHandle { bottom: calc(46dvh - var(--sheet-peek)); box-shadow: none; padding-bottom: 0; }
+  #sheetHandle .grab { width: 42px; height: 5px; border-radius: 3px; background: #cbd2da; }
+  #sheetHandle .sheet-cap { font-size: 13px; font-weight: 600; color: var(--text-dim); letter-spacing: .01em; }
+  #app.sheet-open #sheetHandle .grab { background: #d8dee6; }
+
+  /* Floating controls clear of the peeking sheet + notches. */
+  #searchBar { top: max(12px, env(safe-area-inset-top)); width: calc(100vw - 24px); max-width: calc(100vw - 24px); }
+  .onboard-card { top: 44%; }
+
+  /* While tracing, instructions move to the TOP of the screen — the thumb (and
+     the finish taps) live at the bottom, so a bottom pill gets covered by the
+     hand doing the work. The search bar yields its spot during the trace. */
+  #map-wrap.drawing-mode #searchBar { opacity: 0; pointer-events: none; }
+  .draw-hint {
+    bottom: auto; top: max(12px, env(safe-area-inset-top));
+    width: max-content; max-width: calc(100vw - 24px);
+    padding: 12px 18px; font-size: 14px; line-height: 1.35; text-align: center;
+  }
+
+  /* When the sheet is open, the handle is a plain bar at its top — the
+     safe-area padding only applies while it's pinned to the screen bottom. */
+  #app.sheet-open #sheetHandle { padding-bottom: 0; }
+
+  /* Idle editor chrome is dead weight on a phone: with no active area, the
+     "No area selected" zero-stats card and the disabled Area Settings card
+     just push "Your areas" (the actionable part) below the fold. Hide both —
+     they reappear the moment an area is selected or a trace finishes, and the
+     sheet auto-opens right into them at that point. */
+  .stats-card-v2.disabled { display: none; }
+  .settings-card:has(#areaName:disabled) { display: none; }
+
+  /* Header icon buttons (visibility / calculator / settings) get real
+     thumb-sized targets instead of desktop-cursor ones — sized so the whole
+     header row (title + 3 icons + Add Category) still fits one line at 360px. */
+  .areas-hdr { gap: 4px; flex-wrap: wrap; }
+  .areas-hdr-title { font-size: 16px; white-space: nowrap; }
+  .areas-hdr-actions { gap: 2px; }
+  .areas-hdr-icon { padding: 8px; }
+  .areas-hdr-icon i { font-size: 19px; }
+  .add-cat-pill { padding: 10px 13px; white-space: nowrap; }
+  .tz-gbtn { min-height: 34px; min-width: 34px; justify-content: center; }
+
+  /* The editing banner's inline tip says "right-click a point to delete" —
+     mouse advice with no touch equivalent, and it truncates anyway. Drop it. */
+  .edit-banner-text > span:not(.pulse) { display: none; }
+
+  /* ── Measure FAB: one thumb-tap from map to tracing ── */
+  #mapFab {
+    display: flex; align-items: center; gap: 8px;
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(var(--sheet-peek) + 14px); z-index: 25;
+    background: var(--green); color: #fff; border: none; border-radius: 999px;
+    padding: 14px 24px; font-family: var(--font); font-size: 16px; font-weight: 700;
+    box-shadow: 0 6px 22px rgba(21,160,107,.45), 0 2px 6px rgba(0,0,0,.18);
+    cursor: pointer; touch-action: manipulation;
+  }
+  #mapFab:active { transform: translateX(-50%) scale(.97); }
+  #mapFab .ti { font-size: 19px; }
+  #mapFab[hidden] { display: none; }
+
+  /* ── In-trace toolbar: Undo / Finish / Cancel under the thumb ── */
+  #traceBar {
+    display: flex; align-items: stretch; gap: 8px;
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(var(--sheet-peek) + 14px); z-index: 25;
+    max-width: calc(100vw - 20px);
+  }
+  #traceBar[hidden] { display: none; }
+  /* Inside the LawnPro iframe the embed Use/Cancel bar owns this spot — stack above it. */
+  #traceBar.embedded { bottom: calc(var(--sheet-peek) + 78px); }
+  #traceBar button {
+    display: flex; align-items: center; gap: 6px; border-radius: 999px;
+    padding: 13px 18px; font-family: var(--font); font-size: 15px; font-weight: 600;
+    border: 1px solid #cbd5e1; background: #fff; color: #334155;
+    box-shadow: 0 6px 20px rgba(0,0,0,.18); cursor: pointer; touch-action: manipulation;
+  }
+  #traceBar button:disabled { opacity: .45; }
+  #traceBar button .ti { font-size: 17px; }
+  #traceBar #tbFinish { background: var(--green); border-color: var(--green); color: #fff; font-weight: 700; box-shadow: 0 6px 20px rgba(16,185,129,.4); }
+  #traceBar #tbXhair, #traceBar #tbCancel { padding: 13px 15px; }
+  #traceBar #tbXhair.on { background: var(--ink); border-color: var(--ink); color: #fff; }
+
+  /* Crosshair mode: "Drop point" becomes the primary action; Undo/Finish
+     shrink to icons so the bar still fits a 320px screen. */
+  #traceBar #tbDrop { display: none; background: var(--green); border-color: var(--green); color: #fff; font-weight: 700; white-space: nowrap; box-shadow: 0 6px 20px rgba(16,185,129,.4); }
+  #traceBar.xhair #tbDrop { display: flex; }
+  #traceBar.xhair .tb-lbl { display: none; }
+  #traceBar.xhair #tbUndo, #traceBar.xhair #tbFinish { padding: 13px 15px; }
+  #traceBar.xhair #tbFinish { background: #fff; border-color: #cbd5e1; color: var(--green-deep); box-shadow: 0 6px 20px rgba(0,0,0,.18); }
+
+  /* The reticle: ring + center dot pinned to the map's visual center (the map
+     stops above the peek bar, so center accounts for it). Outlined in both
+     light and dark so it reads on any imagery. */
+  #xhairMark {
+    display: block; position: fixed; z-index: 24; pointer-events: none;
+    left: 50%; top: calc((100dvh - var(--sheet-peek)) / 2);
+    width: 46px; height: 46px; transform: translate(-50%, -50%);
+    border: 2.5px solid #fff; border-radius: 50%;
+    box-shadow: 0 0 0 1.5px rgba(0,0,0,.5), inset 0 0 0 1.5px rgba(0,0,0,.5);
+  }
+  #xhairMark[hidden] { display: none; }
+  #xhairMark .xh-dot {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: 7px; height: 7px; border-radius: 50%;
+    background: #2ecc71; box-shadow: 0 0 0 2px #fff, 0 0 0 3px rgba(0,0,0,.4);
+  }
+  /* Hairline ticks extending from the ring, so the exact center is obvious. */
+  #xhairMark::before, #xhairMark::after {
+    content: ''; position: absolute; background: #fff;
+    box-shadow: 0 0 0 1px rgba(0,0,0,.45);
+  }
+  #xhairMark::before { left: 50%; top: -12px; width: 2px; height: 68px; transform: translateX(-50%); clip-path: polygon(0 0, 100% 0, 100% 26%, 0 26%, 0 74%, 100% 74%, 100% 100%, 0 100%); }
+  #xhairMark::after  { top: 50%; left: -12px; height: 2px; width: 68px; transform: translateY(-50%); clip-path: polygon(0 0, 26% 0, 26% 100%, 0 100%, 74% 0, 100% 0, 100% 100%, 74% 100%); }
+
+  /* ── Category chooser (FAB tapped with 2+ categories) ── */
+  #fabCatSheet { display: block; position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,.32); }
+  #fabCatSheet[hidden] { display: none; }
+  .fcs-panel {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    background: var(--panel); border-radius: 20px 20px 0 0;
+    padding: 8px 14px calc(16px + env(safe-area-inset-bottom, 0px));
+    box-shadow: 0 -10px 34px rgba(0,0,0,.25);
+  }
+  .fcs-grab { width: 42px; height: 5px; border-radius: 3px; background: #d8d8dd; margin: 6px auto 12px; }
+  .fcs-title { font-size: 15px; font-weight: 700; color: var(--text); margin: 0 4px 10px; }
+  .fcs-panel button {
+    display: flex; align-items: center; gap: 12px; width: 100%;
+    background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: 12px;
+    padding: 14px; margin-bottom: 8px; font-family: var(--font); font-size: 15px;
+    font-weight: 600; color: var(--text); cursor: pointer; touch-action: manipulation;
+  }
+  .fcs-panel button .fcs-dot { width: 12px; height: 12px; border-radius: 50%; flex: none; }
+  .fcs-panel button .ti { font-size: 18px; color: var(--green-deep); flex: none; }
+  .fcs-panel button.fcs-new { background: none; border-style: dashed; color: var(--green-deep); justify-content: center; }
+
+  /* Area Settings: three fields don't fit one row on a phone. Name gets its
+     own full-width line; Category + Style share the second, so the category
+     name ("Lawn", "Flower Beds") is finally readable instead of "L…". */
+  .set-row { flex-wrap: wrap; }
+  .set-row .set-field:first-child { flex: 1 1 100% !important; }
+  .set-row .set-field:first-child .set-lbl { padding-top: 0; }
+
+  /* Without cutouts the "Gross · Cutouts · Net" line just repeats the big net
+     number — show the breakdown only when the area actually has cutouts. */
+  .tz-card-stats.no-cuts { display: none; }
+
+  /* Cutout-row delete ✕: full-size touch target (desktop keeps the tiny one). */
+  .tz-cut-x { width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; }
+  .tz-cut-x i { font-size: 17px; }
+
+  /* ── Declutter pass (phone only) ── */
+  /* Export/Import/Clear are desktop file workflows — they live in Settings →
+     Data on phones instead of permanent sheet UI. */
+  .ov-data { display: none; }
+  .set-data-only { display: block; }
+  /* Redo is a desktop reflex; Undo stays (and the trace bar has its own). */
+  #redoBtn { display: none; }
+  /* Idle toolbar: Rect/Circle only matter while editing (cutout shapes) — when
+     nothing is selected they're dead buttons, so show Select/Area/Line only.
+     The Measure FAB's long-press offers rectangle/circle starts. */
+  #panel:has(.stats-card-v2.disabled) .shape-btn[data-shape="rectangle"],
+  #panel:has(.stats-card-v2.disabled) .shape-btn[data-shape="circle"],
+  #panel:has(.stats-card-v2.disabled) .tool-sep { display: none; }
+  /* The welcome card duplicates the FAB's empty-state path — one path is friendlier. */
+  .onboard-card { display: none; }
+  /* Single category: hide the grouping chrome (header row + grey box) — it's
+     an organization of one. Reappears automatically with a 2nd category. */
+  .tree.one-group .tz-group-hdr { display: none; }
+  .tree.one-group .tz-group { background: none; border: none; padding: 0; }
+  /* Toast must clear the peek bar + FAB. */
+  .app-toast { bottom: calc(var(--sheet-peek) + 76px); }
+
+  /* ── Search collapses to an icon; expands on tap ── */
+  #searchBar {
+    left: 12px; transform: none;
+    width: 44px; max-width: 44px; padding: 0;
+    justify-content: center; cursor: pointer; overflow: hidden;
+    transition: width .22s ease, max-width .22s ease, padding .22s ease;
+  }
+  #searchBar:not(.expanded) input { display: none; }
+  #searchBar.expanded {
+    width: calc(100vw - 24px); max-width: calc(100vw - 24px);
+    padding: 0 15px; justify-content: flex-start; cursor: auto;
+  }
+}
+
+/* Ultra-narrow phones (iPhone SE, Fold cover screen): shave the areas header
+   so title + icons + Add Category still share one line at 320px. */
+@media (max-width: 360px) {
+  .areas-hdr-title { font-size: 15px; }
+  .areas-hdr-icon { padding: 6px; }
+  .areas-hdr-icon i { font-size: 18px; }
+  .add-cat-pill { padding: 9px 10px; font-size: 12.5px; }
+  /* Trace bar: icons only, so Undo/Finish/⌖/✕ (+ Drop point) share the width. */
+  #traceBar .tb-lbl { display: none; }
+  #traceBar #tbUndo, #traceBar #tbFinish { padding: 13px 15px; }
+  #traceBar #tbDrop { padding: 13px 14px; }
 }
 
 /* ===== Material calculator (Apple sheet) ===== */

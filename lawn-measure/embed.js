@@ -36,9 +36,20 @@
 
   function addButton() {
     if (document.getElementById('embedUseBtn')) return;
+    // On phones the tool's panel is a bottom SHEET with a ~30px peek handle at the
+    // very bottom. Lift our action bar above that handle so the two stack cleanly
+    // instead of overlapping. On desktop (side-panel layout) keep the low position.
+    var coarse = window.matchMedia('(max-width: 700px)').matches;
+    var sheetH = document.getElementById('sheetHandle');
+    var peek = (coarse && sheetH) ? (sheetH.offsetHeight || 34) : 0; // actual handle height (safe-area aware)
+    var barBottom = coarse ? peek + 14 : 16;  // clears the sheet handle + gap
+    // Phones stack TWO rows above the Use bar while tracing (the tool's own
+    // Undo/Finish/Cancel bar rides at barBottom+~64) — lift the locate button
+    // above both so nothing shares its row. Desktop keeps the tight offset.
+    var locBottom = coarse ? barBottom + 118 : barBottom + 62;
     var wrap = document.createElement('div');
     wrap.id = 'embedUseWrap';
-    wrap.style.cssText = 'position:fixed;left:0;right:0;bottom:16px;z-index:99999;display:flex;justify-content:center;gap:10px;pointer-events:none;';
+    wrap.style.cssText = 'position:fixed;left:0;right:0;bottom:' + barBottom + 'px;z-index:99999;display:flex;justify-content:center;gap:10px;pointer-events:none;';
 
     var cancel = document.createElement('button');
     cancel.textContent = 'Cancel';
@@ -67,7 +78,7 @@
     var loc = document.createElement('button');
     loc.title = 'Go to my location';
     loc.innerHTML = '<i class="ti ti-current-location"></i>';
-    loc.style.cssText = 'position:fixed;right:12px;bottom:76px;z-index:99999;width:46px;height:46px;border-radius:50%;background:#fff;color:#334155;border:1px solid #cbd5e1;box-shadow:0 6px 20px rgba(0,0,0,.18);cursor:pointer;font-size:20px;display:flex;align-items:center;justify-content:center;';
+    loc.style.cssText = 'position:fixed;right:12px;bottom:' + locBottom + 'px;z-index:99999;width:46px;height:46px;border-radius:50%;background:#fff;color:#334155;border:1px solid #cbd5e1;box-shadow:0 6px 20px rgba(0,0,0,.18);cursor:pointer;font-size:20px;display:flex;align-items:center;justify-content:center;';
     loc.onclick = function () {
       if (!navigator.geolocation) return;
       loc.style.opacity = '0.5';
