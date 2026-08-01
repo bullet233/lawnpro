@@ -110,25 +110,33 @@ function App() {
     };
     
     const runDivisionsMigration = async () => {
-      if (localStorage.getItem('divisions_migrated_v3')) return;
-      const routes = await db.routes.toArray();
-      const visitsList = await db.visits.toArray();
+      // Backfill a `division` onto every route/visit that is missing one.
+      //
+      // This intentionally is NOT gated behind a one-time localStorage flag.
+      // A backup Restore re-inserts legacy records (exported before divisions
+      // existed) straight into the DB without ever re-running the old one-time
+      // migration, leaving visits with no division. Those undivisioned visits
+      // then match BOTH mowing and fertilizer filters and get counted twice
+      // (inflating each mode's revenue/visit totals). Running the backfill on
+      // every startup — but only writing to records that actually lack a
+      // division — keeps the data self-healing and cheap (writes only happen
+      // when something is missing).
+      const undivisionedRoutes = await db.routes.filter(r => !r.division).toArray();
+      const undivisionedVisits = await db.visits.filter(v => !v.division).toArray();
+      if (undivisionedRoutes.length === 0 && undivisionedVisits.length === 0) return;
+
       const settings = getSettings();
       const fertServiceIds = (settings.defaultServices || [])
         .filter(s => s.name.toLowerCase().match(/(fert|weed|spray|chem)/))
         .map(s => s.id);
 
-      for (const route of routes) {
-        if (!route.division) {
-          await db.routes.update(route.id, { division: 'mowing' });
-        }
+      for (const route of undivisionedRoutes) {
+        await db.routes.update(route.id, { division: 'mowing' });
       }
 
-      for (const v of visitsList) {
-        if (!v.division) {
-          const isFert = v.appliedServices && v.appliedServices.some(id => fertServiceIds.includes(id) || id === 's3');
-          await db.visits.update(v.id, { division: isFert ? 'fertilizer' : 'mowing' });
-        }
+      for (const v of undivisionedVisits) {
+        const isFert = v.appliedServices && v.appliedServices.some(id => fertServiceIds.includes(id) || id === 's3');
+        await db.visits.update(v.id, { division: isFert ? 'fertilizer' : 'mowing' });
       }
       localStorage.setItem('divisions_migrated_v3', 'true');
     };

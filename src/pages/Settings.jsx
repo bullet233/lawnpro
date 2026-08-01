@@ -186,15 +186,24 @@ export default function Settings() {
       const customers = await db.customers.toArray();
       const visits = await db.visits.toArray();
       const routes = await db.routes.toArray();
+      // Legally-required application history + fuel costs live in their own
+      // stores. Older backups omitted them, so a "restore" silently wiped
+      // treatments (EPA records) and fuel logs. Include them here.
+      const treatments = await db.treatments.toArray();
+      const treatmentPrograms = await db.treatmentPrograms.toArray();
+      const fuelLogs = await db.fuelLogs.toArray();
       const settingsData = getSettings();
 
       const backup = {
-        version: 1,
+        version: 2,
         exportedAt: new Date().toISOString(),
         settings: settingsData,
         customers,
         visits,
-        routes
+        routes,
+        treatments,
+        treatmentPrograms,
+        fuelLogs
       };
 
       const json = JSON.stringify(backup, null, 2);
@@ -208,7 +217,8 @@ export default function Settings() {
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
 
-      toast(`Exported ${customers.length} customers, ${visits.length} visits, and ${routes.length} routes.`);
+      const treatmentNote = treatments.length ? `, ${treatments.length} treatments` : '';
+      toast(`Exported ${customers.length} customers, ${visits.length} visits, ${routes.length} routes${treatmentNote}.`);
     } catch (e) {
       setDialog({ type: 'warning', title: 'Export Failed', message: e.message });
     }
@@ -268,22 +278,37 @@ export default function Settings() {
         return;
       }
 
+      const treatmentCount = backup.treatments?.length || 0;
+      const fuelCount = backup.fuelLogs?.length || 0;
+      const extraLines =
+        (treatmentCount ? `\n• ${treatmentCount} treatment records` : '') +
+        (fuelCount ? `\n• ${fuelCount} fuel logs` : '');
+
       setDialog({
         type: 'warning',
         title: 'Restore Backup?',
-        message: `This will REPLACE all current data with:\n\n• ${backup.customers.length} customers\n• ${backup.visits.length} visits\n• ${backup.routes?.length || 0} routes\n\nYour current data will be permanently overwritten. Are you sure?`,
+        message: `This will REPLACE all current data with:\n\n• ${backup.customers.length} customers\n• ${backup.visits.length} visits\n• ${backup.routes?.length || 0} routes${extraLines}\n\nYour current data will be permanently overwritten. Are you sure?`,
         confirmLabel: 'Restore',
         onConfirm: async () => {
           try {
-            // Clear existing data
+            // Clear existing data. Treatment/fuel stores are cleared too so a
+            // restore reproduces the backup exactly (a v1 backup that predates
+            // these stores restores them as empty, matching its snapshot).
             await db.customers.clear();
             await db.visits.clear();
             await db.routes.clear();
+            await db.treatments.clear();
+            await db.treatmentPrograms.clear();
+            await db.fuelLogs.clear();
 
             // Restore data
             if (backup.customers.length > 0) await db.customers.bulkAdd(backup.customers);
             if (backup.visits.length > 0) await db.visits.bulkAdd(backup.visits);
             if (backup.routes?.length > 0) await db.routes.bulkAdd(backup.routes);
+            // v2+ backups carry these; older backups simply won't have them.
+            if (backup.treatments?.length > 0) await db.treatments.bulkAdd(backup.treatments);
+            if (backup.treatmentPrograms?.length > 0) await db.treatmentPrograms.bulkAdd(backup.treatmentPrograms);
+            if (backup.fuelLogs?.length > 0) await db.fuelLogs.bulkAdd(backup.fuelLogs);
 
             // Restore settings
             if (backup.settings) {
@@ -308,7 +333,10 @@ export default function Settings() {
               if (s.addOnServices) setAddOnServices(s.addOnServices);
             }
 
-            toast(`Successfully restored ${backup.customers.length} customers, ${backup.visits.length} visits, and ${backup.routes?.length || 0} routes.`);
+            const restoredExtra =
+              (treatmentCount ? `, ${treatmentCount} treatments` : '') +
+              (fuelCount ? `, ${fuelCount} fuel logs` : '');
+            toast(`Successfully restored ${backup.customers.length} customers, ${backup.visits.length} visits, ${backup.routes?.length || 0} routes${restoredExtra}.`);
           } catch (err) {
             setDialog({ type: 'warning', title: 'Restore Failed', message: err.message });
           }
@@ -450,7 +478,7 @@ export default function Settings() {
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.5rem' }}>
         <SettingsIcon size={24} color="var(--color-primary)" />
         <h1 className="page-title" style={{ margin: 0 }}>Settings</h1>
-        <span style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px', border: '1px solid var(--color-border)', marginLeft: 'auto', fontWeight: 600 }}>v1.1.3</span>
+        <span style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px', border: '1px solid var(--color-border)', marginLeft: 'auto', fontWeight: 600 }}>v1.4.1</span>
       </div>
 
       <div className="tab-bar">
@@ -834,8 +862,8 @@ export default function Settings() {
 
         </div>
 
-        <button  
-          className="btn btn-primary" 
+        <button
+          className="btn btn-primary"
           style={{ width: '100%', justifyContent: 'center' }}
           onClick={handleSave}
         >
@@ -982,6 +1010,55 @@ export default function Settings() {
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
             <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-primary)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.4.1</h3>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>July 2026</span>
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '1.2rem', color: 'var(--color-text-main)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <li><strong>Mowing + Fertilizer Routes Coexist:</strong> Saving a route no longer wipes out the other division's route. Each mode keeps its own active route — save tomorrow's mowing route and fertilizer route back to back and both stay loaded.</li>
+                <li><strong>Mode Switch Refreshes the Live Route:</strong> Flipping Mowing ↔ Fertilizer now immediately shows that division's route on the Live map instead of waiting for the next data change.</li>
+              </ul>
+            </div>
+
+            <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-border)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.4.0</h3>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>July 2026</span>
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '1.2rem', color: 'var(--color-text-main)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <li><strong>Today's Mix:</strong> Set the day's tank once on the Live map and every fertilizer stop auto-files its EPA compliance log on completion — products, customer, address, lawn size, and start/end times filled in. The mix expires at midnight so yesterday's tank never signs today's logs.</li>
+                <li><strong>Per-Lawn Products:</strong> "This lawn's products" button on the running job panel overrides the day mix for the current stop only (guarded by customer and date), and the completion panel gets a two-tap product picker when nothing was set.</li>
+                <li><strong>EPA Sheet Opens on Exit:</strong> Finishing a fertilizer job — geofence pull-away or manual Done — pops the compliance sheet prefilled for review, so corrections happen at the truck. The completion card waits until the sheet closes.</li>
+                <li><strong>Drive-Off Protection:</strong> A half-filled sheet is auto-saved if the next stop replaces it, and an amber banner counts today's fertilizer stops missing EPA records — tap to fill each prefilled sheet until it clears.</li>
+                <li><strong>Programs ↔ Field Work Connected:</strong> A field fertilizer visit now completes the client's matching program step (with an early-apply grace window), and "Log Application" on the Treatments page creates a real revenue visit that shows in Logs and money screens.</li>
+                <li><strong>Treatment Logs Are a Real Archive:</strong> New "Completed this year" section on Treatments, View Log buttons on profile program steps, and the official PDF sheet now prints for program logs.</li>
+                <li><strong>Field EPA Logging Fixed:</strong> The completion card's EPA button had never actually opened the sheet — it now works, and it shows for every fertilizer-mode visit regardless of service name.</li>
+                <li><strong>Division Totals Corrected:</strong> Legacy visits with no division were counted in both Mowing and Fertilizer (inflating mowing ~$560). The backfill is now restore-proof, and backups finally include treatments, programs, and fuel logs.</li>
+                <li><strong>Real Calendar Weeks:</strong> Home's weekly card and the Logs filters use a true Monday-start week and calendar month instead of rolling windows — Home, Logs, and Today now agree.</li>
+                <li><strong>Nearby Prompts on Auto-Exit:</strong> Neighbor suggestions fire when you drive off (not just on manual Done), skip paused/snoozed/already-serviced clients, show due badges with expected time and $/hr, and can add picks straight to today's route.</li>
+                <li><strong>Honest $/hr:</strong> Profile "Avg $/hr" is now mow-time-only to match the leaderboard, with the drive-inclusive figure kept as a labeled helper line; bidding pace data no longer fabricates ultra-fast lawns.</li>
+              </ul>
+            </div>
+
+            <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-border)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.3.0</h3>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>July 2026</span>
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '1.2rem', color: 'var(--color-text-main)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <li><strong>Arrival Zone Editor:</strong> The client Location tab was redesigned around how the geofence is actually used — tap the road where you park and a ~100 ft trigger zone drops there, sized for GPS drift. Drag to reposition, resize with a slider (50–300 ft), or trace a custom shape for corner lots. New clients arm tap-to-place automatically after the address is found.</li>
+                <li><strong>Measure Tool Fixed on Phone (PWA):</strong> The installed app's offline worker was serving the app itself into the measuring window, so the tool appeared buried behind the rest of the app. The worker now lets Lawn Measure load normally.</li>
+                <li><strong>Lawn Measure Works on Mobile:</strong> The measuring tool now stacks map-over-panel on phones (it previously rendered a zero-width map), supports one-finger panning, live trace preview on touch, and tap-the-last-point to finish lines.</li>
+                <li><strong>Faster Measuring:</strong> Opening the tool from a client now skips straight into drawing — category and area are pre-created and the address is centered. Undo removes a mis-tapped corner mid-trace, a running sq ft total shows as you draw, the save button displays the exact figure it will store, and a locate-me button jumps to your GPS position.</li>
+                <li><strong>Smarter Neighbor Splits:</strong> When you finish a job next to another client, the split-time prompt now shows distance, price, and last-serviced date per property, and pre-fills each lawn's minutes from its own history instead of an even guess.</li>
+                <li><strong>Cluster $/hr Preview:</strong> The split screen now shows the combined hourly rate across paired properties, so you can see at a glance whether knocking out neighbors together actually paid off.</li>
+                <li><strong>No More Lost Notes:</strong> Notes and job conditions now save whether you swipe the completion card away, tap Close, split the time, or let it auto-dismiss — every exit keeps your data.</li>
+                <li><strong>Cleaner Time Data:</strong> Fixed several edge cases that could log phantom or zero-minute visits (leftover neighbor picks, blank split fields), keeping your pricing history accurate.</li>
+                <li><strong>Correct Division Tagging:</strong> Force-skipped stops are now tagged Mowing vs. Fertilizer correctly, so they no longer show up in the wrong view.</li>
+              </ul>
+            </div>
+
+            <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-border)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
                 <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.2.0</h3>
                 <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>June 2026</span>

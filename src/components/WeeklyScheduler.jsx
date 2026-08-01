@@ -1,7 +1,9 @@
 import { useState, useMemo } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/db';
 import { parseLawnSizeToSqFt } from '../utils/matrix';
 import { getDaysSince } from '../utils/dateUtils';
+import { classifyTreatment } from '../db/treatments';
 import { ChevronDown, Moon } from 'lucide-react';
 import { useServiceMode } from './ServiceProvider';
 
@@ -13,6 +15,13 @@ export default function WeeklyScheduler({ customers, tieredMatrixData, settings,
   const [now] = useState(() => Date.now());
   const [openDropdownId, setOpenDropdownId] = useState(null);
   const { activeMode } = useServiceMode();
+
+  // Program treatments, so enrolled fert clients are flagged by their step
+  // windows (matching the Treatments page) instead of the 30-day interval.
+  const allTreatments = useLiveQuery(
+    () => (activeMode === 'fertilizer' ? db.treatments.toArray() : Promise.resolve([])),
+    [activeMode]
+  ) || [];
 
   // Group customers by day
   const columns = useMemo(() => {
@@ -241,10 +250,20 @@ export default function WeeklyScheduler({ customers, tieredMatrixData, settings,
                     lastServiceDays = getDaysSince(custVisits[0].exitTime);
                   }
                   
-                  // Simple overdue logic
-                  const svcInterval = activeMode === 'fertilizer' ? (cust.fertilizerInterval || 30) : (cust.mowingInterval || cust.serviceInterval || 7);
-                  if (lastServiceDays !== null && lastServiceDays >= svcInterval) {
-                    isOverdue = true;
+                  // Overdue logic: program-enrolled fert clients go by their
+                  // step windows (5 rounds/season, matching the Treatments
+                  // page), not the fixed interval — otherwise the scheduler
+                  // nags about clients no round is actually open for.
+                  if (activeMode === 'fertilizer' && cust.treatmentProgramId) {
+                    const states = allTreatments
+                      .filter(t => t.customerId === cust.id && (t.status === 'scheduled' || t.status === 'due'))
+                      .map(t => classifyTreatment(t, now));
+                    isOverdue = states.includes('overdue') || states.includes('due');
+                  } else {
+                    const svcInterval = activeMode === 'fertilizer' ? (cust.fertilizerInterval || 30) : (cust.mowingInterval || cust.serviceInterval || 7);
+                    if (lastServiceDays !== null && lastServiceDays >= svcInterval) {
+                      isOverdue = true;
+                    }
                   }
                 }
 

@@ -1,6 +1,7 @@
 import { useRef, useState, useEffect } from 'react';
 import { CheckCircle, ClipboardList, Scissors, Droplets, Wind, Sun, Edit2 } from 'lucide-react';
 import { formatLiveTimer } from '../../utils/dateUtils';
+import { useServiceMode } from '../ServiceProvider';
 
 const CONDITIONS = [
   { id: 'overgrown', label: 'Overgrown', icon: Scissors, color: '#10b981' },
@@ -22,10 +23,14 @@ export default function JobCompletionModal({
   setTimeSplit,
   setIsEditJobOpen,
   setActiveEpaJob,
+  onQuickLogProducts,
   handleSaveCompletion,
   onSelectionsChange,
+  onDismissNeighbors,
+  onAddCompanionsToRoute,
 }) {
   const panelTouchRef = useRef(null);
+  const { activeMode } = useServiceMode();
   const [selectedConditions, setSelectedConditions] = useState([]);
   const [selectedServices, setSelectedServices] = useState([]);
   const [selectedCompanions, setSelectedCompanions] = useState([]);
@@ -34,6 +39,10 @@ export default function JobCompletionModal({
     if (completionPanel) {
       setSelectedConditions(completionPanel.conditions || []);
       setSelectedServices(completionPanel.appliedServices || []);
+      // Reset neighbor picks too — otherwise a selection left over from a prior
+      // stop stays armed and "Yes – Split Time" would log time against a lawn
+      // that isn't even in this panel's candidate list.
+      setSelectedCompanions([]);
     }
   }, [completionPanel]);
 
@@ -86,7 +95,7 @@ export default function JobCompletionModal({
       onTouchEnd={e => {
         if (panelTouchRef.current !== null) {
           const dy = e.changedTouches[0].clientY - panelTouchRef.current;
-          if (dy > 80) { if (completionTimerRef.current) clearTimeout(completionTimerRef.current); setCompletionPanel(null); }
+          if (dy > 80) { handleSaveCompletion({ note: panelNote, conditions: selectedConditions, appliedServices: selectedServices }); }
           panelTouchRef.current = null;
         }
       }}
@@ -123,6 +132,31 @@ export default function JobCompletionModal({
           <div style={{ fontSize: '1.05rem', fontWeight: 800, color: rateColor }}>${hourlyRate.toFixed(0)}/hr</div>
         </div>
       </div>
+
+      {/* Program-step confirmation — the field visit already logged this round,
+          so the driver knows no second entry is needed on the Treatments page. */}
+      {completionPanel.programStepCompleted && (
+        <div style={{ marginBottom: '0.8rem', padding: '0.5rem 0.8rem', borderRadius: 'var(--radius-sm)', background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.3)', fontSize: '0.8rem', color: 'var(--color-primary)', fontWeight: 600 }}>
+          🧪 Program step marked done: {completionPanel.programStepCompleted}
+        </div>
+      )}
+
+      {/* Today's Mix already filed this stop's compliance record. */}
+      {completionPanel.complianceLog && (
+        <div style={{ marginBottom: '0.8rem', padding: '0.5rem 0.8rem', borderRadius: 'var(--radius-sm)', background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.3)', fontSize: '0.8rem', color: 'var(--color-primary)', fontWeight: 600 }}>
+          ✓ EPA log filed from today's mix — tap "EPA log" if this house was different
+        </div>
+      )}
+
+      {/* No mix was set: two-tap product pick beats the full sheet in the truck. */}
+      {activeMode === 'fertilizer' && !completionPanel.complianceLog && onQuickLogProducts && (
+        <button
+          onClick={() => { if (completionTimerRef.current) clearTimeout(completionTimerRef.current); onQuickLogProducts(completionPanel); }}
+          style={{ width: '100%', marginBottom: '0.8rem', padding: '0.6rem 0.8rem', borderRadius: 'var(--radius-sm)', background: 'rgba(16,185,129,0.1)', border: '1px dashed rgba(16,185,129,0.5)', fontSize: '0.8rem', color: 'var(--color-primary)', fontWeight: 600, cursor: 'pointer', textAlign: 'left' }}
+        >
+          🧪 Tap to log the products applied here (files the EPA record)
+        </button>
+      )}
 
       {completionPanel.primaryCustomer?.services && (
         <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.8rem' }}>
@@ -210,31 +244,74 @@ export default function JobCompletionModal({
           <div style={{ fontSize: '0.78rem', color: 'var(--color-text-muted)', marginBottom: '0.6rem' }}>
             Did you also service any of these neighboring properties?
           </div>
-          
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginBottom: '0.6rem' }}>
-            {completionPanel.nearbyCandidates.map(cand => (
-              <label key={cand.id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', cursor: 'pointer' }}>
-                <input 
-                  type="checkbox" 
-                  checked={selectedCompanions.some(c => c.id === cand.id)}
-                  onChange={(e) => {
-                    if (e.target.checked) {
-                      setSelectedCompanions([...selectedCompanions, cand]);
-                    } else {
-                      setSelectedCompanions(selectedCompanions.filter(c => c.id !== cand.id));
-                    }
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem', marginBottom: '0.6rem' }}>
+            {completionPanel.nearbyCandidates.map(cand => {
+              const isSel = selectedCompanions.some(c => c.id === cand.id);
+              const feet = Math.round(cand.dist * 3.28084);
+              const lastDays = cand.lastServicedTs
+                ? Math.floor((Date.now() - cand.lastServicedTs) / 86400000)
+                : null;
+              const lastLabel = lastDays == null ? 'Never serviced'
+                : lastDays === 0 ? 'Serviced earlier today'
+                : lastDays === 1 ? 'Serviced yesterday'
+                : `Serviced ${lastDays}d ago`;
+              // Estimated visit length (own history or trend curve) and the
+              // implied rate — the go/no-go numbers for walking next door.
+              const estMins = cand.expectedSecs ? Math.max(1, Math.round(cand.expectedSecs / 60)) : null;
+              const estRate = estMins && cand.mowPrice > 0 ? cand.mowPrice / (estMins / 60) : null;
+              const dueBadge = cand.dueStatus === 'new' ? { label: 'NEW', color: '#2563eb' }
+                : cand.dueStatus === 'overdue' ? { label: cand.daysSince != null ? `${cand.daysSince}D OVERDUE` : 'OVERDUE', color: '#ef4444' }
+                : cand.dueStatus === 'due' ? { label: 'DUE', color: '#f59e0b' }
+                : null;
+              return (
+                <div
+                  key={cand.id}
+                  onClick={() => setSelectedCompanions(isSel
+                    ? selectedCompanions.filter(c => c.id !== cand.id)
+                    : [...selectedCompanions, cand])}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '0.6rem', cursor: 'pointer',
+                    padding: '0.55rem 0.65rem', borderRadius: '12px',
+                    border: `1px solid ${isSel ? 'var(--color-primary)' : 'var(--color-border)'}`,
+                    background: isSel ? 'rgba(16,185,129,0.14)' : 'var(--color-bg-card)'
                   }}
-                />
-                {cand.name} ({Math.round(cand.dist)}m)
-              </label>
-            ))}
+                >
+                  <div style={{ width: '20px', height: '20px', borderRadius: '6px', flexShrink: 0, border: `2px solid ${isSel ? 'var(--color-primary)' : 'var(--color-text-muted)'}`, background: isSel ? 'var(--color-primary)' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    {isSel && <CheckCircle size={12} color="#fff" />}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                      <span style={{ fontWeight: 600, fontSize: '0.9rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cand.name}</span>
+                      {dueBadge && (
+                        <span style={{ fontSize: '0.62rem', fontWeight: 700, letterSpacing: '0.3px', color: dueBadge.color, background: `${dueBadge.color}1f`, padding: '0.1rem 0.35rem', borderRadius: '6px', flexShrink: 0 }}>{dueBadge.label}</span>
+                      )}
+                      {cand.onRoute && (
+                        <span style={{ fontSize: '0.62rem', fontWeight: 700, letterSpacing: '0.3px', color: '#2563eb', background: 'rgba(37,99,235,0.12)', padding: '0.1rem 0.35rem', borderRadius: '6px', flexShrink: 0 }}>ON ROUTE</span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--color-text-muted)', marginTop: '0.1rem' }}>
+                      {feet} ft away · {lastLabel}{estMins ? ` · ~${estMins}m` : ''}
+                    </div>
+                  </div>
+                  {cand.mowPrice > 0 && (
+                    <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: '0.85rem', color: 'var(--color-primary)' }}>${cand.mowPrice.toFixed(0)}</div>
+                      {estRate && (
+                        <div style={{ fontSize: '0.68rem', fontWeight: 600, color: 'var(--color-text-muted)' }}>≈${estRate.toFixed(0)}/hr</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
 
           <div style={{ display: 'flex', gap: '0.5rem' }}>
             <button
               className="btn btn-secondary"
               style={{ flex: 1, fontSize: '0.85rem', padding: '0.4rem' }}
-              onClick={() => setCompletionPanel(prev => ({ ...prev, nearbyCandidates: [] }))}
+              onClick={() => { setCompletionPanel(prev => ({ ...prev, nearbyCandidates: [] })); onDismissNeighbors?.(); }}
             >
               No / Dismiss
             </button>
@@ -248,6 +325,8 @@ export default function JobCompletionModal({
                   primaryCustomer: completionPanel.primaryCustomer,
                   primaryVisitId: completionPanel.visitId,
                   primaryExitTime: completionPanel.exitTime,
+                  primaryExpectedSecs: completionPanel.historicalAverageSecs,
+                  primaryPrice: completionPanel.priceEarned,
                   durationSecs: completionPanel.durationSecs,
                   companions: selectedCompanions
                 });
@@ -256,6 +335,25 @@ export default function JobCompletionModal({
               ⏱️ Yes – Split Time
             </button>
           </div>
+
+          {/* "Split Time" is for work already done; this is for work about to
+              happen — put the selected neighbors on today's route so the
+              geofence tracks them normally. Hidden for selections that are
+              already route stops. */}
+          {selectedCompanions.some(c => !c.onRoute) && (
+            <button
+              className="btn btn-secondary"
+              style={{ width: '100%', marginTop: '0.5rem', fontSize: '0.85rem', padding: '0.45rem', border: '1px solid var(--color-primary)', color: 'var(--color-primary)' }}
+              onClick={() => {
+                const toAdd = selectedCompanions.filter(c => !c.onRoute);
+                onAddCompanionsToRoute?.(toAdd);
+                setCompletionPanel(prev => ({ ...prev, nearbyCandidates: [] }));
+                onDismissNeighbors?.();
+              }}
+            >
+              ➕ Didn't service yet — add {selectedCompanions.filter(c => !c.onRoute).length > 1 ? `all ${selectedCompanions.filter(c => !c.onRoute).length} to route` : 'to route'} & mow next
+            </button>
+          )}
         </div>
       )}
 
@@ -279,17 +377,28 @@ export default function JobCompletionModal({
         >
           <Edit2 size={16} /> Edit details
         </button>
-        {completionPanel.primaryCustomer?.services?.some(s => selectedServices.includes(s.id) && s.name.toLowerCase().match(/(fertilizer|weed|spray|chem)/)) && (
+        {/* Any fert-mode visit is a chemical application regardless of how the
+            service is named ("Round 3" etc.), so the EPA button always shows there. */}
+        {(activeMode === 'fertilizer' || completionPanel.primaryCustomer?.services?.some(s => selectedServices.includes(s.id) && s.name.toLowerCase().match(/(fertilizer|weed|spray|chem)/))) && (
           <button
             style={{ flex: 1, height: '44px', borderRadius: '14px', background: 'transparent', border: 'none', color: 'var(--color-primary)', fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.3rem' }}
-            onClick={() => setActiveEpaJob({ id: completionPanel.visitId, custName: completionPanel.custName, exitTime: completionPanel.exitTime })}
+            onClick={() => { if (completionTimerRef.current) clearTimeout(completionTimerRef.current); setActiveEpaJob({
+              id: completionPanel.visitId,
+              custName: completionPanel.custName,
+              exitTime: completionPanel.exitTime,
+              durationSecs: completionPanel.durationSecs,
+              custLawnSize: completionPanel.primaryCustomer?.lawnSize,
+              phone: completionPanel.primaryCustomer?.phone,
+              address: completionPanel.primaryCustomer?.address,
+              complianceLog: completionPanel.complianceLog || null,
+            }); }}
           >
-            <ClipboardList size={16} /> EPA log
+            <ClipboardList size={16} /> {completionPanel.complianceLog ? 'EPA filed ✓' : 'EPA log'}
           </button>
         )}
         <button
           style={{ flex: 1, height: '44px', borderRadius: '14px', background: 'transparent', border: 'none', color: 'var(--color-text-muted)', fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer' }}
-          onClick={() => { if (completionTimerRef.current) clearTimeout(completionTimerRef.current); setCompletionPanel(null); }}
+          onClick={() => handleSaveCompletion({ note: panelNote, conditions: selectedConditions, appliedServices: selectedServices })}
         >
           Close
         </button>

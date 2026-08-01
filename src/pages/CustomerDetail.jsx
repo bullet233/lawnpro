@@ -10,6 +10,7 @@ import VisitEditModal from '../components/VisitEditModal';
 import ManualVisitModal from '../components/ManualVisitModal';
 import ComplianceLogModal from '../components/ComplianceLogModal';
 import LawnMeasureModal from '../components/LawnMeasureModal';
+import { findOverlappingCustomers } from '../engine/GeofenceEngine';
 import { enrollCustomer, unenrollCustomer, completeTreatment, skipTreatment, classifyTreatment } from '../db/treatments';
 import { toast } from '../utils/toast';
 import { getSettings } from '../db/settings';
@@ -32,6 +33,7 @@ export default function CustomerDetail() {
     isNew ? [] : db.visits.where({ customerId: Number(id) }).toArray()
   , [id]) || [];
 
+  const allCustomers = useLiveQuery(() => db.customers.toArray(), []) || [];
   const programs = useLiveQuery(() => db.treatmentPrograms.toArray(), []) || [];
   const customerTreatments = useLiveQuery(() =>
     isNew ? [] : db.treatments.where({ customerId: Number(id) }).toArray()
@@ -79,6 +81,26 @@ export default function CustomerDetail() {
   const [loggingTreatment, setLoggingTreatment] = useState(null);
   const [isDirty, setIsDirty] = useState(false);
   const initialDataRef = useRef(null);
+
+  // Arrival zones that overlap this client's zone. Overlaps are a real hazard:
+  // when the truck's GPS sits inside two zones at once, the engine has to guess
+  // which client's timer to start (GeofenceEngine picks the closest center).
+  const overlappingCustomers = useMemo(
+    () => findOverlappingCustomers(geofence, allCustomers, isNew ? null : Number(id)),
+    [geofence, allCustomers, id, isNew]
+  );
+
+  // Toast once when a fresh overlap appears (drawing/moving a zone), not on every
+  // render. Keyed on the set of conflicting client ids so re-warns only on change.
+  const lastOverlapKey = useRef('');
+  useEffect(() => {
+    const key = overlappingCustomers.map(c => c.id).sort().join(',');
+    if (key && key !== lastOverlapKey.current) {
+      const names = overlappingCustomers.map(c => c.name || 'a client').join(', ');
+      toast(`Arrival zone overlaps with ${names} — the wrong timer may start.`, 'error');
+    }
+    lastOverlapKey.current = key;
+  }, [overlappingCustomers]);
 
   useEffect(() => {
     setSettings(getSettings());
@@ -252,8 +274,10 @@ export default function CustomerDetail() {
   };
 
   // ── Treatment program enrollment ─────────────────────────────────────────
+  const fertService = () =>
+    services.find(s => s.active && (s.category === 'Fertilizer' || s.id === 's3')) || null;
   const fertServicePrice = () => {
-    const svc = services.find(s => s.active && (s.category === 'Fertilizer' || s.id === 's3'));
+    const svc = fertService();
     return svc ? Number(svc.price) || 0 : 0;
   };
 
@@ -276,13 +300,46 @@ export default function CustomerDetail() {
 
   const handleSaveTreatmentLog = async (logData) => {
     if (!loggingTreatment) return;
-    await completeTreatment(loggingTreatment.id, {
+    const t = loggingTreatment;
+
+    // Re-opening a completed application: update the compliance log only,
+    // keeping the original completion facts (and the linked visit in sync).
+    if (t.status === 'completed') {
+      await db.treatments.update(t.id, { complianceLog: logData });
+      if (t.visitId != null) await db.visits.update(t.visitId, { complianceLog: logData });
+      setLoggingTreatment(null);
+      toast('Compliance log updated.');
+      return t.visitId ?? null;
+    }
+
+    const price = fertServicePrice();
+    const now = Date.now();
+    // Record the application as a completed fertilizer visit so it counts in
+    // revenue/history like field-logged work, then mark the step against it.
+    const visitId = await db.visits.add({
+      routeId: null,
+      customerId: Number(id),
+      status: 'completed',
+      durationSecs: 0,
+      driveTimeSecs: 0,
+      entryTime: now,
+      exitTime: now,
+      weather: null,
+      priceEarned: price,
+      appliedServices: fertService() ? [fertService().id] : [],
+      division: 'fertilizer',
       complianceLog: logData,
-      completedAt: Date.now(),
-      price: fertServicePrice()
+      note: `Treatment: ${t.stepName}`,
+    });
+    await completeTreatment(t.id, {
+      complianceLog: logData,
+      completedAt: now,
+      price,
+      visitId,
     });
     setLoggingTreatment(null);
     toast('Application logged.');
+    return visitId;
   };
 
   const handleSave = async () => {
@@ -789,9 +846,16 @@ export default function CustomerDetail() {
           const lastFertDate = lastFertVisit ? new Date(lastFertVisit.exitTime) : null;
           const daysSinceFert = lastFertDate ? getDaysSince(lastFertDate.getTime()) : null;
 
-          // Avg $/hr
-          const totalSecs = completed.reduce((s, v) => s + (v.durationSecs || 0) + (v.driveTimeSecs || 0), 0);
-          const avgPerHr = totalSecs > 0 ? (totalRevenue / (totalSecs / 3600)) : 0;
+          // Avg $/hr — WORK time only (mow/blade time). Drive time is deliberately
+          // kept OUT of the headline rate: it's a big, route-dependent variable that
+          // would distort a customer's true pace, so it's tracked separately as a
+          // helper. This keeps the profile rate consistent with the leaderboard.
+          const totalWorkSecs = completed.reduce((s, v) => s + (v.durationSecs || 0), 0);
+          const totalDriveSecs = completed.reduce((s, v) => s + (v.driveTimeSecs || 0), 0);
+          const avgPerHr = totalWorkSecs > 0 ? (totalRevenue / (totalWorkSecs / 3600)) : 0;
+          // Helper only — the rate if drive time were folded in. Shown small so you
+          // can eyeball how much the commute to this stop is costing you.
+          const avgPerHrWithDrive = (totalWorkSecs + totalDriveSecs) > 0 ? (totalRevenue / ((totalWorkSecs + totalDriveSecs) / 3600)) : 0;
 
           // Per-service average times
           const serviceTimeMap = {};
@@ -869,6 +933,12 @@ export default function CustomerDetail() {
                         <DollarSign size={11} /> Avg $/hr
                       </div>
                       <div style={{ fontSize: '1.4rem', fontWeight: 700, color: ehrColor }}>${avgPerHr.toFixed(2)}</div>
+                      <div style={{ fontSize: '0.68rem', color: 'var(--color-text-muted)', fontWeight: 600, marginTop: '2px' }}>work time only</div>
+                      {totalDriveSecs > 0 && (
+                        <div style={{ fontSize: '0.68rem', color: 'var(--color-text-muted)', fontWeight: 600, marginTop: '1px' }} title="Rate if drive time were counted — shown as a helper, not baked into the rate">
+                          ${avgPerHrWithDrive.toFixed(2)}/hr w/ drive
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -933,7 +1003,17 @@ export default function CustomerDetail() {
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                       <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
                         <Clock size={13} style={{ verticalAlign: 'middle', marginRight: '0.3rem' }} />
-                        Visit Log <span style={{ opacity: 0.6 }}>({filteredLog.length})</span>
+                        {(() => {
+                          // Break the count down so it reconciles with the "# Visits"
+                          // metric above (which counts only completed jobs). The log
+                          // also lists skipped visits, so a bare total looked wrong
+                          // (e.g. "# Visits 8" but "Visit Log (9)").
+                          const doneN = filteredLog.filter(v => v.status === 'completed').length;
+                          const skipN = filteredLog.filter(v => v.status === 'skipped').length;
+                          return (
+                            <>Visit Log <span style={{ opacity: 0.6 }}>({doneN} completed{skipN > 0 ? ` · ${skipN} skipped` : ''})</span></>
+                          );
+                        })()}
                       </div>
                       <button className="btn btn-secondary" style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }} onClick={() => setShowManualVisitModal(true)}>
                         + Log Manual Visit
@@ -1092,7 +1172,31 @@ export default function CustomerDetail() {
 
         {activeTab === 'location' && (
           <div className="animate-fade-in">
-            <GeofenceEditor 
+            {overlappingCustomers.length > 0 && (
+              <div style={{
+                display: 'flex', alignItems: 'flex-start', gap: '0.6rem',
+                background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.35)',
+                borderRadius: 'var(--radius-sm)', padding: '0.75rem 0.9rem', marginBottom: '1rem',
+              }}>
+                <span style={{ fontSize: '1.1rem', lineHeight: 1 }}>⚠️</span>
+                <div style={{ fontSize: '0.85rem', color: 'var(--color-text-main)' }}>
+                  <strong>This arrival zone overlaps another client's zone.</strong>{' '}
+                  When your truck is parked inside both, the app has to guess whose job timer
+                  to start. Shrink or move one zone so they don't touch.
+                  <div style={{ marginTop: '0.4rem', display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                    {overlappingCustomers.map(c => (
+                      <button key={c.id} onClick={() => safeNavigate(`/customers/${c.id}`)}
+                        style={{ padding: '0.2rem 0.55rem', fontSize: '0.75rem', fontWeight: 600,
+                          borderRadius: '999px', cursor: 'pointer', border: '1px solid rgba(239,68,68,0.4)',
+                          background: 'var(--color-bg-main)', color: '#ef4444' }}>
+                        {c.name || 'Unnamed'} →
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+            <GeofenceEditor
               initialPolygon={geofence} 
               onSave={(poly) => setGeofence(poly)} 
               address={formData.address}
@@ -1159,7 +1263,9 @@ export default function CustomerDetail() {
                                 </div>
                               </div>
                               {t.state === 'completed' ? (
-                                <span style={{ color: 'var(--color-primary)', fontWeight: 700, fontSize: '0.8rem' }}>✓</span>
+                                <button className="btn btn-secondary" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} onClick={() => setLoggingTreatment(t)}>
+                                  {t.complianceLog ? 'View Log' : 'Add Log'}
+                                </button>
                               ) : t.state === 'skipped' ? (
                                 <span style={{ color: 'var(--color-text-muted)', fontSize: '0.75rem' }}>—</span>
                               ) : canLog && (
@@ -1273,10 +1379,16 @@ export default function CustomerDetail() {
 
       {loggingTreatment && customer && (
         <ComplianceLogModal
-          visit={{ exitTime: Date.now(), phone: customer.phone, address: customer.address }}
+          visit={{
+            id: loggingTreatment.visitId ?? undefined,
+            exitTime: loggingTreatment.completedAt || Date.now(),
+            durationSecs: loggingTreatment.durationSecs || 0,
+            phone: customer.phone,
+            address: customer.address,
+          }}
           customerName={customer.name}
           customerLawnSize={customer.lawnSize}
-          initialLog={null}
+          initialLog={loggingTreatment.complianceLog || null}
           onSave={handleSaveTreatmentLog}
           onClose={() => setLoggingTreatment(null)}
         />

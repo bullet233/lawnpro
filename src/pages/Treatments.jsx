@@ -42,10 +42,13 @@ function fmtWindow(t) {
 }
 
 // Is this customer a chemical/fertilizer client? (active fert service or already enrolled)
-function fertServicePrice(customer) {
-  const svc = (customer.services || []).find(
+function fertService(customer) {
+  return (customer.services || []).find(
     s => s.active && (s.category === 'Fertilizer' || s.id === 's3')
-  );
+  ) || null;
+}
+function fertServicePrice(customer) {
+  const svc = fertService(customer);
   return svc ? Number(svc.price) || 0 : 0;
 }
 function isFertCustomer(customer) {
@@ -89,10 +92,15 @@ export default function Treatments() {
     .filter(t => t.state === 'scheduled')
     .filter(t => t.dueWindowStart == null || t.dueWindowStart <= now + 45 * 86400000);
 
-  const completedThisYear = useMemo(
-    () => treatments.filter(t => t.year === year && t.status === 'completed').length,
-    [treatments, year]
+  const completedList = useMemo(
+    () => treatments
+      .filter(t => t.year === year && t.status === 'completed')
+      .map(t => ({ ...t, customer: custById.get(t.customerId) }))
+      .filter(t => t.customer)
+      .sort((a, b) => (b.completedAt || 0) - (a.completedAt || 0)),
+    [treatments, custById, year]
   );
+  const completedThisYear = completedList.length;
   const skipped = useMemo(
     () => treatments.filter(t => t.year === year && t.status === 'skipped'),
     [treatments, year]
@@ -148,14 +156,47 @@ export default function Treatments() {
 
   const handleSaveLog = async (logData) => {
     if (!logging) return;
-    const price = fertServicePrice(logging.customer);
-    await completeTreatment(logging.treatment.id, {
+    const { treatment, customer } = logging;
+
+    // Re-opening an already-completed application: update the compliance log
+    // only, keeping the original completion facts (and the linked visit in sync).
+    if (treatment.status === 'completed') {
+      await db.treatments.update(treatment.id, { complianceLog: logData });
+      if (treatment.visitId != null) await db.visits.update(treatment.visitId, { complianceLog: logData });
+      setLogging(null);
+      toast('Compliance log updated.');
+      return treatment.visitId ?? null;
+    }
+
+    const price = fertServicePrice(customer);
+    const now = Date.now();
+    // The application really happened — record it as a completed fertilizer
+    // visit so it counts in revenue/history like field-logged work, then mark
+    // the program step done against that visit.
+    const visitId = await db.visits.add({
+      routeId: null,
+      customerId: customer.id,
+      status: 'completed',
+      durationSecs: 0,
+      driveTimeSecs: 0,
+      entryTime: now,
+      exitTime: now,
+      weather: null,
+      priceEarned: price,
+      appliedServices: fertService(customer) ? [fertService(customer).id] : [],
+      division: 'fertilizer',
       complianceLog: logData,
-      completedAt: Date.now(),
+      note: `Treatment: ${treatment.stepName}`,
+    });
+    await completeTreatment(treatment.id, {
+      complianceLog: logData,
+      completedAt: now,
       price,
+      visitId,
     });
     setLogging(null);
-    toast(`Logged ${logging.treatment.stepName} for ${logging.customer.name}.`);
+    toast(`Logged ${treatment.stepName} for ${customer.name}.`);
+    return visitId;
   };
 
   const seasonStep = program?.steps?.find(s => {
@@ -265,6 +306,33 @@ export default function Treatments() {
         })}
       </div>
 
+      {/* Completed this year — the compliance archive. Every row reopens its
+          saved EPA log for review/reprint (the legal record-keeping half). */}
+      {completedList.length > 0 && (
+        <>
+          <SectionTitle icon={<CheckCircle2 size={17} color="var(--color-primary)" />} title={`Completed in ${year}`} count={completedList.length} />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginBottom: '1.75rem' }}>
+            {completedList.map(t => (
+              <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', padding: '0.55rem 0.8rem', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', fontSize: '0.85rem' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ fontWeight: 600, color: 'var(--color-text-main)' }}>{t.customer.name}</span>
+                  <span style={{ color: 'var(--color-text-muted)' }}> — {t.stepName}</span>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--color-text-muted)', marginTop: '0.1rem' }}>
+                    {t.completedAt ? new Date(t.completedAt).toLocaleDateString([], { month: 'short', day: 'numeric' }) : ''}
+                    {t.price > 0 && ` · $${t.price}`}
+                    {!t.complianceLog && ' · no EPA log'}
+                  </div>
+                </div>
+                <button className="btn btn-secondary" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}
+                  onClick={() => setLogging({ treatment: t, customer: t.customer })}>
+                  <ClipboardCheck size={13} /> {t.complianceLog ? 'View Log' : 'Add Log'}
+                </button>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
       {/* Skipped (collapsible-lite) */}
       {skipped.length > 0 && (
         <>
@@ -287,10 +355,16 @@ export default function Treatments() {
 
       {logging && (
         <ComplianceLogModal
-          visit={{ exitTime: Date.now(), phone: logging.customer.phone, address: logging.customer.address }}
+          visit={{
+            id: logging.treatment.visitId ?? undefined,
+            exitTime: logging.treatment.completedAt || Date.now(),
+            durationSecs: logging.treatment.durationSecs || 0,
+            phone: logging.customer.phone,
+            address: logging.customer.address,
+          }}
           customerName={logging.customer.name}
           customerLawnSize={logging.customer.lawnSize}
-          initialLog={null}
+          initialLog={logging.treatment.complianceLog || null}
           onSave={handleSaveLog}
           onClose={() => setLogging(null)}
         />

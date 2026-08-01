@@ -8,6 +8,17 @@ export const getBusinessDateString = (dateObj = new Date()) => {
   return new Date(dateObj).toLocaleDateString();
 };
 
+// Parse a "YYYY-MM-DD" string (from <input type="date"> or the calendar) as a
+// LOCAL calendar date. `new Date("2026-07-27")` parses as UTC midnight, which in
+// any UTC-negative timezone lands on the previous local day — the classic
+// off-by-one. Splitting the parts and using the (y, m, d) constructor keeps it local.
+export const parseLocalDate = (str) => {
+  if (!str) return null;
+  const [y, m, d] = str.split('-').map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d);
+};
+
 export const getDaysSince = (timestamp) => {
   if (!timestamp) return null;
   const today = getBusinessDayStart();

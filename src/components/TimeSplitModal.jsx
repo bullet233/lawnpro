@@ -13,17 +13,34 @@ const fmt = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minut
  *   onConfirm     — ({ primaryMins, companionsMins, mode }) => void
  *   onClose       — () => void
  */
-export default function TimeSplitModal({ primaryName, companions, totalSecs, jobStart, onConfirm, onClose }) {
+export default function TimeSplitModal({ primaryName, primaryExpectedSecs, primaryPrice, companions, totalSecs, jobStart, onConfirm, onClose }) {
   const totalMins = Math.max(1, Math.round(totalSecs / 60));
   const numProps = 1 + (companions ? companions.length : 0);
 
+  // Sequential default: divide the tracked total in proportion to each lawn's
+  // expected time (own history, else the trend-curve estimate) instead of an even
+  // split — so a big lawn paired with a small one starts at, say, 20/10 not 15/15.
+  // Falls back to an even split when no expectation data is available.
+  const proportional = useMemo(() => {
+    const weights = [Math.max(0, primaryExpectedSecs || 0), ...(companions || []).map(c => Math.max(0, c.expectedSecs || 0))];
+    const sumW = weights.reduce((s, x) => s + x, 0);
+    if (sumW <= 0) {
+      const even = Math.max(1, Math.floor(totalMins / numProps));
+      return { primary: Math.max(1, totalMins - even * (numProps - 1)), comps: (companions || []).map(() => even) };
+    }
+    const rounded = weights.map(w => Math.max(1, Math.round((w / sumW) * totalMins)));
+    const drift = totalMins - rounded.reduce((s, x) => s + x, 0);
+    rounded[0] = Math.max(1, rounded[0] + drift); // absorb rounding onto the primary
+    return { primary: rounded[0], comps: rounded.slice(1) };
+  }, []);
+
   const [mode, setMode] = useState('sequential'); // 'sequential' | 'simultaneous'
-  
-  const [primaryMins, setPrimaryMins] = useState(() => Math.ceil(totalMins / numProps));
-  const [companionsMins, setCompanionsMins] = useState(() => {
-    return (companions || []).map(c => ({ id: c.id, mins: Math.floor(totalMins / numProps) }));
-  });
-  
+
+  const [primaryMins, setPrimaryMins] = useState(proportional.primary);
+  const [companionsMins, setCompanionsMins] = useState(() =>
+    (companions || []).map((c, i) => ({ id: c.id, mins: proportional.comps[i] }))
+  );
+
   const [fallbackStart] = useState(() => Date.now() - totalSecs * 1000);
 
   const handleModeChange = (newMode) => {
@@ -32,8 +49,8 @@ export default function TimeSplitModal({ primaryName, companions, totalSecs, job
       setPrimaryMins(totalMins);
       setCompanionsMins(companions.map(c => ({ id: c.id, mins: totalMins })));
     } else {
-      setPrimaryMins(Math.ceil(totalMins / numProps));
-      setCompanionsMins(companions.map(c => ({ id: c.id, mins: Math.floor(totalMins / numProps) })));
+      setPrimaryMins(proportional.primary);
+      setCompanionsMins(companions.map((c, i) => ({ id: c.id, mins: proportional.comps[i] })));
     }
   };
 
@@ -76,7 +93,10 @@ export default function TimeSplitModal({ primaryName, companions, totalSecs, job
   const overAllocated = mode === 'sequential' && allocatedMins > totalMins;
 
   const handleConfirm = () => {
-    onConfirm({ primaryMins: pm, companionsMins, mode });
+    // Clamp companion minutes the same way the primary is clamped — a blanked-out
+    // input must not log a 0-minute (entry == exit) visit that pollutes the curve.
+    const cleanComps = companionsMins.map(c => ({ id: c.id, mins: Math.max(1, Number(c.mins) || 1) }));
+    onConfirm({ primaryMins: pm, companionsMins: cleanComps, mode });
     onClose();
   };
 
@@ -210,12 +230,38 @@ export default function TimeSplitModal({ primaryName, companions, totalSecs, job
           </div>
         )}
 
+        {/* Cluster economics — the combined $/hr is the number that says whether
+            pairing these lawns into one stop was actually worth it. */}
+        {(() => {
+          const totalPrice = (primaryPrice || 0) + (companions || []).reduce((s, c) => s + (c.mowPrice || 0), 0);
+          if (totalPrice <= 0) return null;
+          const combinedRate = totalPrice / (totalMins / 60);
+          const rateColor = combinedRate >= 60 ? 'var(--color-primary)' : combinedRate < 45 ? '#ef4444' : '#f59e0b';
+          return (
+            <div style={{ flexShrink: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.55rem 0.8rem', borderRadius: 'var(--radius-sm)', marginBottom: '1rem', background: 'var(--color-bg-main)', border: '1px solid var(--color-border)' }}>
+              <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>
+                ${totalPrice.toFixed(0)} across {numProps} · {totalMins} min
+              </span>
+              <span style={{ fontSize: '0.95rem', fontWeight: 800, color: rateColor }}>${combinedRate.toFixed(0)}/hr</span>
+            </div>
+          );
+        })()}
+
         {/* Actions */}
         <div style={{ display: 'flex', gap: '0.8rem', flexShrink: 0 }}>
           <button className="btn btn-secondary" style={{ flex: 1 }} onClick={onClose}>
             Cancel
           </button>
-          <button className="btn btn-primary" style={{ flex: 2 }} onClick={handleConfirm}>
+          {/* Over-allocating in sequential mode would log more minutes than were
+              actually tracked — companion exit times would land in the future and
+              fabricate fast-pace data. Block it; the red "Over by X min" banner
+              above explains what to trim. */}
+          <button
+            className="btn btn-primary"
+            style={{ flex: 2, opacity: overAllocated ? 0.5 : 1 }}
+            disabled={overAllocated}
+            onClick={handleConfirm}
+          >
             <Clock size={16} /> Log All {numProps} Properties
           </button>
         </div>

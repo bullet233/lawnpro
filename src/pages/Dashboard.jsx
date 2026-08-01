@@ -252,18 +252,21 @@ export default function Dashboard() {
     };
   }, [todayVisits, allCustomers]);
 
-  // Rolling last 7 days ending today (not the Sunday-anchored calendar week),
-  // so the chart still shows a full week of work early in the week instead of
-  // reading $0 every Sunday/Monday morning.
+  // Current calendar week, MONDAY-anchored — matches History's "This Week" filter
+  // so the Home total agrees with it instead of a rolling 7-day window that drags
+  // in last week's work. The week always runs Mon→Sun; days later in the week that
+  // haven't happened yet render as faded "future" bars.
   const weeklyData = useMemo(() => {
     const days = [];
     const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
     const today = getBusinessDayStart();
+    const weekStart = new Date(today);
+    weekStart.setDate(today.getDate() - ((today.getDay() + 6) % 7)); // step back to Monday
 
-    for (let i = 6; i >= 0; i--) {
-      const startOfDay = new Date(today);
-      startOfDay.setDate(today.getDate() - i);
+    for (let i = 0; i < 7; i++) {
+      const startOfDay = new Date(weekStart);
+      startOfDay.setDate(weekStart.getDate() + i);
       const endOfDay = new Date(startOfDay);
       endOfDay.setDate(endOfDay.getDate() + 1);
       endOfDay.setMilliseconds(-1);
@@ -275,8 +278,8 @@ export default function Dashboard() {
       days.push({
         label: dayNames[startOfDay.getDay()],
         revenue: dayRevenue,
-        isFuture: false,
-        isToday: i === 0
+        isFuture: startOfDay.getTime() > today.getTime(),
+        isToday: startOfDay.getTime() === today.getTime()
       });
     }
     return days;
@@ -372,6 +375,10 @@ export default function Dashboard() {
 
   const activeDueList = activeMode === 'mowing' ? mowingDue : fertilizerDue;
   const overdueCount = activeMode === 'mowing' ? mowingDue.filter(c => !c.isNew).length : treatmentAttention.length;
+  // Never-mowed active clients are "new", not "overdue". Kept as a separate count
+  // so the tab badge can match the "X overdue" mini-stat exactly instead of
+  // silently folding new clients into the overdue number.
+  const mowingNewCount = mowingDue.filter(c => c.isNew).length;
 
   const handleAddToRoute = async (customer) => {
     const defaultIds = customer.services?.filter(s => s.active).slice(0, 1).map(s => s.id) || [];
@@ -419,7 +426,7 @@ export default function Dashboard() {
   return (
     <div className="animate-fade-in" style={{ paddingBottom: '2rem' }}>
       {showDayReview && <DayReviewModal onClose={() => setShowDayReview(false)} />}
-      
+
       {/* Offline Sync Banner */}
       {pendingLogs.length > 0 && (
         <div style={{
@@ -603,7 +610,14 @@ export default function Dashboard() {
             }}
           >
             {activeMode === 'mowing' ? '🌾 Mowing' : '🧪 Treatments Due'}
-            {(activeMode === 'mowing' ? activeDueList.length : treatmentAttention.length) > 0 && <span style={{ marginLeft: '0.4rem', fontSize: '0.7rem', background: '#ef4444', color: 'white', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>{activeMode === 'mowing' ? activeDueList.length : treatmentAttention.length}</span>}
+            {activeMode === 'mowing' ? (
+              <>
+                {overdueCount > 0 && <span style={{ marginLeft: '0.4rem', fontSize: '0.7rem', background: '#ef4444', color: 'white', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>{overdueCount} overdue</span>}
+                {mowingNewCount > 0 && <span style={{ marginLeft: '0.35rem', fontSize: '0.7rem', background: 'var(--color-primary)', color: 'white', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>+{mowingNewCount} new</span>}
+              </>
+            ) : (
+              treatmentAttention.length > 0 && <span style={{ marginLeft: '0.4rem', fontSize: '0.7rem', background: '#ef4444', color: 'white', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>{treatmentAttention.length}</span>
+            )}
             <div style={{ position: 'absolute', bottom: '-0.5rem', left: 0, right: 0, height: '3px', background: 'var(--color-primary)', borderRadius: '3px' }} />
           </div>
           {activeMode === 'fertilizer' && (
@@ -725,7 +739,7 @@ export default function Dashboard() {
       {/* Weekly Earnings */}
       <div style={{ marginTop: '1.5rem' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem' }}>
-          <h3 style={{ margin: 0, color: 'var(--color-text-main)', fontSize: '1.1rem' }}>Last 7 Days</h3>
+          <h3 style={{ margin: 0, color: 'var(--color-text-main)', fontSize: '1.1rem' }}>This Week</h3>
           <span style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--color-primary)' }}>${weekTotal.toFixed(2)}</span>
         </div>
         <div className="glass-card" style={{ padding: '1rem 0.8rem 0.5rem' }}>

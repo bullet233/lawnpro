@@ -40,11 +40,16 @@ export function calculateTieredMatrix(allVisits, allCustomers) {
     const obstacles = parseInt(cust.obstacleCount, 10) || 0;
     if (obstacles > 0) mins -= (obstacles * 1.5);
     if (cust.fencedBackyard) mins -= 3;
-    
+
     if (cust.terrain === 'moderate') mins /= 1.15;
     else if (cust.terrain === 'hilly') mins /= 1.30;
-    
-    mins = Math.max(0.5, mins); // Sanity floor: at least 30 seconds
+
+    // If removing this customer's difficulty premium drives the normalized time
+    // below a credible minimum, the recorded difficulty is inconsistent with how
+    // long the job actually took — skip this visit instead of flooring it to
+    // 0.5 min. The old floor fabricated an absurd sqft/min pace that poisoned the
+    // bucket and dragged future bids too low on obstacle-heavy lawns.
+    if (mins < 1) return;
 
     // Find which bucket this belongs to
     for (let i = 0; i < stats.length; i++) {
@@ -109,7 +114,10 @@ function collectMowPoints(allVisits, allCustomers) {
     if (cust.fencedBackyard) mins -= 3;
     if (cust.terrain === 'moderate') mins /= 1.15;
     else if (cust.terrain === 'hilly') mins /= 1.30;
-    mins = Math.max(0.5, mins);
+    // Skip non-credible normalized points instead of flooring to 0.5 min — see
+    // calculateTieredMatrix above. A fabricated ultra-fast point would bias the
+    // fitted power curve toward under-pricing.
+    if (mins < 1) return;
     pts.push([sqft, mins]);
   });
   return pts;

@@ -1,8 +1,11 @@
+import { useState, useEffect } from 'react';
 import { X, Play, Pause, FileText, Sun, CloudSun, Cloud, CloudDrizzle, CloudSnow, CloudLightning, CloudRain } from 'lucide-react';
 import { formatLiveTimer } from '../../utils/dateUtils';
 import SlideToFinish from '../SlideToFinish';
 import CustomerDetailsDropdown from './CustomerDetailsDropdown';
 import { useServiceMode } from '../ServiceProvider';
+import TodaysMixModal from './TodaysMixModal';
+import { getTodaysMix, peekStopMix, setStopMix, clearStopMix } from '../../utils/todaysMix';
 
 const HERO = {
   mowing:     { bg: '#047857', soft: '#a7f3d0' },
@@ -36,6 +39,12 @@ export default function LiveTimerPanel({
   globalPace,
 }) {
   const { activeMode } = useServiceMode();
+  // Per-lawn product pick: set while still on the property so even a geofence
+  // auto-exit files the right EPA log for THIS lawn (overrides the day mix).
+  const [stopMix, setStopMixState] = useState(() => activeGeofence ? peekStopMix(activeGeofence.id) : null);
+  const [showStopMixModal, setShowStopMixModal] = useState(false);
+  const custId = activeGeofence?.id;
+  useEffect(() => { setStopMixState(custId != null ? peekStopMix(custId) : null); }, [custId]);
   if (!activeGeofence) return null;
 
   const isPaused = timerState === 'paused';
@@ -132,6 +141,50 @@ export default function LiveTimerPanel({
           </div>
         </div>
       </div>
+
+      {/* Per-lawn products (fert mode): what will file on exit — this lawn's
+          own pick, else the day mix, else a manual log. */}
+      {activeMode === 'fertilizer' && (() => {
+        const dayMix = getTodaysMix();
+        return (
+          <button
+            onClick={() => setShowStopMixModal(true)}
+            style={{
+              width: '100%', marginBottom: '0.9rem', padding: '0.6rem 0.9rem', cursor: 'pointer',
+              borderRadius: 'var(--radius-md)', border: 'none', textAlign: 'left',
+              background: 'rgba(255,255,255,0.15)', color: '#fff', fontSize: '0.8rem', fontWeight: 600,
+              display: 'flex', alignItems: 'center', gap: '0.4rem'
+            }}
+          >
+            <span>🧪</span>
+            {stopMix
+              ? <span>This lawn: {stopMix.products.map(p => p.productName).join(' + ')} ✓</span>
+              : dayMix
+                ? <span>Will log day mix — tap if this lawn is different</span>
+                : <span>Pick this lawn's products (EPA log files on exit)</span>}
+          </button>
+        );
+      })()}
+
+      {showStopMixModal && (
+        <TodaysMixModal
+          title="🧪 This Lawn's Products"
+          blurb={`What are you applying at ${activeGeofence.name}? The EPA log for this stop files with these products when you finish — overriding the day mix for this lawn only.`}
+          saveLabel="Set for this lawn"
+          clearLabel="Remove — use day mix / manual"
+          initialMix={stopMix || getTodaysMix()}
+          onSave={(products, mixSite) => {
+            setStopMixState(setStopMix(activeGeofence.id, products, mixSite));
+            setShowStopMixModal(false);
+          }}
+          onClear={() => {
+            clearStopMix();
+            setStopMixState(null);
+            setShowStopMixModal(false);
+          }}
+          onClose={() => setShowStopMixModal(false)}
+        />
+      )}
 
       <CustomerDetailsDropdown customer={activeGeofence} allVisits={allVisits} globalPace={globalPace} darkTheme={false} />
 

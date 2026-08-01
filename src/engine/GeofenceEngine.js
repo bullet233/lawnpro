@@ -22,6 +22,85 @@ export const pointInPolygon = (point, polygon) => {
   return isInside;
 };
 
+// Do two line segments (p1→p2 and p3→p4) cross? Uses orientation of the four
+// point triples. Coordinates are treated as planar (lat/lng); fine at the
+// street-block scale of an arrival zone.
+const segmentsIntersect = (p1, p2, p3, p4) => {
+  const orient = (a, b, c) => {
+    const v = (b.lat - a.lat) * (c.lng - a.lng) - (b.lng - a.lng) * (c.lat - a.lat);
+    if (v > 1e-12) return 1;
+    if (v < -1e-12) return -1;
+    return 0;
+  };
+  const onSeg = (a, b, c) =>
+    Math.min(a.lat, b.lat) <= c.lat && c.lat <= Math.max(a.lat, b.lat) &&
+    Math.min(a.lng, b.lng) <= c.lng && c.lng <= Math.max(a.lng, b.lng);
+
+  const o1 = orient(p1, p2, p3);
+  const o2 = orient(p1, p2, p4);
+  const o3 = orient(p3, p4, p1);
+  const o4 = orient(p3, p4, p2);
+
+  if (o1 !== o2 && o3 !== o4) return true;
+  // Colinear touching cases
+  if (o1 === 0 && onSeg(p1, p2, p3)) return true;
+  if (o2 === 0 && onSeg(p1, p2, p4)) return true;
+  if (o3 === 0 && onSeg(p3, p4, p1)) return true;
+  if (o4 === 0 && onSeg(p3, p4, p2)) return true;
+  return false;
+};
+
+// Fast axis-aligned bounding-box rejection so we only do real work on the
+// handful of zones that could plausibly touch.
+const boundsOf = (poly) => {
+  let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+  for (const p of poly) {
+    if (p.lat < minLat) minLat = p.lat;
+    if (p.lat > maxLat) maxLat = p.lat;
+    if (p.lng < minLng) minLng = p.lng;
+    if (p.lng > maxLng) maxLng = p.lng;
+  }
+  return { minLat, maxLat, minLng, maxLng };
+};
+
+const boundsOverlap = (a, b) =>
+  a.minLat <= b.maxLat && a.maxLat >= b.minLat &&
+  a.minLng <= b.maxLng && a.maxLng >= b.minLng;
+
+// Do two arrival-zone polygons overlap at all? True if their areas intersect —
+// covers edge crossings and full containment (one zone entirely inside another).
+export const polygonsOverlap = (a, b) => {
+  if (!a || !b || a.length < 3 || b.length < 3) return false;
+  if (!boundsOverlap(boundsOf(a), boundsOf(b))) return false;
+
+  // Any edge of A crosses any edge of B → the outlines intersect.
+  for (let i = 0; i < a.length; i++) {
+    const a1 = a[i], a2 = a[(i + 1) % a.length];
+    for (let j = 0; j < b.length; j++) {
+      const b1 = b[j], b2 = b[(j + 1) % b.length];
+      if (segmentsIntersect(a1, a2, b1, b2)) return true;
+    }
+  }
+  // No edges cross: one polygon is either fully inside the other or disjoint.
+  // A single point-containment test each way distinguishes them.
+  if (pointInPolygon(a[0], b)) return true;
+  if (pointInPolygon(b[0], a)) return true;
+  return false;
+};
+
+// Return the customers whose arrival zone overlaps `fence`, excluding the one
+// being edited (selfId). Used to warn before two zones can steal each other's
+// GPS timer triggers.
+export const findOverlappingCustomers = (fence, customers, selfId = null) => {
+  if (!fence || fence.length < 3) return [];
+  return customers.filter(c =>
+    c.id !== selfId &&
+    Array.isArray(c.geofence) &&
+    c.geofence.length >= 3 &&
+    polygonsOverlap(fence, c.geofence)
+  );
+};
+
 export class GeofenceEngine {
   constructor(config = {}) {
     // Config

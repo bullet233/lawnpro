@@ -150,6 +150,54 @@ export async function enrollCustomer(customerId, programId, year = new Date().ge
   return toCreate.length;
 }
 
+// ── Visit ↔ treatment bridge ─────────────────────────────────────────────────
+
+// How early a real application may run ahead of its step window and still count
+// as that step (e.g. spreading winterizer in late September for an October window).
+export const EARLY_APPLY_SLACK_MS = 14 * 86400000;
+
+// Pick which open program step a just-performed application should count
+// against: the earliest open step whose window has started (in-window or
+// overdue), allowing the early-apply slack. Pure — takes the customer's
+// treatment rows, returns one or null.
+export function pickStepForApplication(treatments, asOf = Date.now()) {
+  return treatments
+    .filter(t =>
+      (t.status === 'scheduled' || t.status === 'due') &&
+      t.dueWindowStart != null &&
+      t.dueWindowStart - EARLY_APPLY_SLACK_MS <= asOf)
+    .sort((a, b) => (a.dueDate || 0) - (b.dueDate || 0))[0] || null;
+}
+
+// Bridge: a fertilizer-division visit was logged in the field — complete the
+// matching program step so the Treatments page doesn't demand a second manual
+// log (and then flag the step overdue forever). Returns the step or null.
+export async function autoCompleteStepFromVisit(customerId, visit) {
+  const mine = await db.treatments.where({ customerId }).toArray();
+  const asOf = visit.exitTime || Date.now();
+  const step = pickStepForApplication(mine, asOf);
+  if (!step) return null;
+  await db.treatments.update(step.id, {
+    status: 'completed',
+    completedAt: asOf,
+    price: visit.priceEarned || 0,
+    durationSecs: visit.durationSecs || 0,
+    weather: visit.weather ?? null,
+    complianceLog: visit.complianceLog ?? null,
+    visitId: visit.id ?? null,
+    note: 'Completed from field visit',
+  });
+  return step;
+}
+
+// Keep the linked treatment's compliance record in sync when an EPA log is
+// saved onto the visit (Live map completion panel / Logs page).
+export async function syncTreatmentLogFromVisit(visitId, complianceLog) {
+  if (visitId == null) return;
+  const linked = await db.treatments.filter(t => t.visitId === visitId).toArray();
+  for (const t of linked) await db.treatments.update(t.id, { complianceLog });
+}
+
 // ── Treatment queries ────────────────────────────────────────────────────────
 
 export function getTreatmentsForCustomer(customerId) {
@@ -178,6 +226,7 @@ export function completeTreatment(treatmentId, data = {}) {
     price: data.price || 0,
     durationSecs: data.durationSecs || 0,
     weather: data.weather ?? null,
+    visitId: data.visitId ?? null,
     note: data.note || ''
   });
 }

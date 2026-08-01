@@ -253,7 +253,13 @@ export default function RouteBuilder() {
   };
 
   const performSaveRoute = async () => {
-    const existingActive = await db.routes.where('status').anyOf('active', 'pending').toArray();
+    // Retire only THIS division's open route. The Live page tracks one route
+    // per division, so a mowing route and a fertilizer route must coexist —
+    // completing across divisions here is what silently erased the other
+    // mode's route whenever a new one was saved. Legacy routes with no
+    // division stamp are retired too (they'd otherwise linger invisibly).
+    const existingActive = (await db.routes.where('status').anyOf('active', 'pending').toArray())
+      .filter(r => !r.division || r.division === activeMode);
     for (const r of existingActive) {
       await db.routes.update(r.id, { status: 'completed' });
     }
@@ -283,7 +289,10 @@ export default function RouteBuilder() {
 
   const handleSaveRoute = async () => {
     if (selectedStops.length === 0) return;
-    const existingActive = await db.routes.where('status').anyOf('active', 'pending').toArray();
+    // Warn only about the route this save will actually replace — the one in
+    // the current division. The other mode's route is left untouched.
+    const existingActive = (await db.routes.where('status').anyOf('active', 'pending').toArray())
+      .filter(r => !r.division || r.division === activeMode);
     let totalPendingStops = 0;
     
     for (const r of existingActive) {

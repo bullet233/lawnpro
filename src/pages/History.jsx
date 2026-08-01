@@ -1,12 +1,13 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/db';
+import { syncTreatmentLogFromVisit } from '../db/treatments';
 import DayReviewModal from '../components/DayReviewModal';
 import VisitEditModal from '../components/VisitEditModal';
 import AppDialog from '../components/AppDialog';
 import ComplianceLogModal from '../components/ComplianceLogModal';
 import { getSettings } from '../db/settings';
-import { getBusinessDateString } from '../utils/dateUtils';
+import { getBusinessDateString, parseLocalDate } from '../utils/dateUtils';
 import { calculateServiceTotals, getVisitRevenueBreakdown } from '../utils/revenueUtils';
 import { useServiceMode } from '../components/ServiceProvider';
 import { toast } from '../utils/toast';
@@ -113,16 +114,29 @@ export default function History() {
           y.setDate(y.getDate() - 1);
           if (d.toDateString() !== y.toDateString()) return false;
         }
-        if (timeFilter === 'week'   && d < new Date(now - 7  * 86400000)) return false;
-        if (timeFilter === 'month'  && d < new Date(now - 30 * 86400000)) return false;
+        if (timeFilter === 'week') {
+          // Current calendar week (Monday start), local — NOT a rolling 7×24h
+          // window. The old version counted back 168h from the current moment,
+          // so "This Week" pulled in most of last week and drifted by time-of-day.
+          const weekStart = new Date(now);
+          weekStart.setHours(0, 0, 0, 0);
+          // JS getDay(): 0=Sun..6=Sat. Days since Monday = (getDay()+6)%7.
+          weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
+          if (d < weekStart) return false;
+        }
+        if (timeFilter === 'month') {
+          // Current calendar month (the 1st, local), not a rolling 30 days.
+          const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+          if (d < monthStart) return false;
+        }
         if (timeFilter === 'custom') {
           if (customStartDate) {
-            const start = new Date(customStartDate);
+            const start = parseLocalDate(customStartDate);
             start.setHours(0, 0, 0, 0);
             if (d < start) return false;
           }
           if (customEndDate) {
-            const end = new Date(customEndDate);
+            const end = parseLocalDate(customEndDate);
             end.setHours(23, 59, 59, 999);
             if (d > end) return false;
           }
@@ -199,7 +213,10 @@ export default function History() {
   const handleSaveEpaLog = async (logData) => {
     if (!activeEpaJob) return;
     await db.visits.update(activeEpaJob.id, { complianceLog: logData });
+    // If this visit auto-completed a program step, carry the log onto it too.
+    await syncTreatmentLogFromVisit(activeEpaJob.id, logData);
     setActiveEpaJob(null);
+    return activeEpaJob.id;
   };
 
   // ── Delete handler ────────────────────────────────────────────────────────
@@ -663,7 +680,7 @@ export default function History() {
                                   </div>
                               
                               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
-                                {serviceNames.some(n => n?.toLowerCase().match(/(fertilizer|weed|spray|chem)/)) && (
+                                {(job.division === 'fertilizer' || serviceNames.some(n => n?.toLowerCase().match(/(fertilizer|weed|spray|chem)/))) && (
                                   <button 
                                     onClick={() => setActiveEpaJob(job)}
                                     style={{ fontSize: '0.7rem', padding: '0.1rem 0.5rem', background: 'transparent', color: 'var(--color-primary)', border: '1px solid var(--color-primary)', borderRadius: '999px', cursor: 'pointer', fontWeight: 700, textTransform: 'uppercase' }}

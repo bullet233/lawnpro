@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { GeofenceEngine, getDistance, pointInPolygon } from './GeofenceEngine';
+import { GeofenceEngine, getDistance, pointInPolygon, polygonsOverlap, findOverlappingCustomers } from './GeofenceEngine';
 
 describe('Math utilities', () => {
   it('calculates distance between points', () => {
@@ -19,6 +19,50 @@ describe('Math utilities', () => {
     expect(pointInPolygon({ lat: 5, lng: 5 }, square)).toBe(true);
     expect(pointInPolygon({ lat: 15, lng: 15 }, square)).toBe(false);
     expect(pointInPolygon({ lat: 5, lng: -1 }, square)).toBe(false);
+  });
+});
+
+describe('Geofence overlap detection', () => {
+  const square = (minLat, minLng, maxLat, maxLng) => [
+    { lat: minLat, lng: minLng },
+    { lat: maxLat, lng: minLng },
+    { lat: maxLat, lng: maxLng },
+    { lat: minLat, lng: maxLng },
+  ];
+
+  it('detects two overlapping squares', () => {
+    expect(polygonsOverlap(square(0, 0, 10, 10), square(5, 5, 15, 15))).toBe(true);
+  });
+
+  it('returns false for disjoint squares', () => {
+    expect(polygonsOverlap(square(0, 0, 10, 10), square(20, 20, 30, 30))).toBe(false);
+  });
+
+  it('detects full containment (one zone inside another)', () => {
+    expect(polygonsOverlap(square(0, 0, 100, 100), square(40, 40, 60, 60))).toBe(true);
+  });
+
+  it('detects edge crossing with no contained vertex (plus-sign overlap)', () => {
+    const horizontal = square(4, 0, 6, 10);
+    const vertical = square(0, 4, 10, 6);
+    expect(polygonsOverlap(horizontal, vertical)).toBe(true);
+  });
+
+  it('ignores degenerate polygons', () => {
+    expect(polygonsOverlap([{ lat: 0, lng: 0 }, { lat: 1, lng: 1 }], square(0, 0, 10, 10))).toBe(false);
+    expect(polygonsOverlap(null, square(0, 0, 10, 10))).toBe(false);
+  });
+
+  it('findOverlappingCustomers excludes self and non-overlapping / fenceless clients', () => {
+    const fence = square(0, 0, 10, 10);
+    const customers = [
+      { id: 1, name: 'Self', geofence: fence },
+      { id: 2, name: 'Neighbor', geofence: square(5, 5, 15, 15) },
+      { id: 3, name: 'Faraway', geofence: square(50, 50, 60, 60) },
+      { id: 4, name: 'No zone', geofence: null },
+    ];
+    const hits = findOverlappingCustomers(fence, customers, 1);
+    expect(hits.map(c => c.id)).toEqual([2]);
   });
 });
 

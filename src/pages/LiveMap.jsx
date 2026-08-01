@@ -30,6 +30,10 @@ import QuickAddModal from '../components/QuickAddModal';
 import { getSettings } from '../db/settings';
 import { trackApiCall } from '../utils/apiTracker';
 import { useServiceMode } from '../components/ServiceProvider';
+import { calculatePowerModel, predictTrendMins } from '../utils/matrix';
+import { autoCompleteStepFromVisit, syncTreatmentLogFromVisit, classifyTreatment } from '../db/treatments';
+import TodaysMixModal from '../components/livemap/TodaysMixModal';
+import { getTodaysMix, setTodaysMix, clearTodaysMix, takeStopMix, clearStopMix, buildLogFromMix, formatLogTimes } from '../utils/todaysMix';
 
 const mapContainerStyle = { width: '100%', height: 'calc(100dvh - var(--nav-h))', borderRadius: 'var(--radius-md)' };
 
@@ -39,6 +43,18 @@ const getDistance = (lat1, lon1, lat2, lon2) => {
   const c = Math.cos;
   const a = 0.5 - c((lat2 - lat1) * p) / 2 + c(lat1 * p) * c(lat2 * p) * (1 - c((lon2 - lon1) * p)) / 2;
   return 12742 * Math.asin(Math.sqrt(a)) * 1000;
+};
+
+// Distance (m) to the nearest vertex of a customer's geofence. Better than the
+// centroid for adjacency: a big lawn's center can sit past the radius even when
+// its edge abuts where the truck is parked.
+const distanceToGeofence = (lat, lng, geofence) => {
+  let min = Infinity;
+  for (const pt of geofence) {
+    const d = getDistance(lat, lng, pt.lat, pt.lng);
+    if (d < min) min = d;
+  }
+  return min;
 };
 
 export default function LiveMap() {
@@ -80,6 +96,18 @@ export default function LiveMap() {
   const autoCenterRef = useRef(true);
   const [mapTypeId, setMapTypeId] = useState('roadmap');
     const [activeEpaJob, setActiveEpaJob] = useState(null);
+  // Day tank mix: state drives the banner UI; logVisit runs from once-bound
+  // geofence callbacks so it re-reads localStorage via getTodaysMix() directly.
+  const [todaysMix, setTodaysMixState] = useState(() => getTodaysMix());
+  const [showMixModal, setShowMixModal] = useState(false);
+  // Quick per-stop product pick from the completion panel (no mix was set):
+  // snapshot of the visit so it survives the panel auto-dismissing underneath.
+  const [quickLogJob, setQuickLogJob] = useState(null);
+  // Drive-off protection: logVisit runs from once-bound geofence callbacks, so
+  // it needs refs to see the currently-open EPA sheet and its live draft.
+  const activeEpaJobRef = useRef(null);
+  useEffect(() => { activeEpaJobRef.current = activeEpaJob; }, [activeEpaJob]);
+  const epaDraftRef = useRef(null);
   const { isLoaded, loadError } = useMapStatus();
   
   const [activeGeofence, setActiveGeofence] = useState(null);
@@ -127,10 +155,30 @@ export default function LiveMap() {
   const panelServicesRef    = useRef([]);
 
   useEffect(() => { panelNoteRef.current = panelNote; }, [panelNote]);
+  // Mirror the panel so armCompletionTimer can see unresolved neighbor prompts.
+  const completionPanelRef = useRef(null);
+  useEffect(() => { completionPanelRef.current = completionPanel; }, [completionPanel]);
+  // Mirror the division switch. logVisit can be invoked through the GeofenceEngine's
+  // callbacks, which are bound once on first render — reading `activeMode` from that
+  // stale closure logged auto-exit visits under whatever mode the app booted in.
+  const activeModeRef = useRef(activeMode);
+  useEffect(() => { activeModeRef.current = activeMode; }, [activeMode]);
 
   
   // Load all data
   const allCustomers = useLiveQuery(() => db.customers.toArray(), []) || [];
+
+  // Fert stops completed today with no compliance record — the driver closed
+  // or drove past the sheet. Recounts live as each one gets filled.
+  const missingEpaToday = useLiveQuery(async () => {
+    if (activeMode !== 'fertilizer') return [];
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const todays = await db.visits.where('exitTime').aboveOrEqual(startOfDay.getTime()).toArray();
+    return todays
+      .filter(v => v.status === 'completed' && v.division === 'fertilizer' && !v.complianceLog)
+      .sort((a, b) => a.exitTime - b.exitTime);
+  }, [activeMode]) || [];
   const activeRoute = useLiveQuery(async () => {
     const routes = await db.routes.where('status').anyOf('pending', 'active').toArray();
     // Filter active routes by the global division
@@ -152,7 +200,10 @@ export default function LiveMap() {
     })).filter(c => c?.id);
 
     return { ...route, normalizedStops, expandedStops };
-  }, []);
+    // activeMode is read inside the query, so it must be a dep — with [] the
+    // mow↔fert switch kept showing the previous mode's route until some other
+    // DB write happened to re-trigger the live query.
+  }, [activeMode]);
 
   useWakeLock(activeRoute?.status === 'active');
 
@@ -471,17 +522,38 @@ export default function LiveMap() {
     const threshold = getSettings().drivebyThresholdSecs || 45;
 
     if (finalDuration < threshold && completedCust) {
-      setDrivebyPrompt({ customer: completedCust, duration: finalDuration, entry: entryTime, driveTime: capturedDriveTimeSecsRef.current });
+      // Carry the live note into the prompt and clear it now — otherwise the note
+      // is dropped for this visit AND leaks onto the next completed job.
+      setDrivebyPrompt({ customer: completedCust, duration: finalDuration, entry: entryTime, driveTime: capturedDriveTimeSecsRef.current, note: liveNoteRef.current });
+      setLiveNote('');
     } else if (completedCust) {
       logVisit(completedCust, finalDuration, entryTime, 'completed', liveNoteRef.current, capturedDriveTimeSecsRef.current);
       setLiveNote('');
     }
   };
 
+  // Closing the EPA sheet (saved or not) releases the completion panel's
+  // held countdown — armCompletionTimer's own neighbor-guard still applies.
+  const closeEpaModal = () => {
+    setActiveEpaJob(null);
+    epaDraftRef.current = null; // X = discard edits; the filed log (if any) stands
+    const cp = completionPanelRef.current;
+    if (cp?.visitId != null) armCompletionTimer(cp.visitId);
+  };
+
   const handleSaveEpaLog = async (logData) => {
     if (!activeEpaJob) return;
     await db.visits.update(activeEpaJob.id, { complianceLog: logData });
-    setActiveEpaJob(null);
+    // If this visit auto-completed a program step, carry the log onto it too.
+    await syncTreatmentLogFromVisit(activeEpaJob.id, logData);
+    // Keep the still-open completion panel's copy current so reopening the
+    // review shows the edit, not the stale auto-filed log.
+    setCompletionPanel(prev =>
+      prev && prev.visitId === activeEpaJob.id ? { ...prev, complianceLog: logData } : prev
+    );
+    const savedId = activeEpaJob.id;
+    closeEpaModal();
+    return savedId;
   };
 
   const finishActiveRoute = async () => {
@@ -507,6 +579,7 @@ export default function LiveMap() {
             weather: weatherRef.current || null,
             priceEarned: 0,
             appliedServices: [],
+            division: activeMode,
             note: 'Forcibly skipped when ending route'
           });
         }
@@ -612,49 +685,158 @@ export default function LiveMap() {
       priceEarned: priceEarned || 0,
       appliedServices: appliedServices || [],
       note: note || '',
-      division: activeMode
+      division: activeModeRef.current
     });
 
     // Show completion panel only for completed jobs
     if (status === 'completed') {
-      // Detect nearby customers (within 150m) that haven't been visited yet
+      // Detect nearby customers (within 150m) that haven't been visited yet.
+      // IMPORTANT: this runs from the GeofenceEngine's once-bound callbacks on
+      // auto-exit, so everything here must read refs — the old code read
+      // `currentPosition`/`allCustomers`/`activeMode` from the first-render
+      // closure, where position is still null, so the neighbor prompt (and the
+      // pace comparison) silently never fired unless the driver tapped Done.
       let nearbyCandidates = [];
       let historicalAverageSecs = null;
-        
-      if (currentPosition) {
-        const allDbVisits = await db.visits.toArray();
-        const alreadyVisitedIds = new Set(
-          allDbVisits.filter(v => v.routeId === (activeRoute?.id ?? null)).map(v => v.customerId)
-        );
-        alreadyVisitedIds.add(customer.id);
+      const mode = activeModeRef.current;
+      const freshCustomers = allCustomersRef.current;
+      const pos = positionRef.current;
 
-        // Calculate historical average for this specific mode
-        const priorVisits = allDbVisits.filter(v => 
-          v.customerId === customer.id && 
-          v.status === 'completed' && 
-          v.durationSecs > 0 && 
+      // Field-applied fertilizer completes the matching program step (if the
+      // client is enrolled), so the Treatments page doesn't ask for a second
+      // manual log and then flag the round overdue forever.
+      let programStepCompleted = null;
+      let allTreatments = [];
+      let autoLog = null;
+      if (mode === 'fertilizer') {
+        // Auto-file the EPA compliance log: this lawn's own product pick (set
+        // from the live panel) wins over the day tank mix. takeStopMix also
+        // clears the slot so it can never bleed onto the next stop.
+        const mix = takeStopMix(customer.id) || getTodaysMix();
+        if (mix) {
+          autoLog = buildLogFromMix(mix, { customer, exitTime: Date.now(), durationSecs });
+          await db.visits.update(visitId, { complianceLog: autoLog });
+        }
+        const step = await autoCompleteStepFromVisit(customer.id, {
+          id: visitId,
+          exitTime: Date.now(),
+          priceEarned,
+          durationSecs,
+          weather: weatherRef.current || null,
+          complianceLog: autoLog,
+        });
+        if (step) programStepCompleted = step.stepName;
+        // Loaded once here so the neighbor badges below can use program windows.
+        allTreatments = await db.treatments.toArray();
+      }
+
+      {
+        const allDbVisits = await db.visits.toArray();
+
+        // Calculate historical average for this specific mode (no GPS needed)
+        const priorVisits = allDbVisits.filter(v =>
+          v.customerId === customer.id &&
+          v.status === 'completed' &&
+          v.durationSecs > 0 &&
           v.id !== visitId &&
-          (!v.division || v.division === activeMode)
+          (!v.division || v.division === mode)
         );
-        
+
         if (priorVisits.length > 0) {
           const sum = priorVisits.reduce((acc, v) => acc + v.durationSecs, 0);
           historicalAverageSecs = Math.round(sum / priorVisits.length);
         }
 
-        const nearby = allCustomers
-          .filter(c => c.id !== customer.id && !alreadyVisitedIds.has(c.id))
+        if (pos) {
+        // Trend curve fit once, used to estimate time for neighbors with no history.
+        const trendModel = calculatePowerModel(allDbVisits, freshCustomers);
+
+        // Exclude anyone already serviced today on ANY route (not just this one),
+        // so a neighbor knocked out earlier on a different/ad-hoc route won't re-prompt.
+        const startOfToday = new Date();
+        startOfToday.setHours(0, 0, 0, 0);
+        const servicedTodayIds = new Set(
+          allDbVisits
+            .filter(v => (v.status === 'completed' || v.status === 'skipped') && v.exitTime >= startOfToday.getTime())
+            .map(v => v.customerId)
+        );
+        servicedTodayIds.add(customer.id);
+
+        const routeStopIds = new Set(
+          (route?.normalizedStops || route?.stops || []).map(s => s.customerId)
+        );
+
+        const nearby = freshCustomers
+          // Paused (inactive) and snoozed clients asked not to be serviced right
+          // now — don't pitch them as opportunities.
+          .filter(c => c.id !== customer.id && !servicedTodayIds.has(c.id) &&
+            c.status !== 'inactive' && !(c.snoozedUntil && c.snoozedUntil > Date.now()))
           .map(c => {
             if (!c.geofence || c.geofence.length === 0) return null;
-            const centerLat = c.geofence.reduce((s, p) => s + p.lat, 0) / c.geofence.length;
-            const centerLng = c.geofence.reduce((s, p) => s + p.lng, 0) / c.geofence.length;
-            const dist = getDistance(currentPosition.lat, currentPosition.lng, centerLat, centerLng);
-            return { ...c, dist };
+            const dist = distanceToGeofence(pos.lat, pos.lng, c.geofence);
+            if (dist > 150) return null;
+
+            // Expected time: this lawn's own average in this mode, else the trend
+            // curve from its sqft — drives the smart split-time defaults.
+            const own = allDbVisits.filter(v =>
+              v.customerId === c.id && v.status === 'completed' && v.durationSecs > 0 &&
+              (!v.division || v.division === mode)
+            );
+            let expectedSecs = null;
+            if (own.length > 0) {
+              expectedSecs = Math.round(own.reduce((s, v) => s + v.durationSecs, 0) / own.length);
+            } else {
+              const sqft = parseLawnSizeToSqFt(c.lawnSize);
+              if (sqft && trendModel) expectedSecs = Math.round(predictTrendMins(trendModel, sqft) * 60);
+            }
+
+            // Price that would be logged: planned services on the route, else first active.
+            let mowPrice = 0;
+            if (c.services) {
+              const routeStop = route?.normalizedStops?.find(s => s.customerId === c.id);
+              const plannedIds = routeStop?.plannedServiceIds || [];
+              const svc = plannedIds.length > 0
+                ? c.services.filter(s => plannedIds.includes(s.id))
+                : c.services.filter(s => s.active).slice(0, 1);
+              mowPrice = svc.reduce((sum, s) => sum + (s.price || 0), 0);
+            }
+
+            // Last completed service before today (for the "last serviced" hint).
+            const past = allDbVisits.filter(v =>
+              v.customerId === c.id && v.status === 'completed' && v.exitTime < startOfToday.getTime()
+            );
+            const lastServicedTs = past.length > 0 ? Math.max(...past.map(v => v.exitTime)) : null;
+
+            // Due status so the prompt says whether the neighbor is actually
+            // worth walking over to, not just that they're close. Program-
+            // enrolled fert clients go by their step windows (matching the
+            // Treatments page); everyone else uses the Dashboard interval rules.
+            const intervalDays = mode === 'fertilizer'
+              ? (c.fertilizerInterval || 30)
+              : (c.mowingInterval || c.serviceInterval || 7);
+            const daysSince = lastServicedTs ? Math.floor((Date.now() - lastServicedTs) / 86400000) : null;
+            let dueStatus;
+            if (mode === 'fertilizer' && c.treatmentProgramId) {
+              const states = allTreatments
+                .filter(t => t.customerId === c.id && (t.status === 'scheduled' || t.status === 'due'))
+                .map(t => classifyTreatment(t));
+              dueStatus = states.includes('overdue') ? 'overdue'
+                : states.includes('due') ? 'due'
+                : null;
+            } else {
+              dueStatus = daysSince === null ? 'new'
+                : daysSince > intervalDays + 2 ? 'overdue'
+                : daysSince >= intervalDays ? 'due'
+                : null;
+            }
+
+            return { ...c, dist, expectedSecs, mowPrice, lastServicedTs, dueStatus, daysSince, intervalDays, onRoute: routeStopIds.has(c.id) };
           })
-          .filter(c => c && c.dist <= 150)
+          .filter(Boolean)
           .sort((a, b) => a.dist - b.dist);
 
         if (nearby.length > 0) nearbyCandidates = nearby.slice(0, 5); // Limit to top 5
+        }
       }
 
       setPanelNote(note || '');
@@ -662,19 +844,57 @@ export default function LiveMap() {
       // auto-dismiss before the user touches anything is a no-op.
       panelConditionsRef.current = [];
       panelServicesRef.current = appliedServices || [];
-      setCompletionPanel({
+      const newPanel = {
         custName: customer.name,
         durationSecs,
         priceEarned,
-        weather,
+        weather: weatherRef.current || null,
         visitId,
         nearbyCandidates,
         historicalAverageSecs,
         primaryCustomer: customer,
         exitTime: Date.now(),
-        appliedServices
-      });
-      armCompletionTimer(visitId);
+        appliedServices,
+        programStepCompleted,
+        complianceLog: autoLog
+      };
+      // Sync the ref immediately. The useEffect that mirrors completionPanel runs
+      // a tick late, so without this armCompletionTimer's neighbor-guard would read
+      // the PREVIOUS job's panel — leaving this panel's timer unarmed (stuck bar).
+      completionPanelRef.current = newPanel;
+      setCompletionPanel(newPanel);
+      // Hold the auto-dismiss while the neighbor prompt needs an answer; it arms
+      // once the driver dismisses or resolves it.
+      if (mode === 'fertilizer') {
+        // Driver drove off with the previous stop's sheet still open — persist
+        // its draft before this stop's sheet replaces it, so half-typed edits
+        // (or a no-mix sheet with products picked) aren't silently dropped.
+        // An untouched no-mix sheet (no products) stays unlogged on purpose;
+        // the missing-logs banner below the mix bar catches those.
+        const prevSheet = activeEpaJobRef.current;
+        const prevDraft = epaDraftRef.current;
+        if (prevSheet && prevSheet.id != null && prevSheet.id !== visitId &&
+            prevDraft && (prevDraft.products?.length > 0 || prevSheet.complianceLog)) {
+          await db.visits.update(prevSheet.id, { complianceLog: prevDraft });
+          await syncTreatmentLogFromVisit(prevSheet.id, prevDraft);
+        }
+        epaDraftRef.current = null;
+        // Pop the EPA sheet right on exit so the driver sees what auto-filed
+        // (or fills it when no mix was set) and can correct it at the truck.
+        // The panel's countdown stays held until the sheet closes.
+        setActiveEpaJob({
+          id: visitId,
+          custName: customer.name,
+          exitTime: Date.now(),
+          durationSecs,
+          custLawnSize: customer.lawnSize,
+          phone: customer.phone,
+          address: customer.address,
+          complianceLog: autoLog
+        });
+      } else if (nearbyCandidates.length === 0) {
+        armCompletionTimer(visitId);
+      }
     }
 
     if (route && route.normalizedStops) {
@@ -703,7 +923,14 @@ export default function LiveMap() {
   // (Re)arm the completion panel's self-cleanup countdown. Re-called on any
   // interaction inside the panel so it never vanishes mid-tap; the drain bar in
   // JobCompletionModal restarts via the epoch bump.
-  const armCompletionTimer = (visitId) => {
+  const armCompletionTimer = (visitId, { force = false } = {}) => {
+    // Don't auto-dismiss while a neighbor prompt is waiting for an answer — the
+    // panel is asking a question, so it shouldn't race the driver. The prompt's
+    // "No / Dismiss" button re-arms with force:true once resolved.
+    if (!force && completionPanelRef.current?.nearbyCandidates?.length > 0) {
+      if (completionTimerRef.current) clearTimeout(completionTimerRef.current);
+      return;
+    }
     if (completionTimerRef.current) clearTimeout(completionTimerRef.current);
     setCompletionEpoch(e => e + 1);
     completionTimerRef.current = setTimeout(async () => {
@@ -773,7 +1000,7 @@ export default function LiveMap() {
   };
 
   const handleDrivebyResolution = (status) => {
-    logVisit(drivebyPrompt.customer, drivebyPrompt.duration, drivebyPrompt.entry, status, '', drivebyPrompt.driveTime);
+    logVisit(drivebyPrompt.customer, drivebyPrompt.duration, drivebyPrompt.entry, status, drivebyPrompt.note || '', drivebyPrompt.driveTime);
     setDrivebyPrompt(null);
   };
 
@@ -826,6 +1053,24 @@ export default function LiveMap() {
       exitTime: primaryExitUpdated
     });
 
+    // Preserve any note / conditions / service selections the driver made in the
+    // completion panel before choosing to split — otherwise they were silently lost.
+    await flushCompletionDetails(primaryVisitId);
+
+    const dayMix = activeMode === 'fertilizer' ? getTodaysMix() : null;
+
+    // The primary's auto-filed EPA log was stamped with the pre-split times;
+    // re-stamp it (and the linked treatment) with the corrected window.
+    const primaryVisit = await db.visits.get(primaryVisitId);
+    if (primaryVisit?.complianceLog?.autoFiledFromMix) {
+      const restamped = {
+        ...primaryVisit.complianceLog,
+        ...formatLogTimes(primaryEntryTime, primaryExitUpdated)
+      };
+      await db.visits.update(primaryVisitId, { complianceLog: restamped });
+      await syncTreatmentLogFromVisit(primaryVisitId, restamped);
+    }
+
     let currentSeqTime = primaryExitUpdated;
 
     for (const compData of companionsMins) {
@@ -855,7 +1100,11 @@ export default function LiveMap() {
         companionPrice = services.reduce((sum, s) => sum + s.price, 0);
       }
 
-      await db.visits.add({
+      const compLog = dayMix
+        ? buildLogFromMix(dayMix, { customer: compCust, exitTime: compExit, durationSecs: compData.mins * 60 })
+        : null;
+
+      const compVisitId = await db.visits.add({
         routeId: activeRoute?.id ?? null,
         customerId: compCust.id,
         status: 'completed',
@@ -867,8 +1116,36 @@ export default function LiveMap() {
         priceEarned: companionPrice,
         appliedServices: companionServices,
         division: activeMode,
+        complianceLog: compLog,
         note: `${mode === 'simultaneous' ? 'Simultaneous' : 'Split'} visit with ${primaryCustomer?.name ?? 'adjacent property'}`
       });
+
+      // Same bridge as logVisit: a split-off fertilizer application also
+      // completes the companion's open program step.
+      if (activeMode === 'fertilizer') {
+        await autoCompleteStepFromVisit(compCust.id, {
+          id: compVisitId,
+          exitTime: compExit,
+          priceEarned: companionPrice,
+          durationSecs: compData.mins * 60,
+          weather,
+          complianceLog: compLog
+        });
+      }
+    }
+
+    // A companion may have been the last uncovered stop on the route — logVisit's
+    // "all stops done" check ran before these visits existed, so re-check here.
+    // Without this the route stays active forever and every stop finished via a
+    // split forces a manual "Force End Route" later.
+    const route = activeRouteRef.current;
+    if (route && route.normalizedStops && route.status !== 'completed') {
+      const currentVisits = await db.visits.where({ routeId: route.id }).toArray();
+      const doneIds = new Set(currentVisits.map(v => v.customerId));
+      const allCompleted = route.normalizedStops.every(s => doneIds.has(s.customerId));
+      if (allCompleted) {
+        await db.routes.update(route.id, { status: 'completed' });
+      }
     }
 
     setTimeSplit(null);
@@ -890,6 +1167,30 @@ export default function LiveMap() {
       await db.routes.update(activeRoute.id, { stops: newStops });
     }
     setShowQuickAdd(false);
+  };
+
+  // "Mow next" from the completion panel's neighbor prompt: append the selected
+  // neighbors to today's route in ONE update (looping handleAddUnplannedStop
+  // would re-read a stale stops array and drop all but the last add). The
+  // geofence engine then tracks them like any planned stop.
+  const handleAddCompanionsToRoute = async (companions) => {
+    const route = activeRouteRef.current;
+    const existingIds = new Set((route?.normalizedStops || []).map(s => s.customerId));
+    const toAdd = (companions || []).filter(c => !existingIds.has(c.id));
+    if (toAdd.length === 0) return;
+    const newStopObjs = toAdd.map(c => ({ customerId: c.id, plannedServiceIds: [] }));
+    if (!route) {
+      await db.routes.add({
+        name: 'Ad-hoc Route',
+        status: 'active',
+        isTemplate: 0,
+        division: activeModeRef.current,
+        stops: newStopObjs,
+        createdAt: Date.now()
+      });
+    } else {
+      await db.routes.update(route.id, { stops: [...route.stops, ...newStopObjs] });
+    }
   };
 
   const getArrowIcon = () => ({
@@ -920,6 +1221,60 @@ export default function LiveMap() {
 
       <AppDialog dialog={dialog} onClose={() => setDialog(null)} />
       {showDayReview && <DayReviewModal onClose={() => setShowDayReview(false)} />}
+      {/* EPA log for the just-completed visit. The completion panel's button has
+          set activeEpaJob since day one, but this modal was never rendered here —
+          the field EPA flow silently did nothing. */}
+      {activeEpaJob && (
+        <ComplianceLogModal
+          visit={activeEpaJob}
+          customerName={activeEpaJob.custName}
+          customerLawnSize={activeEpaJob.custLawnSize}
+          initialLog={activeEpaJob.complianceLog || null}
+          onSave={handleSaveEpaLog}
+          onClose={closeEpaModal}
+          draftRef={epaDraftRef}
+        />
+      )}
+      {quickLogJob && (
+        <TodaysMixModal
+          title="🧪 Products Applied Here"
+          blurb={`What did you apply at ${quickLogJob.customer?.name || 'this stop'}? This files the EPA log for this stop only.`}
+          saveLabel="File EPA log"
+          onSave={async (products, mixSite) => {
+            const log = buildLogFromMix({ products, mixSite }, {
+              customer: quickLogJob.customer,
+              exitTime: quickLogJob.exitTime,
+              durationSecs: quickLogJob.durationSecs
+            });
+            await db.visits.update(quickLogJob.visitId, { complianceLog: log });
+            await syncTreatmentLogFromVisit(quickLogJob.visitId, log);
+            setCompletionPanel(prev =>
+              prev && prev.visitId === quickLogJob.visitId ? { ...prev, complianceLog: log } : prev
+            );
+            setQuickLogJob(null);
+            armCompletionTimer(quickLogJob.visitId);
+          }}
+          onClose={() => {
+            setQuickLogJob(null);
+            armCompletionTimer(quickLogJob.visitId);
+          }}
+        />
+      )}
+      {showMixModal && (
+        <TodaysMixModal
+          initialMix={todaysMix}
+          onSave={(products, mixSite) => {
+            setTodaysMixState(setTodaysMix(products, mixSite));
+            setShowMixModal(false);
+          }}
+          onClear={() => {
+            clearTodaysMix();
+            setTodaysMixState(null);
+            setShowMixModal(false);
+          }}
+          onClose={() => setShowMixModal(false)}
+        />
+      )}
       {showLiveNoteModal && (
         <div className="modal-overlay">
           <div className="modal-content">
@@ -938,6 +1293,8 @@ export default function LiveMap() {
       {timeSplit && (
         <TimeSplitModal
           primaryName={timeSplit.primaryCustomer?.name}
+          primaryExpectedSecs={timeSplit.primaryExpectedSecs}
+          primaryPrice={timeSplit.primaryPrice}
           companions={timeSplit.companions}
           totalSecs={timeSplit.durationSecs}
           jobStart={timeSplit.primaryExitTime ? timeSplit.primaryExitTime - timeSplit.durationSecs * 1000 : null}
@@ -1006,9 +1363,11 @@ export default function LiveMap() {
       
       <JobCompletionModal
         completionPanel={completionPanel}
-        autoDismissMs={COMPLETION_AUTO_DISMISS_MS}
+        autoDismissMs={completionPanel?.nearbyCandidates?.length > 0 ? 0 : COMPLETION_AUTO_DISMISS_MS}
         epoch={completionEpoch}
         onUserActivity={() => { if (completionPanel?.visitId) armCompletionTimer(completionPanel.visitId); }}
+        onDismissNeighbors={() => { if (completionPanel?.visitId) armCompletionTimer(completionPanel.visitId, { force: true }); }}
+        onAddCompanionsToRoute={handleAddCompanionsToRoute}
         panelNote={panelNote}
         setPanelNote={setPanelNote}
         panelNoteActiveRef={panelNoteActiveRef}
@@ -1017,6 +1376,12 @@ export default function LiveMap() {
         setTimeSplit={setTimeSplit}
         setIsEditJobOpen={setIsEditJobOpen}
         setActiveEpaJob={setActiveEpaJob}
+        onQuickLogProducts={(cp) => setQuickLogJob({
+          visitId: cp.visitId,
+          customer: cp.primaryCustomer,
+          exitTime: cp.exitTime,
+          durationSecs: cp.durationSecs
+        })}
         handleSaveCompletion={handleSaveCompletion}
         onSelectionsChange={(conditions, appliedServices) => {
           panelConditionsRef.current = conditions;
@@ -1034,6 +1399,64 @@ export default function LiveMap() {
 
       {/* Top Panel: Current or Next Job Info */}
       <div style={{ position: 'absolute', top: '0.8rem', left: '0.8rem', right: '0.8rem', zIndex: 100 }}>
+        {/* Day tank mix — set once in the morning, every completed fert visit
+            auto-files its EPA log from it. Expires at midnight (local). */}
+        {activeMode === 'fertilizer' && (
+          <button
+            onClick={() => setShowMixModal(true)}
+            style={{
+              width: '100%', marginBottom: '0.8rem', padding: '10px 14px', cursor: 'pointer',
+              borderRadius: 'var(--radius-md)', textAlign: 'left', fontSize: '0.85rem', fontWeight: 600,
+              display: 'flex', alignItems: 'center', gap: '0.5rem',
+              border: todaysMix ? '1px solid rgba(16,185,129,0.5)' : '1px dashed var(--color-border)',
+              background: todaysMix ? 'rgba(16,185,129,0.12)' : 'var(--color-bg-card)',
+              color: todaysMix ? 'var(--color-primary)' : 'var(--color-text-muted)',
+              boxShadow: '0 2px 8px rgba(0,0,0,0.08)'
+            }}
+          >
+            <span>🧪</span>
+            {todaysMix ? (
+              <span>
+                Today's Mix: {todaysMix.products.map(p => p.productName).join(' + ')} — EPA logs auto-file
+              </span>
+            ) : (
+              <span>No mix set — EPA logs are manual. Tap to set today's mix.</span>
+            )}
+          </button>
+        )}
+        {/* Forgotten sheets: fert stops completed today with no EPA record.
+            Tapping opens the sheet for the oldest one; the count live-updates
+            as each gets saved, so working through them is tap → save → next. */}
+        {activeMode === 'fertilizer' && missingEpaToday.length > 0 && !activeEpaJob && (
+          <button
+            onClick={() => {
+              const v = missingEpaToday[0];
+              const cust = allCustomers.find(c => c.id === v.customerId);
+              setActiveEpaJob({
+                id: v.id,
+                custName: cust?.name || 'Unknown customer',
+                exitTime: v.exitTime,
+                durationSecs: v.durationSecs,
+                custLawnSize: cust?.lawnSize,
+                phone: cust?.phone,
+                address: cust?.address,
+                complianceLog: v.complianceLog || null
+              });
+            }}
+            style={{
+              width: '100%', marginBottom: '0.8rem', padding: '10px 14px', cursor: 'pointer',
+              borderRadius: 'var(--radius-md)', textAlign: 'left', fontSize: '0.85rem', fontWeight: 700,
+              display: 'flex', alignItems: 'center', gap: '0.5rem',
+              border: '1px solid rgba(245,158,11,0.6)', background: '#fffbeb', color: '#b45309',
+              boxShadow: '0 2px 8px rgba(0,0,0,0.08)'
+            }}
+          >
+            <AlertTriangle size={16} />
+            {missingEpaToday.length === 1
+              ? '1 stop today is missing its EPA log — tap to fill it now'
+              : `${missingEpaToday.length} stops today are missing EPA logs — tap to fill them`}
+          </button>
+        )}
         {gpsError && (
           <div style={{ background: '#ef4444', color: 'white', fontSize: '0.85rem', fontWeight: 600, textAlign: 'center', padding: '10px', borderRadius: 'var(--radius-md)', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', boxShadow: '0 4px 12px rgba(239,68,68,0.4)', marginBottom: '0.8rem' }}>
             <AlertTriangle size={18} /> Location unavailable — check permissions in your phone settings.
@@ -1063,6 +1486,8 @@ export default function LiveMap() {
               anchorGeofenceRef.current = null;
               resetJobTimer();
               setLiveNote('');
+              // A product pick made for the discarded job must not file later.
+              clearStopMix();
               
               if (engineRef.current) {
                 engineRef.current.activeGeofenceId = null;

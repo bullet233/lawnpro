@@ -5,7 +5,7 @@ import { getSettings } from '../db/settings';
 import { parseLawnSizeToSqFt } from '../utils/parseLawnSize';
 import { toast } from '../utils/toast';
 
-export default function ComplianceLogModal({ visit, customerName, customerLawnSize, initialLog, onSave, onClose }) {
+export default function ComplianceLogModal({ visit, customerName, customerLawnSize, initialLog, onSave, onClose, draftRef }) {
   const settings = getSettings();
   const inventory = settings.chemicalInventory || [];
   const [log, setLog] = useState({
@@ -73,6 +73,12 @@ export default function ComplianceLogModal({ visit, customerName, customerLawnSi
     }
     setLog(newLog);
   }, [initialLog, customerLawnSize]);
+
+  // Mirror the in-progress form so the owner can persist it if the driver
+  // drives off and the next stop's sheet replaces this one unsaved.
+  useEffect(() => {
+    if (draftRef) draftRef.current = log;
+  }, [log, draftRef]);
 
   const handleChange = (field, value) => {
     setLog(prev => ({ ...prev, [field]: value }));
@@ -468,11 +474,15 @@ export default function ComplianceLogModal({ visit, customerName, customerLawnSi
           <button 
             className="btn btn-secondary" 
             style={{ width: '100%', justifyContent: 'center' }}
-            onClick={() => {
+            onClick={async () => {
               if (window.confirm("Do you want to save these changes to the database before viewing the PDF?\n\nClick OK to Save and View, or Cancel to keep editing.")) {
-                onSave(log);
-                localStorage.setItem(`preview_epa_log_${visit.id}`, JSON.stringify(log));
-                window.open(import.meta.env.BASE_URL + 'print-epa/' + visit.id + '?preview=true', '_blank');
+                // Program treatments arrive with no visit id — their onSave
+                // creates/returns the linked visit, so wait for it and print that.
+                const savedId = await onSave(log);
+                const printId = visit.id ?? savedId;
+                if (printId == null) { toast('Saved — but no printable visit is linked to this record.'); return; }
+                localStorage.setItem(`preview_epa_log_${printId}`, JSON.stringify(log));
+                window.open(import.meta.env.BASE_URL + 'print-epa/' + printId + '?preview=true', '_blank');
               }
             }}
           >
