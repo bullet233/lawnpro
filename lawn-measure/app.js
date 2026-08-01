@@ -539,7 +539,10 @@ function drawLineOverlay(l) {
 function renderMap() {
   clearMap();
   if (state.draft) {
-    state.areas.forEach((a) => { if (a.id !== state.activeId && !a.hidden) drawArea(a, { faint: true }); });
+    // Other areas stay tappable while editing (select mode only — the `drawing`
+    // guard in drawArea keeps them click-through mid-trace): tap one on the map
+    // to commit the current edit and switch straight to it.
+    state.areas.forEach((a) => { if (a.id !== state.activeId && !a.hidden) drawArea(a, { faint: true, onClick: () => openEditor(a.id) }); });
     if (!state.draft.hidden) drawArea(state.draft, { faint: false, active: true });
   } else {
     state.areas.forEach((a) => { if (!a.hidden) drawArea(a, { faint: false, onClick: () => openEditor(a.id) }); });
@@ -2082,7 +2085,8 @@ function dockHtml() {
 
   // Active Area Stats Card — green "Editing" banner + Gross / Cutouts / Net / Perimeter
   const statsCard = '<div class="card stats-card-v2">' +
-    '<div class="edit-banner" id="dock"><span class="edit-banner-text" id="dockActive"><span class="pulse"></span>Editing - ' + esc(d.name) + '</span></div>' +
+    '<div class="edit-banner" id="dock"><span class="edit-banner-text" id="dockActive"><span class="pulse"></span>Editing - ' + esc(d.name) + '</span>' +
+      '<button type="button" class="edit-done-btn" id="dockDoneBtn">Done</button></div>' +
     '<div class="asc-grid">' +
       statCell("liveGross", sqftOnly(gross) + " <small>" + unitSuffix() + "</small>", "", "Gross Area") +
       statCell("liveCuts", "-" + sqftOnly(cuts) + " <small>" + unitSuffix() + "</small>", "danger", "Cutouts") +
@@ -2102,6 +2106,9 @@ function wireToolbar() {
   document.querySelectorAll(".shape-btn").forEach((b) => b.onclick = () => setShape(b.getAttribute("data-shape")));
 }
 function wireDock() {
+  // Done: commit the edit and drop back to overview (a boundaryless draft is discarded).
+  const dn = $("dockDoneBtn");
+  if (dn) dn.onclick = () => { autoCommit(); closeEditor(); };
   const an = $("areaName");
   if (an) an.oninput = (e) => {
     if (!state.draft) return;
