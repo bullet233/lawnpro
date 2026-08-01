@@ -313,7 +313,9 @@ function metersPerPixel() {
 }
 // Snap/close radius in screen pixels. Fingertips are far less precise than a mouse
 // cursor, so touch devices get a wider target for closing shapes and magnetic snap.
-const SNAP_PX = (typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches) ? 24 : 14;
+const COARSE = (typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches) ||
+  /[?&]coarse=1/.test(location.search); // ?coarse=1 = test hook: force touch handles on a mouse desktop
+const SNAP_PX = COARSE ? 24 : 14;
 // The first vertex is a static target dot — grows to a large green ring when close enough to snap shut.
 function setFirstDotStyle(snap) {
   const m = tempMarkers[0];
@@ -460,6 +462,7 @@ function clearMap() {
   editListeners.forEach((l) => google.maps.event.removeListener(l)); editListeners = [];
   mapOverlays.forEach((o) => o.setMap(null)); mapOverlays = [];
   activeBoundary = null; activeBoundaryGeomType = null; activeLabel = null;
+  lockMapGestures(false); // backstop: never leave the map unpannable after a re-render
 }
 function makeShapeOverlay(geom, style) {
   if (geom.type === "circle") return new google.maps.Circle({ ...style, center: geom.center, radius: geom.radius, map });
@@ -488,11 +491,16 @@ function drawArea(a, opts) {
       clickable: drawing ? false : (editing ? true : !!opts.onClick),
       // Vertex editing only — the whole shape is NOT draggable, so clicking/panning
       // inside an area can't accidentally move it. Reshape via vertex handles.
-      editable: editing, draggable: false,
+      // On touch (COARSE) the built-in ~11px handles lose the drag to the map pan,
+      // so we hide them and render our own fat Markers (addTouchHandles) instead.
+      editable: editing && !COARSE, draggable: false,
       zIndex: 10,
     });
     if (opts.onClick) ov.addListener("click", opts.onClick);
-    if (editing) wireEditable(ov, a.boundary.type, () => onBoundaryEdit(ov, a.boundary.type), true);
+    if (editing) {
+      wireEditable(ov, a.boundary.type, () => onBoundaryEdit(ov, a.boundary.type), true);
+      if (COARSE) addTouchHandles(ov, a.boundary.type, true);
+    }
     mapOverlays.push(ov);
     if (opts.active) { activeBoundary = ov; activeBoundaryGeomType = a.boundary.type; }
 
@@ -509,9 +517,12 @@ function drawArea(a, opts) {
     const co = makeShapeOverlay(c.geometry, {
       fillColor: "#16202c", fillOpacity: opts.faint ? 0.12 : 0.5,
       strokeColor: "#ffffff", strokeWeight: areaW(), strokeOpacity: 0.85,
-      clickable: editing, editable: editing, draggable: false, zIndex: 20,
+      clickable: editing, editable: editing && !COARSE, draggable: false, zIndex: 20,
     });
-    if (editing) wireEditable(co, c.geometry.type, () => onCutoutEdit(co, c.id, c.geometry.type), false);
+    if (editing) {
+      wireEditable(co, c.geometry.type, () => onCutoutEdit(co, c.id, c.geometry.type), false);
+      if (COARSE) addTouchHandles(co, c.geometry.type, false);
+    }
     mapOverlays.push(co);
   });
 }
@@ -749,6 +760,115 @@ function wireEditable(ov, type, onEdit, isBoundary) {
   // mouseup ends a vertex-drag gesture (the map-level mouseup in renderMap is a backstop).
   editListeners.push(ov.addListener("mouseup", finalizeEditGesture));
 }
+
+/* ── touch vertex handles (COARSE pointers only) ───────────────────────────
+   Google's built-in editable-shape handles are ~11px — a fingertip misses
+   them and the greedy one-finger pan drags the MAP instead of the point.
+   On touch we hide the built-ins (editable:false above) and render our own
+   draggable Markers with a 44px hit box, locking map panning for the length
+   of the gesture. Mutating the overlay's geometry fires the same set_at /
+   bounds_changed / center_changed events wireEditable already listens to,
+   so the existing edit pipeline (snapshot → live sqft → finalize) is reused
+   unchanged. Handles live in mapOverlays/editListeners → torn down by
+   clearMap and rebuilt at final positions by the post-gesture renderMap. */
+function handleIcon(sizePx, dotPx, fill, stroke, opacity) {
+  const c = sizePx / 2;
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + sizePx + '" height="' + sizePx + '">' +
+    '<circle cx="' + c + '" cy="' + c + '" r="' + (dotPx / 2) + '" fill="' + fill + '" stroke="' + stroke +
+    '" stroke-width="3" opacity="' + opacity + '"/></svg>';
+  return {
+    url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg),
+    scaledSize: new google.maps.Size(sizePx, sizePx),
+    anchor: new google.maps.Point(c, c),
+  };
+}
+let mapGesturesLocked = false;
+function lockMapGestures(on) {
+  if (!map || on === mapGesturesLocked) return;
+  mapGesturesLocked = on;
+  map.setOptions(on ? { draggable: false, gestureHandling: "none" }
+                    : { draggable: true, gestureHandling: "greedy" });
+}
+function makeHandle(pos, icon, zIndex) {
+  const m = new google.maps.Marker({ position: pos, map, icon, draggable: true, zIndex, crossOnDrag: false });
+  editListeners.push(m.addListener("dragstart", () => lockMapGestures(true)));
+  editListeners.push(m.addListener("dragend", () => { lockMapGestures(false); finalizeEditGesture(); }));
+  mapOverlays.push(m);
+  return m;
+}
+function addTouchHandles(ov, type, isBoundary) {
+  if (type === "rectangle") return addRectHandles(ov);
+  if (type === "circle") return addCircleHandles(ov);
+  addPolygonHandles(ov, isBoundary);
+}
+function addPolygonHandles(ov, isBoundary) {
+  const path = ov.getPath();
+  const vIcon = handleIcon(44, 16, "#ffffff", "#1a73e8", 1);
+  const mIcon = handleIcon(36, 11, "#ffffff", "#1a73e8", 0.55);
+  const n = path.getLength();
+  for (let i = 0; i < n; i++) {
+    (function (idx) {
+      const m = makeHandle(path.getAt(idx), vIcon, 32);
+      editListeners.push(m.addListener("drag", (e) => path.setAt(idx, e.latLng)));
+      if (isBoundary) {
+        // No right-click on touch: double-tap a point to delete it (Undo covers slips).
+        // Maps emits click+dblclick for a fast double (never two clicks), so listen to
+        // dblclick; the two-quick-clicks timer is a fallback for stacks that differ.
+        // No double-fire: the first delete re-renders, detaching this marker's listeners.
+        editListeners.push(m.addListener("dblclick", () => removeVertexAt(ov, idx)));
+        let lastTap = 0;
+        editListeners.push(m.addListener("click", () => {
+          const now = performance.now();
+          if (now - lastTap < 400) removeVertexAt(ov, idx);
+          lastTap = now;
+        }));
+      }
+    })(i);
+  }
+  // Faint midpoint handles: drag one to add a new point on that edge.
+  for (let i = 0; i < n; i++) {
+    (function (idx) {
+      const a = path.getAt(idx), b = path.getAt((idx + 1) % n);
+      const m = makeHandle(new google.maps.LatLng((a.lat() + b.lat()) / 2, (a.lng() + b.lng()) / 2), mIcon, 31);
+      let insertedAt = -1;
+      editListeners.push(m.addListener("dragstart", () => { insertedAt = idx + 1; path.insertAt(insertedAt, m.getPosition()); }));
+      editListeners.push(m.addListener("drag", (e) => { if (insertedAt >= 0) path.setAt(insertedAt, e.latLng); }));
+    })(i);
+  }
+}
+function addRectHandles(ov) {
+  const vIcon = handleIcon(44, 16, "#ffffff", "#1a73e8", 1);
+  const corners = () => {
+    const b = ov.getBounds(), ne = b.getNorthEast(), sw = b.getSouthWest();
+    return [
+      new google.maps.LatLng(ne.lat(), sw.lng()), new google.maps.LatLng(ne.lat(), ne.lng()),
+      new google.maps.LatLng(sw.lat(), ne.lng()), new google.maps.LatLng(sw.lat(), sw.lng()),
+    ];
+  };
+  const handles = corners().map((p) => makeHandle(p, vIcon, 32));
+  handles.forEach((m, i) => {
+    let opp = null; // opposite corner, frozen at gesture start (bounds move during the drag)
+    editListeners.push(m.addListener("dragstart", () => { opp = corners()[(i + 2) % 4]; }));
+    editListeners.push(m.addListener("drag", (e) => {
+      if (!opp) return;
+      ov.setBounds(new google.maps.LatLngBounds(
+        new google.maps.LatLng(Math.min(e.latLng.lat(), opp.lat()), Math.min(e.latLng.lng(), opp.lng())),
+        new google.maps.LatLng(Math.max(e.latLng.lat(), opp.lat()), Math.max(e.latLng.lng(), opp.lng()))
+      ));
+      const cs = corners();
+      handles.forEach((h, j) => { if (j !== i) h.setPosition(cs[j]); });
+    }));
+  });
+}
+function addCircleHandles(ov) {
+  const center = makeHandle(ov.getCenter(), handleIcon(44, 16, "#ffffff", "#1a73e8", 1), 32);
+  const edgePos = () => google.maps.geometry.spherical.computeOffset(ov.getCenter(), ov.getRadius(), 90);
+  const edge = makeHandle(edgePos(), handleIcon(44, 14, "#1a73e8", "#ffffff", 1), 32);
+  editListeners.push(center.addListener("drag", (e) => { ov.setCenter(e.latLng); edge.setPosition(edgePos()); }));
+  editListeners.push(edge.addListener("drag", (e) => {
+    ov.setRadius(Math.max(1, google.maps.geometry.spherical.computeDistanceBetween(ov.getCenter(), e.latLng)));
+  }));
+}
 function armBoundary() { state.drawMode = "boundary"; state.activeTool = state.drawShape; armDraw(onBoundaryDraw); applyModeChrome(); }
 function armCutout() { state.drawMode = "cutout"; state.activeTool = state.drawShape; armDraw(onCutoutDraw); applyModeChrome(); }
 function armLine() { state.drawMode = "line"; state.drawShape = "line"; state.activeTool = "line"; armDraw(onLineDraw); applyModeChrome(); }
@@ -827,7 +947,7 @@ function applyModeChrome() {
     const name = state.draft ? state.draft.name : "";
     const canReshape = sel && state.draft && state.draft.boundary;
     const hint = canReshape
-      ? ' <span style="opacity:0.8;font-weight:400;font-size:13px;margin-left:8px;">Drag a point to reshape · right-click a point to delete</span>'
+      ? ' <span style="opacity:0.8;font-weight:400;font-size:13px;margin-left:8px;">Drag a point to reshape · ' + (COARSE ? 'double-tap' : 'right-click') + ' a point to delete</span>'
       : (sel ? '' : ' <span style="opacity:0.8;font-weight:400;font-size:13px;margin-left:8px;">(Esc to cancel)</span>');
     act.innerHTML = '<span class="pulse"></span>' + action + ' - ' + esc(name) + hint;
   }
