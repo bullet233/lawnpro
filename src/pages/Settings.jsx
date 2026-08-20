@@ -478,7 +478,7 @@ export default function Settings() {
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.5rem' }}>
         <SettingsIcon size={24} color="var(--color-primary)" />
         <h1 className="page-title" style={{ margin: 0 }}>Settings</h1>
-        <span style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px', border: '1px solid var(--color-border)', marginLeft: 'auto', fontWeight: 600 }}>v1.4.7</span>
+        <span style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px', border: '1px solid var(--color-border)', marginLeft: 'auto', fontWeight: 600 }}>v1.4.8</span>
       </div>
 
       <div className="tab-bar">
@@ -1010,6 +1010,16 @@ export default function Settings() {
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
             <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-primary)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.4.8</h3>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>August 2026</span>
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '1.2rem', color: 'var(--color-text-main)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <li><strong>Mis-Counted Job Alert:</strong> Home now shows a "Check these job times" card when a finished job logged way under that lawn's usual time (or under 2 minutes flat) — the signature of GPS logging a drive-past as a visit. Each one shows logged vs. usual time with a Fix button (opens the visit editor) and a ✓ OK button if the record is actually right. Reviewed jobs never re-flag.</li>
+              </ul>
+            </div>
+
+            <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-border)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
                 <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.4.7</h3>
                 <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>August 2026</span>

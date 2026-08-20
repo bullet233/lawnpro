@@ -8,7 +8,8 @@ import { getVisitRevenueBreakdown, calculateServiceTotals } from '../utils/reven
 import { getSettings } from '../db/settings';
 import { useServiceMode } from '../components/ServiceProvider';
 import { classifyTreatment } from '../db/treatments';
-import { defaultServicesForMode, isScheduleAnchor } from '../utils/scheduler';
+import { defaultServicesForMode, isScheduleAnchor, findSuspectVisits } from '../utils/scheduler';
+import VisitEditModal from '../components/VisitEditModal';
 import { Plus, Sunrise, Sun, Moon, Settings as SettingsIcon, Map as MapIcon, Route as RouteIcon, ClipboardList, Thermometer, CloudSun, CloudRain, Cloud, Users, AlertTriangle, TrendingUp, CheckCircle, Droplets, ChevronRight } from 'lucide-react';
 
 const formatDur = (secs) => {
@@ -63,6 +64,7 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const { activeMode } = useServiceMode();
   const [showDayReview, setShowDayReview] = useState(false);
+  const [fixingSuspect, setFixingSuspect] = useState(null);
   const [weather, setWeather] = useState(null);
   const [isSyncing, setIsSyncing] = useState(false);
 
@@ -406,6 +408,27 @@ export default function Dashboard() {
     return rows;
   }, [allCustomers, allVisits, activeMode]);
 
+  // Possible mis-counted jobs: completed visits (last 3 days) logged way below
+  // the lawn's own average, or under the 2-minute floor — e.g. a slow GPS
+  // pass-through that crossed the drive-by threshold, or a timer that ended
+  // mid-job. Flag-only: the driver fixes the record or confirms it's right.
+  const suspectVisits = useMemo(() => {
+    if (allVisits.length === 0 || allCustomers.length === 0) return [];
+    return findSuspectVisits(allVisits, activeMode)
+      .map(f => ({ ...f, customer: allCustomers.find(c => c.id === f.visit.customerId) }))
+      .filter(f => f.customer);
+  }, [allVisits, allCustomers, activeMode]);
+
+  const handleSuspectOk = (visitId) => db.visits.update(visitId, { reviewedOk: true });
+
+  const handleSuspectSave = async (updates) => {
+    if (!fixingSuspect) return;
+    // reviewedOk too: an edited-and-saved record is reviewed by definition, so
+    // it never re-flags even if the corrected time is still unusually short.
+    await db.visits.update(fixingSuspect.visit.id, { ...updates, reviewedOk: true });
+    setFixingSuspect(null);
+  };
+
   const activeDueList = activeMode === 'mowing' ? mowingDue : fertilizerDue;
   const overdueCount = activeMode === 'mowing' ? mowingDue.filter(c => !c.isNew).length : treatmentAttention.length;
   // Never-mowed active clients are "new", not "overdue". Kept as a separate count
@@ -463,6 +486,16 @@ export default function Dashboard() {
   return (
     <div className="animate-fade-in" style={{ paddingBottom: '2rem' }}>
       {showDayReview && <DayReviewModal onClose={() => setShowDayReview(false)} />}
+
+      {fixingSuspect && (
+        <VisitEditModal
+          job={fixingSuspect.visit}
+          customer={fixingSuspect.customer}
+          defaultServices={getSettings().defaultServices}
+          onClose={() => setFixingSuspect(null)}
+          onSave={handleSuspectSave}
+        />
+      )}
 
       {/* Offline Sync Banner */}
       {pendingLogs.length > 0 && (
@@ -634,6 +667,58 @@ export default function Dashboard() {
                 </span>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Possible mis-counted jobs — completed visits way under the lawn's usual time */}
+        {suspectVisits.length > 0 && (
+          <div style={{ marginTop: '1.5rem' }}>
+            <div style={{ fontSize: '1rem', fontWeight: 600, padding: '0.4rem 0.8rem', color: '#b91c1c', display: 'flex', alignItems: 'center', gap: '0.4rem', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.9rem', marginBottom: '1rem' }}>
+              <AlertTriangle size={16} /> Check these job times
+              <span style={{ fontSize: '0.7rem', background: '#ef4444', color: 'white', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>{suspectVisits.length}</span>
+            </div>
+            <div className="glass-card" style={{ padding: 0, maxHeight: '240px', overflowY: 'auto', border: '1px solid rgba(239,68,68,0.35)' }}>
+              {suspectVisits.map(f => {
+                const mins = Math.max(1, Math.round(f.visit.durationSecs / 60));
+                const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+                const dayWord = f.visit.exitTime >= startOfToday.getTime() ? 'today'
+                  : f.visit.exitTime >= startOfToday.getTime() - 86400000 ? 'yesterday'
+                  : new Date(f.visit.exitTime).toLocaleDateString([], { weekday: 'short' });
+                const timeStr = new Date(f.visit.exitTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+                const why = f.belowAvg
+                  ? `usually ~${Math.round(f.avgSecs / 60)} min (${f.priorCount} visits)`
+                  : 'under 2 min';
+                return (
+                  <div key={f.visit.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', padding: '0.6rem 0.8rem', borderBottom: '1px solid var(--color-border)' }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--color-text-main)' }}>{f.customer.name}</div>
+                      <div style={{ fontSize: '0.75rem', marginTop: '0.1rem', color: '#b91c1c', fontWeight: 500 }}>
+                        Logged {mins} min — {why} · {dayWord} {timeStr} · ${(f.visit.priceEarned || 0).toFixed(0)}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.4rem', flexShrink: 0 }}>
+                      <button
+                        className="btn btn-secondary"
+                        style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem', background: 'transparent', border: '1px solid var(--color-border)' }}
+                        onClick={() => setFixingSuspect(f)}
+                      >
+                        Fix
+                      </button>
+                      <button
+                        className="btn btn-secondary"
+                        style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem', background: 'transparent', border: '1px solid var(--color-border)', color: 'var(--color-primary)' }}
+                        onClick={() => handleSuspectOk(f.visit.id)}
+                      >
+                        ✓ OK
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <p style={{ fontSize: '0.72rem', color: 'var(--color-text-muted)', margin: '0.5rem 0.2rem 0' }}>
+              These finished far quicker than this lawn's usual time. Fix the record if the timer mis-counted, or ✓ OK if it's right.
+            </p>
           </div>
         )}
 

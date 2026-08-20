@@ -3,6 +3,19 @@
 All notable changes to the app. Everything under **Unreleased** is local only —
 not yet deployed to the tablet (deploy = `npm run deploy` → gh-pages).
 
+## [1.4.8] - 2026-08-20
+
+### Mis-counted job alert (2026-08-20)
+- New "Check these job times" card on Home: any completed visit from the last
+  3 days logged far below that lawn's own average (<40%, needs 3+ prior
+  visits) or under a 2-minute absolute floor gets flagged — the signature of
+  a slow GPS pass-through crossing the 45s drive-by threshold, or a timer
+  that ended mid-job. Each row shows logged vs usual time, when, and price,
+  with Fix (opens the visit editor) and ✓ OK (confirms it's right) buttons;
+  either way the visit is marked reviewed and never re-flags. Division-aware:
+  a quick fert visit is judged against fert history, not mow history.
+  (`findSuspectVisits` in scheduler.js; 91 tests.)
+
 ## [1.4.7] - 2026-08-19
 
 ### Split-time modal shows each lawn's usual time (2026-08-19)

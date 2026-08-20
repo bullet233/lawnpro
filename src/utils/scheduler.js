@@ -80,6 +80,39 @@ export function isScheduleAnchor(v) {
   return v.status === 'completed' || (v.status === 'skipped' && v.countsForSchedule === true);
 }
 
+// Suspiciously short completed visits — a job logged far below the lawn's own
+// average, or under an absolute floor, is usually a mis-count: a slow GPS
+// pass-through that crossed the drive-by threshold, or a timer that bailed
+// mid-job. Timing data only flags; the driver reviews (fix / looks-right).
+export const SUSPECT_ABS_FLOOR_SECS = 120;   // no real mow/fert job is under 2 min
+export const SUSPECT_RATIO = 0.4;            // <40% of the lawn's own average
+export const SUSPECT_MIN_HISTORY = 3;        // need a believable average to compare
+export const SUSPECT_WINDOW_DAYS = 2;        // look back today + 2 prior days
+
+export function findSuspectVisits(allVisits, mode, now = Date.now()) {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  const windowStart = d.getTime() - SUSPECT_WINDOW_DAYS * 86400000;
+  const inMode = (v) => !v.division || v.division === mode;
+  return (allVisits || [])
+    .filter((v) => v.status === 'completed' && inMode(v) && !v.reviewedOk &&
+      v.exitTime >= windowStart && v.durationSecs > 0)
+    .map((v) => {
+      const prior = allVisits.filter((o) =>
+        o.customerId === v.customerId && o.id !== v.id &&
+        o.status === 'completed' && inMode(o) && o.durationSecs > 0);
+      const avgSecs = prior.length > 0
+        ? Math.round(prior.reduce((s, o) => s + o.durationSecs, 0) / prior.length)
+        : null;
+      const belowAvg = prior.length >= SUSPECT_MIN_HISTORY && v.durationSecs < SUSPECT_RATIO * avgSecs;
+      const belowFloor = v.durationSecs < SUSPECT_ABS_FLOOR_SECS;
+      if (!belowAvg && !belowFloor) return null;
+      return { visit: v, avgSecs, priorCount: prior.length, belowFloor, belowAvg };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.visit.exitTime - a.visit.exitTime);
+}
+
 // Whether a customer belongs to a division's schedule. Shared by the Weekly
 // Scheduler (day lists) and the Route Builder's Load-route action so the route
 // that loads is exactly the list the scheduler showed. Mowing is the default
