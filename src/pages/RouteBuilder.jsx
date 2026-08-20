@@ -7,6 +7,7 @@ import { Plus, Save, Trash2, ChevronDown, ChevronUp, BookMarked, FolderOpen, Gri
 import AppDialog from '../components/AppDialog';
 import { trackApiCall } from '../utils/apiTracker';
 import WeeklyScheduler from '../components/WeeklyScheduler';
+import { orderDayStops, eligibleForMode, defaultServicesForMode, isScheduleAnchor } from '../utils/scheduler';
 import { calculateTieredMatrix, parseLawnSizeToSqFt } from '../utils/matrix';
 import { getSettings } from '../db/settings';
 import { useServiceMode } from '../components/ServiceProvider';
@@ -56,22 +57,10 @@ export default function RouteBuilder() {
   }, [customers, selectedStops]);
 
   // ── Stop management ──────────────────────────────────────────────────────────
+  const defaultServiceIdsFor = (customer) => defaultServicesForMode(customer, activeMode).map(s => s.id);
+
   const addStop = (customer) => {
-    let defaultIds = [];
-    if (customer.services) {
-      if (activeMode === 'fertilizer') {
-        const fertService = customer.services.find(s => s.active && (s.id === 's3' || (s.name && s.name.toLowerCase().includes('fertil'))));
-        if (fertService) defaultIds = [fertService.id];
-      } else if (activeMode === 'mowing') {
-        const mowService = customer.services.find(s => s.active && (s.id === 's1' || (s.name && s.name.toLowerCase().includes('mow'))));
-        if (mowService) defaultIds = [mowService.id];
-      }
-      
-      if (defaultIds.length === 0) {
-        defaultIds = customer.services.filter(s => s.active).slice(0, 1).map(s => s.id);
-      }
-    }
-    setSelectedStops(prev => [...prev, { customer, plannedServiceIds: defaultIds, expanded: false }]);
+    setSelectedStops(prev => [...prev, { customer, plannedServiceIds: defaultServiceIdsFor(customer), expanded: false }]);
   };
 
   const removeStop = (index) => setSelectedStops(prev => prev.filter((_, i) => i !== index));
@@ -123,8 +112,12 @@ export default function RouteBuilder() {
   // ── Optimize route order (Google Maps Directions API) ───────────────────────────────
   const handleOptimizeRoute = async () => {
     if (selectedStops.length < 2) return;
-    if (selectedStops.length > 25) {
-      setDialog({ type: 'danger', title: 'Too Many Stops', message: 'Google Maps limits optimization to 25 stops. Split into two routes or remove some stops.' });
+    // Google allows 25 waypoints. With a business address every stop is a
+    // waypoint (25 max); without one, the first/last stops become the fixed
+    // origin/destination so 27 fit.
+    const maxStops = settings.businessAddress ? 25 : 27;
+    if (selectedStops.length > maxStops) {
+      setDialog({ type: 'danger', title: 'Too Many Stops', message: `Google Maps limits optimization to ${maxStops} stops. Split into two routes or remove some stops.` });
       return;
     }
     const getCenter = (stop) => {
@@ -151,8 +144,14 @@ export default function RouteBuilder() {
       stopover: true
     }));
 
+    // Track whether the business address actually became the origin — the
+    // response must be decoded against the request that was really sent. If
+    // geocoding fails we fall back to pinned first/last stops, and decoding as
+    // if the business origin was used would drop/scramble stops.
+    let usedBusinessOrigin = false;
     if (settings.businessAddress) {
       try {
+        trackApiCall('geocode');
         const geocoder = new window.google.maps.Geocoder();
         const results = await new Promise((resolve, reject) => {
           geocoder.geocode({ address: settings.businessAddress }, (res, status) => {
@@ -167,11 +166,13 @@ export default function RouteBuilder() {
           location: getCenter(stop),
           stopover: true
         }));
+        usedBusinessOrigin = true;
       } catch (err) {
         console.warn('Failed to geocode business address:', err);
       }
     }
 
+    trackApiCall('directions');
     const directionsService = new window.google.maps.DirectionsService();
     let isResolved = false;
     const timeout = setTimeout(() => {
@@ -197,7 +198,7 @@ export default function RouteBuilder() {
         const optimizedOrder = route.waypoint_order;
         
         let newStops = [];
-        if (settings.businessAddress) {
+        if (usedBusinessOrigin) {
            optimizedOrder.forEach(idx => {
              newStops.push({ ...selectedStops[idx] });
            });
@@ -231,7 +232,10 @@ export default function RouteBuilder() {
         const totalMins = Math.round(totalDriveSecs / 60);
         const totalMiles = (totalDriveMeters * 0.000621371).toFixed(1);
         
-        setDialog({ type: 'success', title: 'Route Optimized!', message: `Google Maps optimized ${newStops.length} stops. Estimated driving: ${totalMins} minutes (${totalMiles} miles).` });
+        // Without a business origin, Google requires a fixed start and end —
+        // say so, or an unchanged first/last stop looks like a failed optimize.
+        const pinnedNote = usedBusinessOrigin ? '' : ' Your first and last stops stay fixed — set a business address in Settings to optimize the full loop.';
+        setDialog({ type: 'success', title: 'Route Optimized!', message: `Google Maps optimized ${newStops.length} stops. Estimated driving: ${totalMins} minutes (${totalMiles} miles).${pinnedNote}` });
         
       } else {
         setDialog({ type: 'danger', title: 'Optimization Failed', message: `Google Maps could not optimize this route. Error: ${status}` });
@@ -261,7 +265,11 @@ export default function RouteBuilder() {
     const existingActive = (await db.routes.where('status').anyOf('active', 'pending').toArray())
       .filter(r => !r.division || r.division === activeMode);
     for (const r of existingActive) {
-      await db.routes.update(r.id, { status: 'completed' });
+      // A replaced route nobody worked is 'cancelled', not 'completed', so it
+      // can't pass for a finished day later. Nothing queries 'cancelled'.
+      const visits = await db.visits.where({ routeId: r.id }).toArray();
+      const touched = visits.some(v => v.status === 'completed' || v.status === 'skipped');
+      await db.routes.update(r.id, { status: touched ? 'completed' : 'cancelled' });
     }
     const totalMeters = selectedStops.reduce((sum, s) => sum + (s.plannedDriveDistanceMeters || 0), 0);
     const plannedDistanceMiles = totalMeters > 0 ? parseFloat((totalMeters * 0.000621371).toFixed(1)) : null;
@@ -348,7 +356,10 @@ export default function RouteBuilder() {
     setSelectedStops(stops);
     setRouteName(template.name || '');
     setShowMap(false);
-    setDialog({ type: 'info', title: 'Template Loaded', message: `"${template.name}" — ${stops.length} stop${stops.length !== 1 ? 's' : ''} ready. Edit if needed, then save your active route.` });
+    const crossDivision = template.division && template.division !== activeMode
+      ? ` Heads up: this is a ${template.division} template — saving now creates a ${activeMode} route.`
+      : '';
+    setDialog({ type: 'info', title: 'Template Loaded', message: `"${template.name}" — ${stops.length} stop${stops.length !== 1 ? 's' : ''} ready. Edit if needed, then save your active route.${crossDivision}` });
   };
 
   const handleDeleteTemplate = (template) => {
@@ -367,21 +378,44 @@ export default function RouteBuilder() {
   const handleLoadDayRoute = (day) => {
     if (!customers) return;
     const now = Date.now();
-    const dayCusts = customers.filter(c => 
-      c.status !== 'inactive' && 
-      c.preferredDay === day && 
+    // Mirror the Weekly Scheduler exactly: same division eligibility, same
+    // drive order (manual dayOrder, else nearest-neighbor). Snoozed skipped.
+    const dayCusts = customers.filter(c =>
+      eligibleForMode(c, activeMode) &&
+      c.preferredDay === day &&
       (!c.snoozedUntil || c.snoozedUntil < now)
     );
-    const stops = dayCusts.map(customer => {
-      const defaultIds = customer.services
-        ? customer.services.filter(s => s.active).slice(0, 1).map(s => s.id)
-        : [];
-      return { customer, plannedServiceIds: defaultIds, expanded: false };
+
+    // Leave off anyone already handled today or yesterday — a lawn knocked out
+    // a day early (nearby split, added opportunity) or deliberately cycle-
+    // skipped must not reload as a to-do and double-track tomorrow. Schedule
+    // anchors only: catch-up skips still need service, so they stay in.
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const cutoff = startOfToday.getTime() - 86400000; // start of yesterday
+    const alreadyServiced = [];
+    const dueCusts = dayCusts.filter(c => {
+      const recent = (allVisits || []).filter(v =>
+        v.customerId === c.id && isScheduleAnchor(v) &&
+        (!v.division || v.division === activeMode) && v.exitTime >= cutoff
+      );
+      if (recent.length === 0) return true;
+      const last = recent.sort((a, b) => b.exitTime - a.exitTime)[0];
+      const dayWord = last.exitTime >= startOfToday.getTime() ? 'today' : 'yesterday';
+      alreadyServiced.push(`${c.name} (${last.status === 'skipped' ? 'cycle-skipped' : 'serviced'} ${dayWord})`);
+      return false;
     });
+
+    const stops = orderDayStops(dueCusts).map(customer => (
+      { customer, plannedServiceIds: defaultServiceIdsFor(customer), expanded: false }
+    ));
     setSelectedStops(stops);
     setRouteName(`${day} Route`);
     setActiveTab('build');
-    setDialog({ type: 'info', title: `${day} Route Loaded`, message: `${stops.length} stop${stops.length !== 1 ? 's' : ''} added. (Snoozed customers were ignored).` });
+    const skippedNote = alreadyServiced.length > 0
+      ? ` Left off: ${alreadyServiced.join(', ')} — add manually to re-service.`
+      : '';
+    setDialog({ type: 'info', title: `${day} Route Loaded`, message: `${stops.length} stop${stops.length !== 1 ? 's' : ''} added in the scheduler's drive order. (Snoozed customers were ignored).${skippedNote}` });
   };
 
   return (
@@ -437,7 +471,14 @@ export default function RouteBuilder() {
                     {templates.map(t => (
                       <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', padding: '0.6rem 0.8rem', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
                         <div style={{ flex: 1 }}>
-                          <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{t.name}</div>
+                          <div style={{ fontWeight: 600, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            {t.name}
+                            {t.division && (
+                              <span style={{ fontSize: '0.65rem', fontWeight: 700, padding: '2px 6px', borderRadius: '4px', background: t.division === 'fertilizer' ? '#DBEAFE' : '#E2F4EC', color: t.division === 'fertilizer' ? '#1D4ED8' : '#0B6B45' }}>
+                                {t.division === 'fertilizer' ? 'Fert' : 'Mow'}
+                              </span>
+                            )}
+                          </div>
                           <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>
                             {t.stops?.length ?? 0} stop{t.stops?.length !== 1 ? 's' : ''}
                           </div>
@@ -628,7 +669,7 @@ export default function RouteBuilder() {
                   let missingDrive = false;
                   
                   let globalPace = 250;
-                  if (allVisits.length > 0 && customers.length > 0) {
+                  if (allVisits?.length > 0 && customers?.length > 0) {
                     let tSecs = 0;
                     let tSqFt = 0;
                     allVisits.forEach(v => {
@@ -659,7 +700,7 @@ export default function RouteBuilder() {
                     let avgDuration = 900;
                     const isPlannedMow = !s.plannedServiceIds || s.plannedServiceIds.length === 0 || s.plannedServiceIds.some(id => settings?.defaultServices?.find(ds => ds.id === id)?.category === 'Mowing' || id === 's1');
 
-                    const histVisits = allVisits.filter(v => {
+                    const histVisits = (allVisits || []).filter(v => {
                       if (v.customerId !== s.customer.id || v.status !== 'completed' || !v.durationSecs) return false;
                       const isHistMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => settings?.defaultServices?.find(ds => ds.id === id)?.category === 'Mowing' || id === 's1');
                       return isPlannedMow === isHistMow;

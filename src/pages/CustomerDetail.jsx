@@ -199,10 +199,13 @@ export default function CustomerDetail() {
     setAutocomplete(autoC);
   };
 
-  const onPlaceChanged = () => {
-    if (autocomplete !== null) {
+  const onPlaceChanged = (ac) => {
+    // The wrapper passes its widget instance directly; the onLoad-state copy is
+    // only a fallback so selection can't miss because of render timing.
+    const widget = ac || autocomplete;
+    if (widget) {
       trackApiCall('autocomplete');
-      const place = autocomplete.getPlace();
+      const place = widget.getPlace();
       if (place && place.formatted_address) {
         setFormData(prev => ({ ...prev, address: place.formatted_address }));
       } else if (place && place.name) {

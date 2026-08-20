@@ -13,7 +13,7 @@ import PendingArrivalAlert from '../components/livemap/PendingArrivalAlert';
 import CustomerDetailsDropdown from '../components/livemap/CustomerDetailsDropdown';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/db';
-import { GeofenceEngine } from '../engine/GeofenceEngine';
+import { GeofenceEngine, DIVISION_PROFILES } from '../engine/GeofenceEngine';
 import { GoogleMap, Marker, Polygon } from '@react-google-maps/api';
 import { useMapStatus } from '../components/MapProvider';
 import { CheckCircle, Navigation, MapPin, FastForward, CloudRain, ChevronUp, ChevronDown, SkipForward, Sun, CloudSun, Cloud, CloudDrizzle, CloudSnow, CloudLightning, X, Play, Pause, FileText, Map as MapIcon, ClipboardList, AlertTriangle } from 'lucide-react';
@@ -31,6 +31,7 @@ import { getSettings } from '../db/settings';
 import { trackApiCall } from '../utils/apiTracker';
 import { useServiceMode } from '../components/ServiceProvider';
 import { calculatePowerModel, predictTrendMins } from '../utils/matrix';
+import { defaultServicesForMode, eligibleForMode, isScheduleAnchor } from '../utils/scheduler';
 import { autoCompleteStepFromVisit, syncTreatmentLogFromVisit, classifyTreatment } from '../db/treatments';
 import TodaysMixModal from '../components/livemap/TodaysMixModal';
 import { getTodaysMix, setTodaysMix, clearTodaysMix, takeStopMix, clearStopMix, buildLogFromMix, formatLogTimes } from '../utils/todaysMix';
@@ -131,6 +132,7 @@ export default function LiveMap() {
   const [isEditJobOpen, setIsEditJobOpen] = useState(false);
   const [nearbyOpportunity, setNearbyOpportunity] = useState(null);
   const [skipPrompt, setSkipPrompt] = useState(null);
+  const [skipReason, setSkipReason] = useState(null);
     const [gpsError, setGpsError] = useState(false);
 
   const mapRef = useRef(null);
@@ -179,6 +181,33 @@ export default function LiveMap() {
       .filter(v => v.status === 'completed' && v.division === 'fertilizer' && !v.complianceLog)
       .sort((a, b) => a.exitTime - b.exitTime);
   }, [activeMode]) || [];
+  // Everyone serviced (or skipped) today on ANY route/division — the live
+  // opportunity banner must not re-offer a lawn already knocked out today.
+  // Live query so it recounts the moment a visit is logged.
+  const servicedTodayIds = useLiveQuery(async () => {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const todays = await db.visits.where('exitTime').aboveOrEqual(startOfDay.getTime()).toArray();
+    return new Set(
+      todays.filter(v => v.status === 'completed' || v.status === 'skipped').map(v => v.customerId)
+    );
+  }, []) || new Set();
+
+  // Completed division visits today or yesterday, any route — a stop done a
+  // day early (nearby split, added opportunity) must not auto-arrive again
+  // when it shows up on the next day's route. Manual Start still works.
+  const recentlyServicedIds = useLiveQuery(async () => {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const cutoff = startOfDay.getTime() - 86400000;
+    const recent = await db.visits.where('exitTime').aboveOrEqual(cutoff).toArray();
+    return new Set(
+      recent
+        .filter(v => v.status === 'completed' && (!v.division || v.division === activeMode))
+        .map(v => v.customerId)
+    );
+  }, [activeMode]) || new Set();
+
   const activeRoute = useLiveQuery(async () => {
     const routes = await db.routes.where('status').anyOf('pending', 'active').toArray();
     // Filter active routes by the global division
@@ -280,8 +309,11 @@ export default function LiveMap() {
   // Helper to get status of a stop
   const getStopStatus = (customerId) => {
     if (activeGeofenceIdRef.current === customerId) return 'active';
-    const visit = routeVisits.find(v => v.customerId === customerId && (v.status === 'completed' || v.status === 'skipped'));
-    if (visit) return visit.status === 'skipped' ? 'skipped' : 'completed';
+    // Completed beats skipped: a stop that was skipped and then redone must
+    // read as done, whichever visit the query happens to return first.
+    const mine = routeVisits.filter(v => v.customerId === customerId);
+    if (mine.some(v => v.status === 'completed')) return 'completed';
+    if (mine.some(v => v.status === 'skipped')) return 'skipped';
     return 'pending';
   };
 
@@ -440,11 +472,16 @@ export default function LiveMap() {
   if (!engineRef.current) {
     engineRef.current = new GeofenceEngine({
       enterDebounceMs: 8000,
-      exitDebounceMs: 5000,
+      // 15s + a 20m fence buffer: parked-tablet GPS drift must sit clearly
+      // beyond the zone for a sustained stretch before a job auto-ends.
+      exitDebounceMs: 15000,
+      exitBufferMeters: 20,
       drivebyThresholdSecs: getSettings().drivebyThresholdSecs || 45,
-      onEnter: (customer) => {
+      onEnter: (customer, startedAt) => {
         if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
-        startTimer();
+        // startedAt is backdated to the first fix inside the zone, so the
+        // timer counts from actual arrival, not from the end of the debounce.
+        startTimer(startedAt || Date.now());
         capturedDriveTimeSecsRef.current = getFinalDriveTimeSecs();
         pauseDriveTimer();
         activeGeofenceIdRef.current = customer.id;
@@ -458,14 +495,14 @@ export default function LiveMap() {
           setPendingArrival({ name: customer.name, secondsLeft: remainingSecs });
         }
       },
-      onExit: (customer, durationSecs) => {
+      onExit: (customer, durationSecs, exitedAt) => {
         // The engine calls this, but we can just use our existing handleExitGeofence
-        handleExitGeofence();
+        handleExitGeofence(exitedAt);
       },
-      onDriveBy: (customer, durationSecs) => {
+      onDriveBy: (customer, durationSecs, exitedAt) => {
         // In our current setup, handleExitGeofence handles driveby detection internally.
         // We just call it.
-        handleExitGeofence();
+        handleExitGeofence(exitedAt);
       },
       onOpportunityFound: (customer) => {
         if (customer) {
@@ -482,14 +519,21 @@ export default function LiveMap() {
     if (engineRef.current && activeRoute) {
       engineRef.current.setContext({
         routeStops: activeRoute.expandedStops || [],
-        allCustomers: allCustomers || [],
+        // The opportunity banner only pitches clients in the active division —
+        // a fert-only neighbor is not a mowing opportunity.
+        allCustomers: (allCustomers || []).filter(c => eligibleForMode(c, activeMode)),
         routeVisits: routeVisits || [],
         dismissedOpportunities: dismissedOpportunitiesRef.current,
+        servicedTodayIds,
+        recentlyServicedIds,
         anchorGeofence: anchorGeofenceRef.current,
-        isJobPaused: timerState === 'paused'
+        isJobPaused: timerState === 'paused',
+        // Division-tuned thresholds — mowing/fert use the speed fast-exit
+        // (parked while working), a future snow division won't (see engine).
+        profile: DIVISION_PROFILES[activeMode] || DIVISION_PROFILES.mowing
       });
     }
-  }, [activeRoute, allCustomers, routeVisits, timerState]);
+  }, [activeRoute, allCustomers, routeVisits, timerState, servicedTodayIds, recentlyServicedIds, activeMode]);
 
   // Feed position to engine
   useEffect(() => {
@@ -498,15 +542,20 @@ export default function LiveMap() {
       lat: position.lat,
       lng: position.lng,
       accuracy: accuracy,
+      speed: speed, // mph — lets the engine tell driving away from parked drift
       timestamp: Date.now()
     });
-  }, [position, activeRoute, accuracy]);
+  }, [position, activeRoute, accuracy, speed]);
 
-  const handleExitGeofence = () => {
-    // Use timerStateRef (not timerState) to avoid stale closure from watchPosition
+  const handleExitGeofence = (exitedAt = null) => {
+    // Use timerStateRef (not timerState) to avoid stale closure from watchPosition.
+    // Duration ends when the fence was actually left (exitedAt, from the engine),
+    // not when the debounce finished. accumulatedTimeRef is in MILLISECONDS —
+    // it must be divided down, or one tap of Pause blows the logged time up.
+    const end = exitedAt || Date.now();
     const finalDuration = Math.floor(
-      accumulatedTimeRef.current + 
-      (timerStateRef.current === 'running' && lastResumeTimeRef.current ? (Date.now() - lastResumeTimeRef.current) / 1000 : 0)
+      accumulatedTimeRef.current / 1000 +
+      (timerStateRef.current === 'running' && lastResumeTimeRef.current ? Math.max(0, end - lastResumeTimeRef.current) / 1000 : 0)
     );
     const entryTime = jobStartRef.current;
     const completedCustId = activeGeofenceIdRef.current;
@@ -556,44 +605,39 @@ export default function LiveMap() {
     return savedId;
   };
 
-  const finishActiveRoute = async () => {
-    if (!activeRoute) return;
-    
-    if (activeRoute.normalizedStops) {
-      const completedVisits = await db.visits.where({ routeId: activeRoute.id }).toArray();
-      const completedIds = new Set(completedVisits.map(v => v.customerId));
-      
-      const uncompletedStops = activeRoute.normalizedStops.filter(s => !completedIds.has(s.customerId));
-      
-      for (const stop of uncompletedStops) {
-        const customer = allCustomers.find(c => c.id === stop.customerId);
-        if (customer) {
-          await db.visits.add({
-            routeId: activeRoute.id,
-            customerId: customer.id,
-            status: 'skipped',
-            durationSecs: 0,
-            driveTimeSecs: 0,
-            entryTime: Date.now(),
-            exitTime: Date.now(),
-            weather: weatherRef.current || null,
-            priceEarned: 0,
-            appliedServices: [],
-            division: activeMode,
-            note: 'Forcibly skipped when ending route'
-          });
-        }
-      }
-    }
-
-    await db.routes.update(activeRoute.id, { status: 'completed' });
+  // Close out the route itself — visits for any skipped stops are logged by
+  // executeSkip (with the driver's chosen skip semantics) before this runs.
+  const finalizeRouteEnd = async () => {
+    const route = activeRouteRef.current;
+    if (!route) return;
+    await db.routes.update(route.id, { status: 'completed' });
     resetDriveTimer(false);
     setShowDayReview(true);
   };
 
+  const handleForceEndRoute = async () => {
+    if (!activeRoute) return;
+    const completedVisits = await db.visits.where({ routeId: activeRoute.id }).toArray();
+    const completedIds = new Set(completedVisits.map(v => v.customerId));
+    const uncompleted = (activeRoute.normalizedStops || [])
+      .filter(s => !completedIds.has(s.customerId))
+      .map(s => allCustomers.find(c => c.id === s.customerId))
+      .filter(Boolean);
+
+    if (uncompleted.length === 0) {
+      await finalizeRouteEnd();
+      return;
+    }
+    // The skip sheet doubles as the confirmation — choosing an outcome for the
+    // remaining stops IS the "yes, end it" (Cancel backs out entirely).
+    setSkipReason(null);
+    setSkipPrompt({ type: 'end_route', customers: uncompleted });
+  };
+
   const handleManualDone = () => {
+    // accumulatedTimeRef is in MILLISECONDS — same unit fix as handleExitGeofence.
     const finalDuration = Math.floor(
-      accumulatedTimeRef.current + 
+      accumulatedTimeRef.current / 1000 +
       (timerStateRef.current === 'running' && lastResumeTimeRef.current ? (Date.now() - lastResumeTimeRef.current) / 1000 : 0)
     );
     const entryTime = jobStartRef.current;
@@ -616,7 +660,7 @@ export default function LiveMap() {
     setLiveNote('');
   };
 
-  const logVisit = async (customer, durationSecs, entryTime, status, note = '', overrideDriveTimeSecs = null) => {
+  const logVisit = async (customer, durationSecs, entryTime, status, note = '', overrideDriveTimeSecs = null, extra = {}) => {
     const route = activeRouteRef.current;
     let priceEarned = 0;
     let appliedServices = [];
@@ -685,7 +729,10 @@ export default function LiveMap() {
       priceEarned: priceEarned || 0,
       appliedServices: appliedServices || [],
       note: note || '',
-      division: activeModeRef.current
+      division: activeModeRef.current,
+      // Skip semantics: { catchUp: true } = still needs service (Dropped card),
+      // { countsForSchedule: true } = deliberate cycle skip (anchors the clock).
+      ...extra
     });
 
     // Show completion panel only for completed jobs
@@ -698,6 +745,7 @@ export default function LiveMap() {
       // pace comparison) silently never fired unless the driver tapped Done.
       let nearbyCandidates = [];
       let historicalAverageSecs = null;
+      let historicalVisitCount = 0;
       const mode = activeModeRef.current;
       const freshCustomers = allCustomersRef.current;
       const pos = positionRef.current;
@@ -745,6 +793,7 @@ export default function LiveMap() {
         if (priorVisits.length > 0) {
           const sum = priorVisits.reduce((acc, v) => acc + v.durationSecs, 0);
           historicalAverageSecs = Math.round(sum / priorVisits.length);
+          historicalVisitCount = priorVisits.length;
         }
 
         if (pos) {
@@ -768,9 +817,11 @@ export default function LiveMap() {
 
         const nearby = freshCustomers
           // Paused (inactive) and snoozed clients asked not to be serviced right
-          // now — don't pitch them as opportunities.
+          // now — don't pitch them as opportunities. And only clients in the
+          // active division: a fert-only neighbor is not a mow split candidate.
           .filter(c => c.id !== customer.id && !servicedTodayIds.has(c.id) &&
-            c.status !== 'inactive' && !(c.snoozedUntil && c.snoozedUntil > Date.now()))
+            c.status !== 'inactive' && !(c.snoozedUntil && c.snoozedUntil > Date.now()) &&
+            eligibleForMode(c, mode))
           .map(c => {
             if (!c.geofence || c.geofence.length === 0) return null;
             const dist = distanceToGeofence(pos.lat, pos.lng, c.geofence);
@@ -783,12 +834,18 @@ export default function LiveMap() {
               (!v.division || v.division === mode)
             );
             let expectedSecs = null;
+            let expectedSource = null; // 'history' | 'estimate' — shown in the split modal
             if (own.length > 0) {
               expectedSecs = Math.round(own.reduce((s, v) => s + v.durationSecs, 0) / own.length);
+              expectedSource = 'history';
             } else {
               const sqft = parseLawnSizeToSqFt(c.lawnSize);
-              if (sqft && trendModel) expectedSecs = Math.round(predictTrendMins(trendModel, sqft) * 60);
+              if (sqft && trendModel) {
+                expectedSecs = Math.round(predictTrendMins(trendModel, sqft) * 60);
+                expectedSource = 'estimate';
+              }
             }
+            const visitCount = own.length;
 
             // Price that would be logged: planned services on the route, else first active.
             let mowPrice = 0;
@@ -801,9 +858,11 @@ export default function LiveMap() {
               mowPrice = svc.reduce((sum, s) => sum + (s.price || 0), 0);
             }
 
-            // Last completed service before today (for the "last serviced" hint).
+            // Last schedule anchor before today (completed service OR a
+            // deliberate cycle-skip) — keeps the badge honest for clients
+            // skipped on purpose, matching Dashboard/scheduler due math.
             const past = allDbVisits.filter(v =>
-              v.customerId === c.id && v.status === 'completed' && v.exitTime < startOfToday.getTime()
+              v.customerId === c.id && isScheduleAnchor(v) && v.exitTime < startOfToday.getTime()
             );
             const lastServicedTs = past.length > 0 ? Math.max(...past.map(v => v.exitTime)) : null;
 
@@ -830,7 +889,7 @@ export default function LiveMap() {
                 : null;
             }
 
-            return { ...c, dist, expectedSecs, mowPrice, lastServicedTs, dueStatus, daysSince, intervalDays, onRoute: routeStopIds.has(c.id) };
+            return { ...c, dist, expectedSecs, expectedSource, visitCount, mowPrice, lastServicedTs, dueStatus, daysSince, intervalDays, onRoute: routeStopIds.has(c.id) };
           })
           .filter(Boolean)
           .sort((a, b) => a.dist - b.dist);
@@ -852,6 +911,7 @@ export default function LiveMap() {
         visitId,
         nearbyCandidates,
         historicalAverageSecs,
+        historicalVisitCount,
         primaryCustomer: customer,
         exitTime: Date.now(),
         appliedServices,
@@ -1000,7 +1060,10 @@ export default function LiveMap() {
   };
 
   const handleDrivebyResolution = (status) => {
-    logVisit(drivebyPrompt.customer, drivebyPrompt.duration, drivebyPrompt.entry, status, drivebyPrompt.note || '', drivebyPrompt.driveTime);
+    // A driveby resolved as "Skipped" means the lawn didn't get serviced —
+    // flag it catch-up so it surfaces on the Dashboard instead of vanishing.
+    logVisit(drivebyPrompt.customer, drivebyPrompt.duration, drivebyPrompt.entry, status, drivebyPrompt.note || '', drivebyPrompt.driveTime,
+      status === 'skipped' ? { catchUp: true } : {});
     setDrivebyPrompt(null);
   };
 
@@ -1015,23 +1078,30 @@ export default function LiveMap() {
   };
 
   const handleSkipStop = (customer) => {
+    setSkipReason(null);
     setSkipPrompt({ type: 'single', customer });
   };
 
+  // Two skip outcomes, both honest:
+  //  'catchup' — the lawn still needs service; the visit is flagged catchUp so
+  //              the Dashboard's "Dropped from route" card surfaces it tomorrow.
+  //  'cycle'   — deliberate skip (no growth / customer request); flagged
+  //              countsForSchedule so the due math treats it as the schedule
+  //              anchor and the client shows normally due next cycle, not LATE.
   const executeSkip = async (mode) => {
     if (!skipPrompt) return;
     const isEndRoute = skipPrompt.type === 'end_route';
     const targets = isEndRoute ? skipPrompt.customers : [skipPrompt.customer];
+    const baseNote = isEndRoute ? 'Skipped when ending route' : 'Skipped';
+    const note = skipReason ? `${baseNote} — ${skipReason}` : baseNote;
+    const extra = mode === 'cycle' ? { countsForSchedule: true } : { catchUp: true };
 
     for (const cust of targets) {
-      await logVisit(cust, 0, Date.now(), 'skipped');
-      if (mode === 'snooze') {
-        const interval = cust.mowingInterval || cust.serviceInterval || 7;
-        const snoozedUntil = Date.now() + (interval * 24 * 60 * 60 * 1000);
-        await db.customers.update(cust.id, { snoozedUntil });
-      }
+      await logVisit(cust, 0, Date.now(), 'skipped', note, null, extra);
     }
     setSkipPrompt(null);
+    setSkipReason(null);
+    if (isEndRoute) await finalizeRouteEnd();
   };
 
 
@@ -1087,7 +1157,9 @@ export default function LiveMap() {
         currentSeqTime = compExit;
       }
 
-      // Build companion services from route plan or fallback to first active
+      // Build companion services from the route plan; off-route neighbors fall
+      // back to the division-matched service (a split during a fert day prices
+      // from the fert service, not whatever service happens to be listed first).
       let companionPrice = 0;
       let companionServices = [];
       if (compCust.services) {
@@ -1095,9 +1167,9 @@ export default function LiveMap() {
         const plannedIds = routeStop?.plannedServiceIds || [];
         const services = plannedIds.length > 0
           ? compCust.services.filter(s => plannedIds.includes(s.id))
-          : compCust.services.filter(s => s.active).slice(0, 1);
+          : defaultServicesForMode(compCust, activeMode);
         companionServices = services.map(s => s.id);
-        companionPrice = services.reduce((sum, s) => sum + s.price, 0);
+        companionPrice = services.reduce((sum, s) => sum + (s.price || 0), 0);
       }
 
       const compLog = dayMix
@@ -1294,6 +1366,7 @@ export default function LiveMap() {
         <TimeSplitModal
           primaryName={timeSplit.primaryCustomer?.name}
           primaryExpectedSecs={timeSplit.primaryExpectedSecs}
+          primaryVisitCount={timeSplit.primaryVisitCount}
           primaryPrice={timeSplit.primaryPrice}
           companions={timeSplit.companions}
           totalSecs={timeSplit.durationSecs}
@@ -1310,30 +1383,51 @@ export default function LiveMap() {
             <h3 style={{ marginTop: 0 }}>
               {skipPrompt.type === 'single' ? `Skip ${skipPrompt.customer.name}?` : 'End Route Early?'}
             </h3>
-            <p style={{ color: 'var(--color-text-muted)', marginBottom: '1.5rem', lineHeight: 1.5 }}>
+            <p style={{ color: 'var(--color-text-muted)', marginBottom: '1rem', lineHeight: 1.5 }}>
               {skipPrompt.type === 'single'
-                ? 'Would you like to just skip for today, or also snooze this customer until their next scheduled service?'
-                : `You are skipping ${skipPrompt.customers.length} remaining stops. Would you like to reschedule them for tomorrow or skip their entire cycle?`}
+                ? 'Does this lawn still need service, or is it fine until the next cycle?'
+                : `${skipPrompt.customers.length} stop${skipPrompt.customers.length !== 1 ? 's' : ''} remain${skipPrompt.customers.length === 1 ? 's' : ''} unfinished. What should happen to them?`}
             </p>
+
+            {/* Optional reason — saved to the visit note */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '1.2rem' }}>
+              {['Rain', 'No growth', 'Customer request', "Couldn't access", 'Ran out of time'].map(r => (
+                <button
+                  key={r}
+                  onClick={() => setSkipReason(prev => prev === r ? null : r)}
+                  style={{
+                    fontSize: '0.78rem', fontWeight: 600, padding: '0.35rem 0.7rem', borderRadius: '999px', cursor: 'pointer',
+                    border: `1px solid ${skipReason === r ? 'var(--color-primary)' : 'var(--color-border)'}`,
+                    background: skipReason === r ? 'var(--color-primary-light)' : 'transparent',
+                    color: skipReason === r ? 'var(--color-primary)' : 'var(--color-text-muted)',
+                  }}
+                >
+                  {r}
+                </button>
+              ))}
+            </div>
+
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
-              <button 
-                className="btn btn-primary" 
-                style={{ width: '100%', justifyContent: 'center', padding: '0.8rem' }}
-                onClick={() => executeSkip('today')}
+              <button
+                className="btn btn-primary"
+                style={{ width: '100%', justifyContent: 'center', padding: '0.8rem', flexDirection: 'column', gap: '0.1rem' }}
+                onClick={() => executeSkip('catchup')}
               >
-                Skip for Today (Reschedule Tomorrow)
+                <span>Still needs service — catch up ASAP</span>
+                <span style={{ fontSize: '0.72rem', fontWeight: 500, opacity: 0.85 }}>Shows on Home until it gets done</span>
               </button>
-              <button 
-                className="btn btn-secondary" 
-                style={{ width: '100%', justifyContent: 'center', padding: '0.8rem', color: '#f59e0b', borderColor: '#f59e0b' }}
-                onClick={() => executeSkip('snooze')}
+              <button
+                className="btn btn-secondary"
+                style={{ width: '100%', justifyContent: 'center', padding: '0.8rem', color: '#b45309', borderColor: '#f59e0b', flexDirection: 'column', gap: '0.1rem' }}
+                onClick={() => executeSkip('cycle')}
               >
-                Skip & Snooze (Until Next Service)
+                <span>Skip this cycle</span>
+                <span style={{ fontSize: '0.72rem', fontWeight: 500, opacity: 0.85 }}>Back on the normal schedule — won't show late</span>
               </button>
-              <button 
-                className="btn" 
+              <button
+                className="btn"
                 style={{ width: '100%', justifyContent: 'center', padding: '0.8rem', marginTop: '0.5rem' }}
-                onClick={() => setSkipPrompt(null)}
+                onClick={() => { setSkipPrompt(null); setSkipReason(null); }}
               >
                 Cancel
               </button>
@@ -1744,18 +1838,7 @@ export default function LiveMap() {
             engineRef.current.manualStartJob(stop);
           }
         }}
-        onForceEndRoute={() => {
-          setDialog({
-            type: 'warning',
-            title: 'End Active Route?',
-            message: 'Are you sure you want to forcibly end this route? Incomplete jobs will be skipped.',
-            onConfirm: () => {
-              finishActiveRoute();
-              setDialog(null);
-            },
-            onCancel: () => setDialog(null)
-          });
-        }}
+        onForceEndRoute={handleForceEndRoute}
       />
 
       {/* Recenter Button if autoCenter is disabled */}

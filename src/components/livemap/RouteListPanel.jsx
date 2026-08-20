@@ -131,16 +131,18 @@ export default function RouteListPanel({
                       })()}
                     </div>
                   </div>
-                  {status === 'pending' && (
+                  {(status === 'pending' || status === 'skipped') && (
                     <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', justifyContent: 'flex-end', marginTop: '0.3rem' }}>
-                      <button
-                        className="btn btn-secondary"
-                        style={{ padding: '0.4rem 0.6rem', fontSize: '0.8rem', minHeight: '36px' }}
-                        onClick={() => handleSkipStop(stop)}
-                        title="Skip Stop"
-                      >
-                        <SkipForward size={14} />
-                      </button>
+                      {status === 'pending' && (
+                        <button
+                          className="btn btn-secondary"
+                          style={{ padding: '0.4rem 0.6rem', fontSize: '0.8rem', minHeight: '36px' }}
+                          onClick={() => handleSkipStop(stop)}
+                          title="Skip Stop"
+                        >
+                          <SkipForward size={14} />
+                        </button>
+                      )}
                       <button
                         className="btn btn-secondary"
                         style={{ padding: '0.4rem 0.6rem', fontSize: '0.8rem', minHeight: '36px' }}
@@ -154,7 +156,7 @@ export default function RouteListPanel({
                         style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem', minHeight: '36px' }}
                         onClick={() => onStartJob(stop)}
                       >
-                        ▶ Start
+                        ▶ {status === 'skipped' ? 'Redo' : 'Start'}
                       </button>
                     </div>
                   )}

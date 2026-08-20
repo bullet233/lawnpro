@@ -21,7 +21,10 @@ export const trackApiCall = async (type) => {
     if (type === 'mapLoad') stats.mapLoads++;
     else if (type === 'geocode') stats.geocodes++;
     else if (type === 'autocomplete') stats.autocomplete++;
-    else if (type === 'distanceMatrix') stats.distanceMatrix = (stats.distanceMatrix || 0) + 1;
+    // Directions and Distance Matrix are both routing calls at the same price —
+    // they share the Settings "Routing" tile. 'directions' was silently ignored
+    // before, so DayReviewModal's and Route Builder's optimize calls never counted.
+    else if (type === 'distanceMatrix' || type === 'directions') stats.distanceMatrix = (stats.distanceMatrix || 0) + 1;
     
     await db.apiStats.put(stats);
   } catch (e) {

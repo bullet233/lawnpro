@@ -541,9 +541,16 @@ code { background: var(--panel-3); padding: 2px 6px; border-radius: 5px; font-fa
 .edit-banner {
   background: var(--green); color: #fff; padding: 12px 16px;
   font-size: 16px; font-weight: 700; letter-spacing: -0.01em;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
 }
 .edit-banner.idle { background: var(--panel-3); color: var(--text-dim); font-weight: 600; }
-.edit-banner-text { display: flex; align-items: center; gap: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.edit-banner-text { display: flex; align-items: center; gap: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+.edit-done-btn {
+  background: rgba(255,255,255,.16); border: 1.5px solid rgba(255,255,255,.65); color: #fff;
+  border-radius: 999px; padding: 5px 16px; font-family: var(--font); font-size: 14px;
+  font-weight: 700; cursor: pointer; flex: 0 0 auto; touch-action: manipulation;
+}
+.edit-done-btn:active { background: rgba(255,255,255,.32); }
 .edit-banner .pulse { width: 9px; height: 9px; border-radius: 50%; background: rgba(255,255,255,.9); flex: 0 0 auto; box-shadow: 0 0 0 0 rgba(255,255,255,.6); animation: pulse 1.8s infinite; }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(255,255,255,.5); } 70% { box-shadow: 0 0 0 7px rgba(255,255,255,0); } 100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); } }
 .stats-card-v2 .asc-grid { padding: 14px 12px; gap: 0; }
@@ -802,7 +809,11 @@ code { background: var(--panel-3); padding: 2px 6px; border-radius: 5px; font-fa
    reticle) — desktop never shows them, the side panel has the full toolset. */
 #mapFab, #traceBar, #fabCatSheet, #xhairMark { display: none; }
 
-@media (max-width: 700px) {
+/* "Mobile" = narrow screen OR any touch-first device (phones AND tablets —
+   the tablet runs LawnPro in the field, so it gets the phone layout too).
+   Desktop with a mouse keeps the side-panel layout. Keep this media list in
+   sync with isMobile() in index.html and the two matchMedia calls in app.js. */
+@media (max-width: 700px), (pointer: coarse) {
   /* Home-indicator phones: grow the peek bar into the safe area. */
   :root { --sheet-peek: calc(34px + env(safe-area-inset-bottom, 0px)); }
 

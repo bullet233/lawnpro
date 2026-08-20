@@ -603,13 +603,16 @@ export default function Analytics() {
     setAutocomplete(autoC);
   };
 
-  const onPlaceChanged = () => {
-    if (autocomplete !== null) {
+  const onPlaceChanged = (ac) => {
+    // The wrapper passes its widget instance directly; the onLoad-state copy is
+    // only a fallback so selection can't miss because of render timing.
+    const widget = ac || autocomplete;
+    if (widget) {
       trackApiCall('autocomplete');
-      const place = autocomplete.getPlace();
-      if (place.formatted_address) {
+      const place = widget.getPlace();
+      if (place?.formatted_address) {
         setTargetAddress(place.formatted_address);
-      } else if (place.name) {
+      } else if (place?.name) {
         setTargetAddress(place.name);
       }
     }

@@ -3,6 +3,29 @@ import { Clock, CheckCircle, AlertTriangle } from 'lucide-react';
 
 const fmt = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
+// Tappable "usual time" hint — tells the driver what this lawn normally takes so a
+// bad-looking default is easy to correct; tapping it fills the minutes input.
+function AvgHint({ secs, source, count, onUse }) {
+  if (!secs || secs <= 0) return null;
+  const mins = Math.max(1, Math.round(secs / 60));
+  const label = source === 'estimate'
+    ? `📐 est ${mins} min (lawn size)`
+    : `📊 avg ${mins} min${count > 0 ? ` · ${count} visit${count === 1 ? '' : 's'}` : ''}`;
+  return (
+    <button
+      onClick={() => onUse(mins)}
+      style={{
+        border: '1px solid var(--color-border)', background: 'var(--color-bg-card)',
+        borderRadius: '999px', padding: '0.15rem 0.55rem', cursor: 'pointer',
+        fontSize: '0.72rem', fontWeight: 600, color: 'var(--color-text-muted)', whiteSpace: 'nowrap'
+      }}
+      title="Tap to use this time"
+    >
+      {label}
+    </button>
+  );
+}
+
 /**
  * TimeSplitModal
  * Props:
@@ -13,7 +36,7 @@ const fmt = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minut
  *   onConfirm     — ({ primaryMins, companionsMins, mode }) => void
  *   onClose       — () => void
  */
-export default function TimeSplitModal({ primaryName, primaryExpectedSecs, primaryPrice, companions, totalSecs, jobStart, onConfirm, onClose }) {
+export default function TimeSplitModal({ primaryName, primaryExpectedSecs, primaryVisitCount, primaryPrice, companions, totalSecs, jobStart, onConfirm, onClose }) {
   const totalMins = Math.max(1, Math.round(totalSecs / 60));
   const numProps = 1 + (companions ? companions.length : 0);
 
@@ -161,10 +184,13 @@ export default function TimeSplitModal({ primaryName, primaryExpectedSecs, prima
                 <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>min</span>
               </div>
             </div>
-            {/* Live time preview */}
-            <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-              <Clock size={11} />
-              {fmt(times.primary.entry)} → {fmt(times.primary.exit)}
+            {/* Live time preview + usual-time hint */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.4rem' }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                <Clock size={11} />
+                {fmt(times.primary.entry)} → {fmt(times.primary.exit)}
+              </div>
+              <AvgHint secs={primaryExpectedSecs} source="history" count={primaryVisitCount || 0} onUse={setPrimaryMins} />
             </div>
           </div>
 
@@ -191,13 +217,16 @@ export default function TimeSplitModal({ primaryName, primaryExpectedSecs, prima
                     <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>min</span>
                   </div>
                 </div>
-                {/* Live time preview */}
-                {t && (
-                  <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-                    <Clock size={11} />
-                    {fmt(t.entry)} → {fmt(t.exit)}
-                  </div>
-                )}
+                {/* Live time preview + usual-time hint */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.4rem' }}>
+                  {t && (
+                    <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                      <Clock size={11} />
+                      {fmt(t.entry)} → {fmt(t.exit)}
+                    </div>
+                  )}
+                  <AvgHint secs={comp.expectedSecs} source={comp.expectedSource} count={comp.visitCount || 0} onUse={(mins) => updateCompMins(comp.id, mins)} />
+                </div>
               </div>
             );
           })}

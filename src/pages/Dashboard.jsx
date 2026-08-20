@@ -8,6 +8,7 @@ import { getVisitRevenueBreakdown, calculateServiceTotals } from '../utils/reven
 import { getSettings } from '../db/settings';
 import { useServiceMode } from '../components/ServiceProvider';
 import { classifyTreatment } from '../db/treatments';
+import { defaultServicesForMode, isScheduleAnchor } from '../utils/scheduler';
 import { Plus, Sunrise, Sun, Moon, Settings as SettingsIcon, Map as MapIcon, Route as RouteIcon, ClipboardList, Thermometer, CloudSun, CloudRain, Cloud, Users, AlertTriangle, TrendingUp, CheckCircle, Droplets, ChevronRight } from 'lucide-react';
 
 const formatDur = (secs) => {
@@ -313,7 +314,9 @@ export default function Dashboard() {
       const isMowingCust = !cust.services || cust.services.length === 0 || cust.services.some(s => s.active && mowingServiceIds.includes(s.id));
       const isFertCust = cust.services && cust.services.some(s => s.active && fertServiceIds.includes(s.id));
       
-      const custVisits = allVisits.filter(v => v.customerId === cust.id && (v.status === 'completed'));
+      // Anchors = completed visits + deliberate "skip this cycle" skips, so an
+      // on-purpose skip doesn't resurface the client as overdue next week.
+      const custVisits = allVisits.filter(v => v.customerId === cust.id && isScheduleAnchor(v));
       
       // Mowing
       if (isMowingCust) {
@@ -373,6 +376,36 @@ export default function Dashboard() {
       .sort((a, b) => (a.dueDate || 0) - (b.dueDate || 0));
   }, [allTreatments, allCustomers]);
 
+  // Stops force-skipped off a route ("Forcibly skipped when ending route") and
+  // not serviced since. These are invisible everywhere until their interval
+  // ages them into the overdue list — they were supposed to be done the day
+  // they were dropped, so surface them immediately. Clears itself once the
+  // client is serviced (or snoozed/paused), and fades out after 14 days when
+  // the regular overdue list has long since taken over.
+  const droppedStops = useMemo(() => {
+    if (allCustomers.length === 0 || allVisits.length === 0) return [];
+    const now = Date.now();
+    const cutoff = now - 14 * 24 * 60 * 60 * 1000;
+    const rows = [];
+    allCustomers.forEach(c => {
+      if (c.status === 'inactive') return;
+      if (c.snoozedUntil && c.snoozedUntil > now) return;
+      const mine = allVisits.filter(v => v.customerId === c.id && (!v.division || v.division === activeMode));
+      // Catch-up skips only: the new catchUp flag, plus legacy force-end notes.
+      // Deliberate cycle skips (countsForSchedule) are on schedule, not dropped.
+      const skips = mine.filter(v => v.status === 'skipped' && !v.countsForSchedule &&
+        (v.catchUp || (v.note || '').includes('Forcibly skipped')));
+      if (skips.length === 0) return;
+      const lastSkip = Math.max(...skips.map(v => v.exitTime));
+      if (lastSkip < cutoff) return;
+      // Resolved once serviced OR deliberately cycle-skipped afterwards.
+      if (mine.some(v => isScheduleAnchor(v) && v.exitTime > lastSkip)) return;
+      rows.push({ ...c, droppedDaysAgo: getDaysSince(lastSkip) });
+    });
+    rows.sort((a, b) => b.droppedDaysAgo - a.droppedDaysAgo);
+    return rows;
+  }, [allCustomers, allVisits, activeMode]);
+
   const activeDueList = activeMode === 'mowing' ? mowingDue : fertilizerDue;
   const overdueCount = activeMode === 'mowing' ? mowingDue.filter(c => !c.isNew).length : treatmentAttention.length;
   // Never-mowed active clients are "new", not "overdue". Kept as a separate count
@@ -381,8 +414,8 @@ export default function Dashboard() {
   const mowingNewCount = mowingDue.filter(c => c.isNew).length;
 
   const handleAddToRoute = async (customer) => {
-    const defaultIds = customer.services?.filter(s => s.active).slice(0, 1).map(s => s.id) || [];
-    
+    const defaultIds = defaultServicesForMode(customer, activeMode).map(s => s.id);
+
     // Check if they are already in the active route
     if (activeRoute) {
       const isAlreadyInRoute = activeRoute.stops.some(s => {
@@ -390,15 +423,19 @@ export default function Dashboard() {
         return id === customer.id;
       });
       if (isAlreadyInRoute) return; // Ignore if already there
-      
+
       const updatedStops = [...activeRoute.stops, { customerId: customer.id, plannedServiceIds: defaultIds }];
       await db.routes.update(activeRoute.id, { stops: updatedStops });
     } else {
+      // Stamp the division — the Live page only shows routes matching the
+      // active mode, so an unstamped route was invisible there until the next
+      // app restart backfilled it as mowing.
       await db.routes.add({
         name: "Today's Route",
         date: new Date().toISOString(),
         status: 'active',
         isTemplate: 0,
+        division: activeMode,
         stops: [{ customerId: customer.id, plannedServiceIds: defaultIds }]
       });
     }
@@ -596,6 +633,45 @@ export default function Dashboard() {
                   ${stats.duration > 0 ? (stats.revenue / (stats.duration / 3600)).toFixed(2) : '0.00'}/hr
                 </span>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Dropped from route — force-skipped and not serviced since */}
+        {droppedStops.length > 0 && (
+          <div style={{ marginTop: '1.5rem' }}>
+            <div style={{ fontSize: '1rem', fontWeight: 600, padding: '0.4rem 0.8rem', color: '#b45309', display: 'flex', alignItems: 'center', gap: '0.4rem', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.9rem', marginBottom: '1rem' }}>
+              <AlertTriangle size={16} /> Dropped from route
+              <span style={{ fontSize: '0.7rem', background: '#f59e0b', color: 'white', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>{droppedStops.length}</span>
+            </div>
+            <div className="glass-card" style={{ padding: 0, maxHeight: '220px', overflowY: 'auto', border: '1px solid rgba(245,158,11,0.35)' }}>
+              {droppedStops.map(cust => {
+                const isInActiveRoute = activeRoute && activeRoute.stops.some(s => {
+                  const id = typeof s === 'object' ? s.customerId : s;
+                  return id === cust.id;
+                });
+                return (
+                  <div key={cust.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.6rem 0.8rem', borderBottom: '1px solid var(--color-border)' }}>
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--color-text-main)' }}>{cust.name}</div>
+                      <div style={{ fontSize: '0.75rem', marginTop: '0.1rem', color: '#b45309', fontWeight: 500 }}>
+                        Skipped, still needs service · {cust.droppedDaysAgo === 0 ? 'today' : `${cust.droppedDaysAgo}d ago`}
+                      </div>
+                    </div>
+                    {isInActiveRoute ? (
+                      <span style={{ fontSize: '0.75rem', color: 'var(--color-primary)', fontWeight: 600 }}>Added ✓</span>
+                    ) : (
+                      <button
+                        className="btn btn-secondary"
+                        style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.2rem', background: 'transparent', border: '1px solid var(--color-border)' }}
+                        onClick={() => handleAddToRoute(cust)}
+                      >
+                        <Plus size={12} /> Add
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}

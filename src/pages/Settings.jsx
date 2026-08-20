@@ -478,7 +478,7 @@ export default function Settings() {
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.5rem' }}>
         <SettingsIcon size={24} color="var(--color-primary)" />
         <h1 className="page-title" style={{ margin: 0 }}>Settings</h1>
-        <span style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px', border: '1px solid var(--color-border)', marginLeft: 'auto', fontWeight: 600 }}>v1.4.1</span>
+        <span style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px', border: '1px solid var(--color-border)', marginLeft: 'auto', fontWeight: 600 }}>v1.4.7</span>
       </div>
 
       <div className="tab-bar">
@@ -1010,6 +1010,81 @@ export default function Settings() {
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
             <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-primary)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.4.7</h3>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>August 2026</span>
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '1.2rem', color: 'var(--color-text-main)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <li><strong>Faster Job End Down the Street:</strong> Driving away (10+ mph) or getting 100m past the lawn now ends the job in about 3 seconds instead of the full 15-second wait. Walking speed and parked GPS drift still don't trigger it.</li>
+                <li><strong>Faster Back-to-Back Stops:</strong> Arriving at the next route stop takes over in the normal 8 seconds when the app can tell you actually left the last lawn — no more waiting out the exit clock at the next driveway.</li>
+                <li><strong>Honest Job Times:</strong> A job now starts the moment you arrive (not after the detection delay) and ends at the moment you actually left — drive time between stops no longer pads the previous lawn's clock.</li>
+                <li><strong>Ready for Snow:</strong> Each division gets its own timer tuning. Plowing (when it comes) won't end jobs for moving — moving IS the work — while mowing and fert keep the fast exits.</li>
+                <li><strong>Split Time Shows Usual Times:</strong> The nearby split popup now shows what each lawn normally takes ("avg 32 min · 7 visits", or a size-based estimate for new lawns) — tap it to fill that number in.</li>
+                <li><strong>Right Division in Splits:</strong> Fertilizer-only customers no longer show up as nearby split options while mowing (and vice versa).</li>
+                <li><strong>Done Early Stays Off Tomorrow:</strong> Loading a day's route now leaves off anyone already serviced today or yesterday (and says who) — and the live tracker won't auto-start a job at a lawn that was just done, even if it's still on the list. Manual Start/Redo still works.</li>
+              </ul>
+            </div>
+
+            <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-border)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.4.6</h3>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>August 2026</span>
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '1.2rem', color: 'var(--color-text-main)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <li><strong>Smarter Skips:</strong> Skipping a stop now asks a real question — still needs service (shows up on Home right away) or skip this cycle (back on schedule, no false LATE flag). Reason chips like Rain and No Growth get saved with the skip. Force End Route uses the same sheet.</li>
+                <li><strong>Weekly Scheduler Rebuilt:</strong> A fixed 7-day rail with a day-by-day list, drag-to-reorder stops, batch move/snooze, and a 5-second Undo on every change.</li>
+                <li><strong>Route Builder Fixes:</strong> Loading a day's route now matches the scheduler exactly (right division, right drive order, right service). Optimize no longer scrambles stops if geocoding hiccups.</li>
+                <li><strong>Job Timer Won't Drop Mid-Job:</strong> Leaving a lawn now takes 15 seconds of real evidence, and a bit of GPS drift near the property line no longer ends the job early. Fixed a bug where using Pause could inflate the logged time.</li>
+                <li><strong>Redo a Skipped Stop:</strong> Skipped stops now show a Redo button on the Live route list.</li>
+                <li><strong>Address Autocomplete Fixed:</strong> Rebuilt to stop leaving stale suggestion popups behind, and it now tells you when suggestions are unavailable because the app opened without signal.</li>
+                <li><strong>Dropped-From-Route Tracking:</strong> A stop you skipped "still needs service" now shows on Home immediately instead of disappearing until it ages into overdue.</li>
+              </ul>
+            </div>
+
+            <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-border)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.4.5</h3>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>August 2026</span>
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '1.2rem', color: 'var(--color-text-main)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <li><strong>Tap to Switch Areas:</strong> While editing one area, tap another area's shape on the map to jump straight into editing it — your current edits save automatically first.</li>
+                <li><strong>Done Button:</strong> The green "Editing" banner now has a Done button that saves and returns to the area list, instead of needing to swipe the bottom sheet up.</li>
+              </ul>
+            </div>
+
+            <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-border)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.4.4</h3>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>August 2026</span>
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '1.2rem', color: 'var(--color-text-main)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <li><strong>Reshaping No Longer Drags the Map:</strong> Moving a measuring point on a touchscreen used to pan the map along with your finger. Touch devices now get big, easy-to-grab handles on every corner, and the map holds still for the whole drag.</li>
+                <li><strong>Add a Point Mid-Edge:</strong> Drag one of the fainter dots between corners to add a new point right there.</li>
+                <li><strong>Double-Tap to Delete a Point:</strong> Double-tap any corner handle to remove it (shapes keep at least 3 points, and Undo covers slips).</li>
+              </ul>
+            </div>
+
+            <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-border)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.4.3</h3>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>August 2026</span>
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '1.2rem', color: 'var(--color-text-main)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <li><strong>Tablet Uses the Mobile Measure Tool:</strong> Lawn Measure now picks its layout by touch, not just screen width — any touchscreen device (including the tablet) gets the full-screen phone layout with the bottom sheet and crosshair Drop-point mode. Desktop with a mouse keeps the side-panel layout.</li>
+              </ul>
+            </div>
+
+            <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-border)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.4.2</h3>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>August 2026</span>
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '1.2rem', color: 'var(--color-text-main)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <li><strong>Lawn Measure Rebuilt for Phones:</strong> The measuring tool now runs full-screen with a bottom sheet instead of a cramped sidebar, supports one-finger panning, shows a live trace preview as you draw, and tap-the-last-point finishes a line — all built for use in the field, not just at a desk.</li>
+              </ul>
+            </div>
+
+            <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-border)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
                 <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.4.1</h3>
                 <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>July 2026</span>

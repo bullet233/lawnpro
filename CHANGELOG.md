@@ -3,9 +3,222 @@
 All notable changes to the app. Everything under **Unreleased** is local only —
 not yet deployed to the tablet (deploy = `npm run deploy` → gh-pages).
 
-## [Unreleased]
+## [1.4.7] - 2026-08-19
 
-### 2026-07-31 — v1.5.0: Lawn Measure tool rebuilt for phones
+### Split-time modal shows each lawn's usual time (2026-08-19)
+- Every property card in the nearby time-split modal now shows a tappable
+  pill with what that lawn normally takes — "📊 avg 32 min · 7 visits" from
+  its own completed visits in the active division, or "📐 est 25 min (lawn
+  size)" from the trend curve when it has no history yet. Tapping the pill
+  fills that property's minutes input, so when the tracked split looks wrong
+  you can see (and one-tap enter) the number that's close to right.
+
+### Early-served clients stay off the next day's route (2026-08-06)
+- Loading a day route (Weekly Scheduler "Load route" / Route Builder) now
+  leaves off anyone already handled today or yesterday — done early as a
+  nearby split/added opportunity, or deliberately cycle-skipped. The loaded
+  dialog names them ("Left off: X (serviced yesterday) — add manually to
+  re-service"); catch-up skips still load since they still need service.
+- Live backstop: a stop with a completed division visit today/yesterday on
+  ANY route never auto-arrives (no accidental double-tracked visit on
+  hand-built or template routes); the manual Start/Redo button still works
+  for deliberate re-services. (85 tests.)
+
+### Fast exits + takeover fast-lane, division profiles (2026-08-06)
+- Speed-aware exit: outside the fence at driving speed (10+ mph, Doppler —
+  parked drift reads ~0) ends the job after a 3s confirm instead of the full
+  15s debounce. Walking speed (pushing a mower across the street) stays slow.
+- Distance exit: any fix 100m+ past the fence ends the job after the same
+  confirm — the backstop for devices that report no speed.
+- Takeover fast-lane: arriving at another route stop takes over in the normal
+  8s (not 15s) when there's proof the previous lawn was actually left (street
+  fixes beyond the buffer, or driving speed). Drift-steal protection intact:
+  no proof = exit-level evidence still required, and never while paused.
+- Honest timestamps on both edges: a job now starts at the FIRST fix inside
+  the zone (not after the debounce) and ends at the last fix actually at the
+  property — the drive between stops and the debounces no longer pad times.
+- Per-division tuning profiles (DIVISION_PROFILES): mowing/fert use the speed
+  rule (truck parked while working); a future snow division is pre-tuned with
+  it OFF plus a 50m buffer / 40s debounce / 150m line, since plowing means
+  driving and pushing snow across the street is part of the job.
+- Division-eligibility fix: the post-job nearby/split candidates and the live
+  opportunity banner no longer pitch fert-only clients during mowing (or
+  vice versa) — both now filter by the active division.
+- 6 new engine tests (84 total).
+
+## [1.4.6] - 2026-08-06
+
+### Address autocomplete hardening (2026-08-05)
+- Rebuilt the AddressAutocomplete wrapper to manage Google's widget directly
+  with full teardown (the library component left zombie widgets bound to the
+  input on every remount — StrictMode/tab switches stacked duplicate dropdowns
+  that could fight over a selection — and leaked dropdown elements in <body>).
+- If the Maps script failed to load when the app opened (no signal in the
+  truck), the address field silently became a plain input for the whole
+  session. It now shows a hint under the field explaining suggestions are
+  offline and to close/reopen the app once there's signal.
+- Selections now request only the fields the app reads (address, location,
+  name) instead of billing for every Place Details field.
+- onPlaceChanged callbacks receive the widget instance directly — selection
+  can no longer miss because of React render timing.
+
+### Job timer no longer dies mid-job (2026-08-04)
+- GPS drift can't end a running job anymore: leaving a lawn now takes 15 seconds
+  of evidence (was 5) AND the fix must be 20+ meters beyond the fence edge — a
+  parked tablet hovering just outside the line stays "at the job" indefinitely.
+- A neighboring zone can no longer steal a running job after 8 seconds of drift:
+  takeover now needs the full exit-level evidence (15s), never happens while the
+  timer is paused, and drift near a shared/overlapping fence edge stays credited
+  to the active job. Interrupted takeover attempts restart their clock from zero
+  instead of accumulating across drift bounces.
+- Screen-off / GPS-loss gaps can't fire an instant exit on wake: a gap in usable
+  fixes (>30s) restarts the debounce clocks instead of counting the whole gap.
+- Auto-exit durations now end at the moment the fence was actually left, not
+  when the debounce finished — no more +debounce padding on every job.
+- Fixed a unit bug where using Pause during a job blew up the logged duration
+  (paused milliseconds were added as seconds on geofence exit / Done).
+- Redo works: a skipped stop shows a "Redo" button in the live route list, and
+  the engine keeps tracking a manually restarted completed/skipped stop instead
+  of force-exiting it ~15s in. A stop that was skipped then redone reads as
+  completed. (7 new engine tests; suite now 78.)
+
+### Weekly Scheduler rebuilt (design direction 5b)
+- Replaced the horizontal day-column scroller with a mobile-first layout: a
+  fixed 7-day rail (stop counts) over an accordion week list (one day open at a
+  time). No more sideways scrolling or per-card "Move…" dropdowns.
+- Stop rows show drive-order number, name, address, a "Mowed/Treated … · Nd ago"
+  line, and a solid LATE (+Nd) / DUE (today) / NEW status block — nothing on
+  on-schedule stops (red/amber reserved for status, green for pressable).
+- Est. hours per day now include an estimated drive time (haversine between
+  geofence centroids), shown in the rail, day headers, and move-sheet chips;
+  they turn red past the 8h long-day line.
+- Tap a stop → move sheet: 7 day chips each showing that day's projected hours
+  *after* the move, a "drops in at stop N of M" landing line (cheapest-insertion
+  into that day's drive order), plus Snooze 1 week / Remove.
+- Select mode: multi-select within a day (Select all late), sticky tray to move /
+  snooze / remove the whole batch at once.
+- Every move / snooze / remove shows a 5-second Undo toast.
+- Drive order is reorderable by dragging a stop's handle; a new per-customer
+  `dayOrder` persists manual order (nearest-neighbor fallback otherwise).
+- All wired to real data — division-filtered last-service, program-aware DUE for
+  fert clients, the existing tiered-pace duration model, and the existing
+  Load-route action. New math is isolated in src/utils/scheduler.js (20 tests).
+- Styling: the accent follows the division (green in Mowing, blue in Fertilizer,
+  matching the app theme); all body text is black/near-black for sun legibility;
+  section backgrounds are white (no green tint); thin separators between stops.
+
+### Route Builder workflow audit fixes (2026-08-04)
+- "Load route" from the Weekly Scheduler now mirrors the scheduler exactly:
+  same division eligibility (fert mode no longer pulls mowing clients), same
+  drive order (manual dayOrder / nearest-neighbor instead of raw DB order),
+  and mode-matched default services (fert routes load with the fert service,
+  not "first active"). Eligibility logic is shared via
+  scheduler.js eligibleForMode (unit-tested).
+- Optimize: if geocoding the business address fails, the response is now
+  decoded against the pinned-endpoints fallback that was actually requested —
+  previously it silently dropped the first and last stops from the list.
+- Optimize: stop cap is 25 with a business address, 27 without (first/last
+  become Google's fixed origin/destination); the success dialog now says the
+  first/last stops stay pinned when no business address is set, and the
+  Directions + geocode calls are counted in the API-usage tracker (the tracker
+  itself silently ignored 'directions' — Day Review's calls never counted
+  either; both now land in the Routing bucket at the same $0.005 price).
+- Replacing a route nobody worked marks it 'cancelled' instead of 'completed',
+  so abandoned routes can't pass for finished days.
+- Weekly Scheduler: drag-reorder now starts from the displayed order (no row
+  jump on days with snoozed stops); the move sheet's misleading static
+  "drops in at stop N" line (it always described Monday) is replaced with an
+  honest explainer — the exact landing still shows in the after-move toast;
+  the batch tray disables the day you're already on ("here") like the move
+  sheet; the clock refreshes on return-to-tab so TODAY/late math can't go
+  stale across midnight.
+- Templates: mow/fert badge on each saved template, and loading one from the
+  other division warns that saving creates a route in the current mode.
+
+### Live map + Dashboard follow-ups (2026-08-04)
+- Live "parked at" opportunity banner: no longer re-offers a lawn already
+  serviced (or skipped) today on any route, and when arrival zones overlap it
+  picks the customer whose zone center is closest instead of whichever happens
+  to be first in the list. (5 new engine tests.)
+- New Dashboard "Dropped from route" card: stops force-skipped when a route
+  was ended, not serviced since, and newer than 14 days. These were invisible
+  until their interval aged them into the overdue list — now they surface the
+  next morning with an Add-to-route button. Clears itself once the client is
+  serviced, snoozed, or paused.
+- Time-split companion pricing is division-aware: an off-route neighbor split
+  during a fert day now prices from their fert/spray service, not whatever
+  service is listed first. Same shared picker (defaultServicesForMode) now
+  drives Route Builder defaults and the Dashboard Add button.
+- Dashboard "Add" fix: a route created from the due list got no division
+  stamp, so the Live page (which filters by division) couldn't see it until
+  the next app restart backfilled it as mowing. Now stamped with the active
+  mode, and the pre-selected service matches the division.
+
+### Skip rework — skips now say what they mean (2026-08-04)
+- The skip sheet asks the real question: does the lawn still need service?
+  Two honest outcomes replace the old buttons (one of which — "Skip for Today
+  (Reschedule Tomorrow)" — never actually rescheduled anything):
+  - **Still needs service — catch up ASAP**: flagged `catchUp`, so it appears
+    in the Dashboard's "Dropped from route" card immediately (single skips
+    used to vanish until the client aged into overdue).
+  - **Skip this cycle**: flagged `countsForSchedule` — a schedule ANCHOR. The
+    due math (Dashboard due list, Weekly Scheduler, nearby-neighbor badges)
+    treats it as the last service for timing only, so a deliberately-skipped
+    client shows normally due next cycle instead of LATE +7d. Scheduler rows
+    read "Skipped Aug 4 · Nd ago" so it never masquerades as a mow. Replaces
+    the old Skip & Snooze (which hid the client, then screamed LATE when the
+    snooze expired). Anchors never count toward revenue, paces, or the matrix.
+- Optional one-tap reason chips (Rain / No growth / Customer request /
+  Couldn't access / Ran out of time) saved to the visit note — they show up in
+  Recent Job Notes and History.
+- Force End Route now opens the same sheet for the remaining stops (choosing
+  an outcome is the confirmation; Cancel backs out). No more blanket
+  "Forcibly skipped" stamping.
+- A driveby resolved as "Skipped" is flagged catch-up too, so it also surfaces
+  instead of vanishing.
+- 71 tests (isScheduleAnchor + skip semantics covered).
+
+## Deployed — v1.4.5 (2026-08-01)
+
+### Measure tool: easier switching between areas
+- Tap another area's shape on the map while editing to jump straight to it
+  (current edits auto-commit; still click-through while actively tracing, so
+  cutout drawing over a neighbor is unaffected).
+- New "Done" button on the green Editing banner — commits and returns to
+  overview. A Done on an area that never got a boundary just discards it.
+- Changed in lawn-measure-mobile source, synced via sync-to-lawnpro.sh.
+
+## Deployed — v1.4.4 (2026-08-01)
+
+### Measure tool: touch-friendly reshape handles (map no longer pans mid-drag)
+- On touch devices, dragging a shape's point used to move the MAP along with
+  (or instead of) the point — Google's built-in vertex handles are ~11px and a
+  fingertip misses them, so the one-finger pan won the gesture. Touch devices
+  now get custom fat handles (44px hit box): big blue-ring dots on each corner,
+  fainter midpoint dots that add a new point when dragged, and map panning is
+  locked for the length of the drag. Rectangles get 4 corner handles; circles
+  get a center handle + a radius handle.
+- Double-tap a point to delete it (right-click on desktop, which has no touch
+  equivalent). Undo covers slips; shapes keep a 3-point minimum.
+- Desktop/mouse editing unchanged (still Google's built-in handles).
+- Test hook: `?coarse=1` on the measure tool URL forces the touch handles on a
+  mouse desktop.
+- Changed in lawn-measure-mobile source, synced via sync-to-lawnpro.sh.
+
+## Deployed — v1.4.3 (2026-08-01)
+
+### Tablet gets the mobile measure layout
+- Lawn Measure's mobile/desktop split now keys off `(max-width: 700px),
+  (pointer: coarse)` instead of width alone — any touch-first device (the
+  tablet included) gets the phone layout (full-screen map, bottom sheet,
+  crosshair Drop-point). Mouse desktops keep the side panel. Changed in the
+  lawn-measure-mobile source (5 spots: styles.css media block, index.html
+  isMobile() + breakpoint listener, app.js ×2) and synced via
+  sync-to-lawnpro.sh.
+
+## Deployed — v1.4.2 (2026-08-01)
+
+### Lawn Measure tool rebuilt for phones (mobile rebuild v1.5.0, synced 2026-07-31)
 - The embedded measure tool (public/lawn-measure/) is now mobile-first:
   full-screen map with a 3-stop bottom sheet (peek w/ live total → half →
   full), "+ Measure" FAB (long-press picks rectangle/circle), floating
@@ -21,8 +234,12 @@ not yet deployed to the tablet (deploy = `npm run deploy` → gh-pages).
 - vite.config: service worker no longer hijacks the lawn-measure iframe —
   navigateFallbackDenylist keeps the SPA fallback from serving the React
   app into it (the tool's own index.html loads instead).
+- Synced into LawnPro 2026-07-31 (committed 3948b7c) but not deployed until
+  now — v1.4.1 shipped first.
 
-### 2026-07-30 — v1.4.1: route save no longer clobbers the other division
+## Deployed — v1.4.1 (2026-07-30)
+
+### Route save no longer clobbers the other division
 - Saving a route only retires the CURRENT division's pending/active route
   (plus legacy undivisioned ones). Previously it completed every open route
   across both divisions, so saving a mowing route silently erased the pending

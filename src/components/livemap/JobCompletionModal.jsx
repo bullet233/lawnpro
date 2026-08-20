@@ -326,6 +326,7 @@ export default function JobCompletionModal({
                   primaryVisitId: completionPanel.visitId,
                   primaryExitTime: completionPanel.exitTime,
                   primaryExpectedSecs: completionPanel.historicalAverageSecs,
+                  primaryVisitCount: completionPanel.historicalVisitCount || 0,
                   primaryPrice: completionPanel.priceEarned,
                   durationSecs: completionPanel.durationSecs,
                   companions: selectedCompanions
