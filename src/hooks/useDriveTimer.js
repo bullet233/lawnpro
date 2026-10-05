@@ -55,11 +55,13 @@ export function useDriveTimer() {
     return () => clearInterval(interval);
   }, [isDrivingPaused]);
 
-  const pauseTimer = () => {
+  // `at` lets the caller stop the clock at the moment the truck actually
+  // arrived (the job start is backdated to it) rather than at "now".
+  const pauseTimer = (at = Date.now()) => {
     if (!isDrivingPausedRef.current) {
       isDrivingPausedRef.current = true;
       setIsDrivingPaused(true);
-      accumulatedDriveTimeRef.current += (Date.now() - lastDriveResumeTimeRef.current) / 1000;
+      accumulatedDriveTimeRef.current += Math.max(0, at - lastDriveResumeTimeRef.current) / 1000;
       saveState(true, accumulatedDriveTimeRef.current);
     }
   };
@@ -81,17 +83,19 @@ export function useDriveTimer() {
     }
   };
 
-  const getFinalDriveTimeSecs = () => {
+  const getFinalDriveTimeSecs = (at = Date.now()) => {
     return Math.floor(
       isDrivingPausedRef.current
         ? accumulatedDriveTimeRef.current
-        : accumulatedDriveTimeRef.current + (Date.now() - lastDriveResumeTimeRef.current) / 1000
+        : accumulatedDriveTimeRef.current + Math.max(0, at - lastDriveResumeTimeRef.current) / 1000
     );
   };
 
-  const resetTimer = (autoStart = false) => {
+  // `startAt` backdates the new leg to the moment the truck actually left the
+  // last stop, so the exit debounce counts as driving, not as nothing.
+  const resetTimer = (autoStart = false, startAt = Date.now()) => {
     accumulatedDriveTimeRef.current = 0;
-    lastDriveResumeTimeRef.current = Date.now();
+    lastDriveResumeTimeRef.current = startAt;
     setDrivingDuration(0);
     
     if (autoStart) {

@@ -16,7 +16,7 @@ import { db } from '../db/db';
 import { GeofenceEngine, DIVISION_PROFILES } from '../engine/GeofenceEngine';
 import { GoogleMap, Marker, Polygon } from '@react-google-maps/api';
 import { useMapStatus } from '../components/MapProvider';
-import { CheckCircle, Navigation, MapPin, FastForward, CloudRain, ChevronUp, ChevronDown, SkipForward, Sun, CloudSun, Cloud, CloudDrizzle, CloudSnow, CloudLightning, X, Play, Pause, FileText, Map as MapIcon, ClipboardList, AlertTriangle } from 'lucide-react';
+import { Navigation, MapPin, CloudRain, ChevronUp, ChevronDown, SkipForward, Sun, CloudSun, Cloud, CloudDrizzle, CloudSnow, CloudLightning, X, Play, Pause, FileText, Map as MapIcon, ClipboardList, AlertTriangle } from 'lucide-react';
 import { parseLawnSizeToSqFt } from '../utils/parseLawnSize';
 import ComplianceLogModal from '../components/ComplianceLogModal';
 
@@ -28,14 +28,21 @@ import TimeSplitModal from '../components/TimeSplitModal';
 import EditJobModal from '../components/EditJobModal';
 import QuickAddModal from '../components/QuickAddModal';
 import { getSettings } from '../db/settings';
+import { syncLeafBilling, setLeafCharge, leafHourlyRate } from '../utils/leafBilling';
 import { trackApiCall } from '../utils/apiTracker';
 import { useServiceMode } from '../components/ServiceProvider';
 import { calculatePowerModel, predictTrendMins } from '../utils/matrix';
 import { defaultServicesForMode, eligibleForMode, isScheduleAnchor } from '../utils/scheduler';
+import { LEAF_CONDITION, isLeafVisit, isMowVisit, isCleanupVisit, mowingServiceIds, comparableVisits, loadLeafJobs, saveLeafJobs, leafToolsVisible } from '../utils/leaves';
 import { autoCompleteStepFromVisit, syncTreatmentLogFromVisit, classifyTreatment } from '../db/treatments';
 import TodaysMixModal from '../components/livemap/TodaysMixModal';
 import { getTodaysMix, setTodaysMix, clearTodaysMix, takeStopMix, clearStopMix, buildLogFromMix, formatLogTimes } from '../utils/todaysMix';
+import { saveActiveJob, loadActiveJob, clearActiveJob } from '../utils/activeJobStore';
 
+// Where the map sits with no GPS fix and no route to frame. Constants, so a
+// re-render doesn't hand the map a "new" center and undo the route framing.
+const NO_FIX_CENTER = { lat: 39.8283, lng: -98.5795 };
+const NO_FIX_ZOOM = 4;
 const mapContainerStyle = { width: '100%', height: 'calc(100dvh - var(--nav-h))', borderRadius: 'var(--radius-md)' };
 
 // Haversine formula to calculate distance in meters
@@ -73,21 +80,23 @@ export default function LiveMap() {
     const running = await db.routes.where('status').equals('active').toArray();
     return running.length > 0;
   }, []) || false;
-  const trackingEnabled = isLiveView || hasRunningRoute;
-
-  const { position, positionRef, speed, heading, poorGps, accuracy } = useGeolocation(trackingEnabled);
-  const { weather, weatherRef } = useWeatherTracker(positionRef);
-  
-  const { 
-    isDrivingPaused, drivingDuration, togglePause: toggleDrivePause, 
-    pauseTimer: pauseDriveTimer, resetTimer: resetDriveTimer, getFinalDriveTimeSecs,
-    isDrivingPausedRef, accumulatedDriveTimeRef, lastDriveResumeTimeRef 
-  } = useDriveTimer();
-
   const {
-    timerState, liveDuration, startTimer, pauseTimer, resumeTimer, toggleTimer, resetTimer: resetJobTimer,
+    timerState, liveDuration, startTimer, restoreTimer, pauseTimer, resumeTimer, toggleTimer, resetTimer: resetJobTimer,
     getFinalDurationSecs, jobStartRef, accumulatedTimeRef, lastResumeTimeRef, timerStateRef
   } = useJobTimer();
+
+  // A job in progress keeps the GPS on too — on a route that was never
+  // "started", leaving the Live tab used to cut the feed out from under it.
+  const trackingEnabled = isLiveView || hasRunningRoute || timerState !== 'idle';
+
+  const { position, positionRef, heading, poorGps, fix, gpsStatus } = useGeolocation(trackingEnabled);
+  const { weather, weatherRef } = useWeatherTracker(positionRef);
+
+  const {
+    isDrivingPaused, drivingDuration, togglePause: toggleDrivePause,
+    pauseTimer: pauseDriveTimer, resumeTimer: resumeDriveTimer, resetTimer: resetDriveTimer, getFinalDriveTimeSecs,
+    isDrivingPausedRef, accumulatedDriveTimeRef, lastDriveResumeTimeRef
+  } = useDriveTimer();
 
 
 
@@ -133,9 +142,18 @@ export default function LiveMap() {
   const [nearbyOpportunity, setNearbyOpportunity] = useState(null);
   const [skipPrompt, setSkipPrompt] = useState(null);
   const [skipReason, setSkipReason] = useState(null);
-    const [gpsError, setGpsError] = useState(false);
+  // Job is paused but the truck has clearly left the lawn (forgotten Pause).
+  const [pausedAway, setPausedAway] = useState(false);
 
   const mapRef = useRef(null);
+  // The job that just ended: { customerId, entry, exitAt, durationSecs,
+  // driveTime, visitId }. If the engine reports the same stop resuming (the
+  // exit was premature), the timer and the logged visit pick up from here.
+  const lastExitRef = useRef(null);
+  // Set while a resumed job runs ({ visitId, customerId }): its completion
+  // UPDATES that visit instead of logging a second one for the same lawn.
+  const resumeVisitIdRef = useRef(null);
+  const restoreTriedRef = useRef(false);
   const dismissedOpportunitiesRef = useRef(new Set());
     const activeGeofenceIdRef = useRef(null);
     const panelTouchRef      = useRef(null); // for swipe-to-dismiss
@@ -155,6 +173,26 @@ export default function LiveMap() {
   const panelNoteRef        = useRef('');
   const panelConditionsRef  = useRef([]); // mirrors JobCompletionModal selections so the auto-dismiss timer can flush them
   const panelServicesRef    = useRef([]);
+  // The leaf charge picked on the completion card (null amount = undecided).
+  // Carries the visit id so a late flush can never bill another visit.
+  const panelLeafChargeRef  = useRef({ visitId: null, amount: null });
+
+  // Lawns marked as a leaf job before or during the job (route list, next-job
+  // card, live timer). Held until that lawn's visit is logged, which is then
+  // recorded as a leaf visit. The ref is what logVisit reads — it runs from
+  // the engine's once-bound callbacks.
+  const [leafJobIds, setLeafJobIds] = useState(() => loadLeafJobs());
+  const leafJobIdsRef = useRef(leafJobIds);
+  const setLeafJob = (customerId, on) => {
+    const without = leafJobIdsRef.current.filter(id => id !== customerId);
+    const next = on ? [...without, customerId] : without;
+    leafJobIdsRef.current = next;
+    saveLeafJobs(next);
+    setLeafJobIds(next);
+  };
+  const toggleLeafJob = (customerId) => setLeafJob(customerId, !leafJobIdsRef.current.includes(customerId));
+  // The 🍂 buttons are only on screen in leaf season (Settings → Leaf buttons).
+  const showLeafTools = activeMode === 'mowing' && leafToolsVisible();
 
   useEffect(() => { panelNoteRef.current = panelNote; }, [panelNote]);
   // Mirror the panel so armCompletionTimer can see unresolved neighbor prompts.
@@ -358,12 +396,14 @@ export default function LiveMap() {
           const defaultServices = settings.defaultServices || [];
           const isPlannedMow = plannedIds.length === 0 || plannedIds.some(id => defaultServices.find(ds => ds.id === id)?.category === 'Mowing' || id === 's1');
 
-          // Find historical visits for this customer to calculate average time
-          const histVisits = allVisits.filter(v => {
+          // Find historical visits for this customer to calculate average time.
+          // A stop marked as a leaf job is timed from its leaf visits; for
+          // everything else leaf visits stay out of the mow estimate.
+          const histVisits = comparableVisits(allVisits.filter(v => {
             if (v.customerId !== s.id || v.status !== 'completed' || !v.durationSecs) return false;
             const isHistMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => defaultServices.find(ds => ds.id === id)?.category === 'Mowing' || id === 's1');
             return isPlannedMow === isHistMow;
-          });
+          }), isPlannedMow && leafJobIds.includes(s.id));
 
           let avgDuration = 900; // Default 15 mins
           if (histVisits.length > 0) {
@@ -402,7 +442,7 @@ export default function LiveMap() {
     }
 
     return { completedStops, totalStops, etaString, finishString };
-  }, [activeRoute, routeVisits, activeGeofence?.id, allVisits, allCustomers, globalPace]);
+  }, [activeRoute, routeVisits, activeGeofence?.id, allVisits, allCustomers, globalPace, leafJobIds]);
 
   // Reuse the top-level getDistance (Haversine) — alias for clarity
   const getDistanceFromLatLonInMeters = getDistance;
@@ -454,6 +494,7 @@ export default function LiveMap() {
   // 1. Dynamic Map Navigation & Snap Back
   const onMapLoad = (map) => {
     mapRef.current = map;
+    setMapReady(true);
     map.addListener('dragstart', () => {
       setAutoCenter(false);
       autoCenterRef.current = false;
@@ -465,8 +506,28 @@ export default function LiveMap() {
     });
   };
 
+  // No GPS fix (location off, or still waiting): frame today's stops instead
+  // of leaving the map on the whole country. Once per route; a real fix takes
+  // over through the map's center prop.
+  const [mapReady, setMapReady] = useState(false);
+  const fittedRouteRef = useRef(null);
+  const routeFitKey = activeRoute?.id ?? null;
+  const hasPosition = !!currentPosition;
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!mapReady || !map || hasPosition || !window.google || routeFitKey == null) return;
+    if (fittedRouteRef.current === routeFitKey) return;
+    const points = (activeRoute?.expandedStops || []).flatMap((s) => (Array.isArray(s.geofence) ? s.geofence : []));
+    if (points.length === 0) return;
+    const bounds = new window.google.maps.LatLngBounds();
+    points.forEach((p) => bounds.extend(p));
+    fittedRouteRef.current = routeFitKey;
+    // Padding keeps the stops clear of the top card and the route panel.
+    map.fitBounds(bounds, { top: 230, bottom: 150, left: 50, right: 50 });
+  }, [mapReady, hasPosition, routeFitKey, activeRoute]);
+
   // 4. Job Timers & Driveby Detection
-  
+
   // --- GEOFENCE TRACKING ENGINE ---
   const engineRef = useRef(null);
   if (!engineRef.current) {
@@ -477,17 +538,44 @@ export default function LiveMap() {
       exitDebounceMs: 15000,
       exitBufferMeters: 20,
       drivebyThresholdSecs: getSettings().drivebyThresholdSecs || 45,
-      onEnter: (customer, startedAt) => {
+      onEnter: (customer, startedAt, info) => {
         if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
-        // startedAt is backdated to the first fix inside the zone, so the
-        // timer counts from actual arrival, not from the end of the debounce.
-        startTimer(startedAt || Date.now());
-        capturedDriveTimeSecsRef.current = getFinalDriveTimeSecs();
-        pauseDriveTimer();
+        const prev = lastExitRef.current;
+        if (info?.resumed && prev && prev.customerId === customer.id) {
+          // The earlier exit was premature (GPS drift / a speed glitch) and
+          // the truck never left: carry on with the SAME job. The gap counts
+          // as work, and the visit already logged gets updated at the real
+          // end instead of a second one being added.
+          if (completionTimerRef.current) clearTimeout(completionTimerRef.current);
+          completionPanelRef.current = null;
+          setCompletionPanel(null);
+          setTimeSplit(null);
+          setDrivebyPrompt(null);
+          resumeVisitIdRef.current = prev.visitId != null ? { visitId: prev.visitId, customerId: customer.id } : null;
+          restoreTimer({
+            jobStart: prev.entry,
+            accumulatedMs: (prev.durationSecs || 0) * 1000,
+            lastResume: prev.exitAt,
+            state: 'running'
+          });
+          capturedDriveTimeSecsRef.current = prev.driveTime || 0;
+          pauseDriveTimer();
+        } else {
+          // startedAt is backdated to the first fix inside the zone, so the
+          // timer counts from actual arrival, not from the end of the debounce
+          // — and the drive clock stops at that same moment.
+          const start = (info?.resumed ? info.reenteredAt : startedAt) || Date.now();
+          resumeVisitIdRef.current = null;
+          startTimer(start);
+          capturedDriveTimeSecsRef.current = getFinalDriveTimeSecs(start);
+          pauseDriveTimer(start);
+        }
+        lastExitRef.current = null;
         activeGeofenceIdRef.current = customer.id;
         setActiveGeofence(customer);
         setPendingArrival(null);
       },
+      onPausedAway: (away) => setPausedAway(away),
       onPendingEnter: (customer, remainingSecs) => {
         if (!customer) {
           setPendingArrival(null);
@@ -532,20 +620,95 @@ export default function LiveMap() {
         // (parked while working), a future snow division won't (see engine).
         profile: DIVISION_PROFILES[activeMode] || DIVISION_PROFILES.mowing
       });
+    } else if (engineRef.current) {
+      // No route (the last stop just completed it) but a job may still be
+      // running — keep its pause state current.
+      engineRef.current.isJobPaused = timerState === 'paused';
     }
   }, [activeRoute, allCustomers, routeVisits, timerState, servicedTodayIds, recentlyServicedIds, activeMode]);
 
-  // Feed position to engine
+  // Feed the engine exactly once per real GPS fix, stamped when it arrived.
+  // (This used to key off position + route state with a fresh Date.now(), so a
+  // route record changing replayed the last position as if it were a new fix.)
+  // Feeding continues without an active route while a job is still running or
+  // its resume window is open — finishing the last stop completes the route.
   useEffect(() => {
-    if (!activeRoute || !position) return;
-    engineRef.current.updateLocation({
-      lat: position.lat,
-      lng: position.lng,
-      accuracy: accuracy,
-      speed: speed, // mph — lets the engine tell driving away from parked drift
-      timestamp: Date.now()
+    if (!fix) return;
+    const eng = engineRef.current;
+    const jobLive = eng.activeGeofenceId != null || eng.hasOpenResumeWindow(fix.ts);
+    if (!activeRouteRef.current && !jobLive) return;
+    eng.updateLocation({
+      lat: fix.lat,
+      lng: fix.lng,
+      accuracy: fix.accuracy,
+      speed: fix.speedMph, // mph, null when the device reports none
+      timestamp: fix.ts
     });
-  }, [position, activeRoute, accuracy, speed]);
+  }, [fix]);
+
+  // ── Running job survives an app reload ────────────────────────────────
+  // The job timer and the engine's "at this lawn" state used to live only in
+  // memory: if Android discarded the app or the page refreshed mid-job, the
+  // job was gone and re-arrived from zero a few seconds later.
+  const persistActiveJob = () => {
+    const customerId = activeGeofenceIdRef.current;
+    if (customerId == null || timerStateRef.current === 'idle' || jobStartRef.current == null) return;
+    saveActiveJob({
+      customerId,
+      jobStart: jobStartRef.current,
+      accumulatedMs: accumulatedTimeRef.current,
+      lastResume: lastResumeTimeRef.current,
+      timerState: timerStateRef.current,
+      anchor: anchorGeofenceRef.current,
+      capturedDriveSecs: capturedDriveTimeSecsRef.current,
+      liveNote: liveNoteRef.current,
+      resumeVisit: resumeVisitIdRef.current
+    });
+  };
+
+  // Save on every change that matters, then heartbeat every 10s so the saved
+  // copy also records the last moment the app was alive at the job.
+  useEffect(() => {
+    if (!activeGeofence || timerState === 'idle') return;
+    persistActiveJob();
+    const id = setInterval(persistActiveJob, 10000);
+    return () => clearInterval(id);
+  }, [activeGeofence?.id, timerState, liveNote]);
+
+  // Restore once, after the route query has answered (undefined = loading).
+  useEffect(() => {
+    if (restoreTriedRef.current || activeRoute === undefined) return;
+    restoreTriedRef.current = true;
+    const saved = loadActiveJob();
+    if (!saved || activeGeofenceIdRef.current != null) return;
+    (async () => {
+      const cust = (activeRoute?.expandedStops || []).find(c => c.id === saved.customerId)
+        || await db.customers.get(saved.customerId);
+      if (!cust || activeGeofenceIdRef.current != null) { clearActiveJob(); return; }
+
+      anchorGeofenceRef.current = saved.anchor ?? null;
+      capturedDriveTimeSecsRef.current = saved.capturedDriveSecs || 0;
+      resumeVisitIdRef.current = saved.resumeVisit ?? null;
+      restoreTimer({
+        jobStart: saved.jobStart,
+        accumulatedMs: saved.accumulatedMs || 0,
+        lastResume: saved.lastResume ?? saved.jobStart,
+        state: saved.timerState
+      });
+      activeGeofenceIdRef.current = cust.id;
+      setActiveGeofence(cust);
+      if (saved.liveNote) setLiveNote(saved.liveNote);
+      // If the truck turns out to be gone, the engine ends the job at the
+      // heartbeat (last time the app was alive at it), not at "now".
+      engineRef.current.restoreJob({
+        customer: cust,
+        startTime: saved.jobStart,
+        lastAliveTs: saved.heartbeat,
+        anchor: saved.anchor ?? null
+      });
+      engineRef.current.isJobPaused = saved.timerState === 'paused';
+    })();
+  }, [activeRoute]);
 
   const handleExitGeofence = (exitedAt = null) => {
     // Use timerStateRef (not timerState) to avoid stale closure from watchPosition.
@@ -560,23 +723,42 @@ export default function LiveMap() {
     const entryTime = jobStartRef.current;
     const completedCustId = activeGeofenceIdRef.current;
     const completedCust = allCustomersRef.current.find(c => c.id === completedCustId);
+    const driveTime = capturedDriveTimeSecsRef.current;
 
     activeGeofenceIdRef.current = null;
     setActiveGeofence(null);
     anchorGeofenceRef.current = null;
     resetJobTimer();
+    clearActiveJob();
     potentialEnterRef.current = null;
     potentialExitRef.current = null;
-    
+
+    // Remember this exit: if the engine reports the same stop resuming, the
+    // job continues from here. logVisit fills in visitId once it exists.
+    const exitRecord = completedCust ? {
+      customerId: completedCust.id,
+      entry: entryTime,
+      exitAt: end,
+      durationSecs: finalDuration,
+      driveTime,
+      visitId: resumeVisitIdRef.current?.visitId ?? null
+    } : null;
+    lastExitRef.current = exitRecord;
+
     const threshold = getSettings().drivebyThresholdSecs || 45;
 
     if (finalDuration < threshold && completedCust) {
       // Carry the live note into the prompt and clear it now — otherwise the note
       // is dropped for this visit AND leaks onto the next completed job.
-      setDrivebyPrompt({ customer: completedCust, duration: finalDuration, entry: entryTime, driveTime: capturedDriveTimeSecsRef.current, note: liveNoteRef.current });
+      setDrivebyPrompt({ customer: completedCust, duration: finalDuration, entry: entryTime, exitAt: end, driveTime, note: liveNoteRef.current });
       setLiveNote('');
+      resumeVisitIdRef.current = null;
+      // The truck never really stopped, so the drive clock keeps counting —
+      // it used to sit paused until the prompt was answered, which shorted
+      // the next stop's drive time.
+      resumeDriveTimer();
     } else if (completedCust) {
-      logVisit(completedCust, finalDuration, entryTime, 'completed', liveNoteRef.current, capturedDriveTimeSecsRef.current);
+      logVisit(completedCust, finalDuration, entryTime, 'completed', liveNoteRef.current, driveTime, {}, { exitAt: end, exitRecord });
       setLiveNote('');
     }
   };
@@ -634,6 +816,18 @@ export default function LiveMap() {
     setSkipPrompt({ type: 'end_route', customers: uncompleted });
   };
 
+  // Start / Redo tapped by hand. The anchor (where the tap happened) is handed
+  // to the engine and mirrored into the ref AFTER the call: if another job was
+  // still running, closing it out clears both, which used to leave the new job
+  // with no anchor at all.
+  const startJobManually = (stop) => {
+    if (!engineRef.current) return;
+    const pos = positionRef.current;
+    const anchor = pos ? { lat: pos.lat, lng: pos.lng } : 'no-gps';
+    engineRef.current.manualStartJob(stop, Date.now(), anchor);
+    anchorGeofenceRef.current = anchor;
+  };
+
   const handleManualDone = () => {
     // accumulatedTimeRef is in MILLISECONDS — same unit fix as handleExitGeofence.
     const finalDuration = Math.floor(
@@ -642,28 +836,45 @@ export default function LiveMap() {
     );
     const entryTime = jobStartRef.current;
     const completedCust = activeGeofence;
-    
+
     activeGeofenceIdRef.current = null;
     setActiveGeofence(null);
     anchorGeofenceRef.current = null;
     resetJobTimer();
+    clearActiveJob();
+    lastExitRef.current = null; // a tapped Done is final — nothing to resume
     potentialEnterRef.current = null;
     potentialExitRef.current = null;
-    
-    if (engineRef.current) {
-      engineRef.current.activeGeofenceId = null;
-      engineRef.current.activeCustomer = null;
-      engineRef.current.jobStartTime = null;
-    }
-    
+
+    // Full engine reset, and no auto-arrival here again until the truck has
+    // left (the visit lands in the DB a beat later; without this the stop
+    // flashed "Arriving…" in between).
+    if (engineRef.current) engineRef.current.finishActiveJob();
+
     logVisit(completedCust, finalDuration, entryTime, 'completed', liveNote, capturedDriveTimeSecsRef.current);
     setLiveNote('');
   };
 
-  const logVisit = async (customer, durationSecs, entryTime, status, note = '', overrideDriveTimeSecs = null, extra = {}) => {
+  // opts (control flags, never stored on the visit):
+  //   exitAt           — when the lawn was actually left; stamped as exitTime
+  //   exitRecord       — lastExitRef entry to fill with the new visit's id
+  //   keepDriveTimer   — don't reset the drive clock (a short-visit prompt
+  //                      answered later, while already driving or on a job)
+  //   noDriveFallback  — keep a 0 drive time instead of guessing from the clock
+  const logVisit = async (customer, durationSecs, entryTime, status, note = '', overrideDriveTimeSecs = null, extra = {}, opts = {}) => {
     const route = activeRouteRef.current;
     let priceEarned = 0;
     let appliedServices = [];
+    const exitStamp = opts.exitAt || Date.now();
+    // A resumed job updates the visit its first (premature) exit logged.
+    // Claimed synchronously, and only by that same customer's completion — a
+    // skip or short-visit answer for another stop must not consume it.
+    let resumeId = null;
+    const pendingResume = resumeVisitIdRef.current;
+    if (status === 'completed' && pendingResume && pendingResume.customerId === customer.id) {
+      resumeId = pendingResume.visitId;
+      resumeVisitIdRef.current = null;
+    }
 
     if (status !== 'skipped') {
       // Try to use the planned services for this stop from the route
@@ -698,11 +909,14 @@ export default function LiveMap() {
       return !alreadyVisited && s.customerId !== customer.id;
     }) : false;
 
-    // Reset drive timer
-    resetDriveTimer(hasMoreStops);
+    // Reset drive timer — the next leg starts when this lawn was actually left
+    // (exitStamp), not when the exit debounce finished. This must stay ahead
+    // of the first await: on a takeover the next stop's onEnter reads the
+    // drive clock in the same tick.
+    if (!opts.keepDriveTimer) resetDriveTimer(hasMoreStops, exitStamp);
 
     // Sanity: if drive timer wasn't active (e.g. manual start, skip), fall back to wall-clock
-    if (driveTimeSecs <= 0) {
+    if (driveTimeSecs <= 0 && !opts.noDriveFallback) {
       const startOfDay = new Date();
       startOfDay.setHours(0, 0, 0, 0);
       const todayVisits = await db.visits
@@ -717,23 +931,74 @@ export default function LiveMap() {
       }
     }
 
-    const visitId = await db.visits.add({
-      routeId: route ? route.id : null,
-      customerId: customer.id,
-      status: status || 'completed',
-      durationSecs: durationSecs || 0,
-      driveTimeSecs: driveTimeSecs || 0,
-      entryTime: entryTime || Date.now(),
-      exitTime: Date.now(),
-      weather: weatherRef.current || null,
-      priceEarned: priceEarned || 0,
-      appliedServices: appliedServices || [],
-      note: note || '',
-      division: activeModeRef.current,
-      // Skip semantics: { catchUp: true } = still needs service (Dropped card),
-      // { countsForSchedule: true } = deliberate cycle skip (anchors the clock).
-      ...extra
-    });
+    // Resumed job: the visit already exists (logged at the premature exit).
+    // Stretch it to the real end and keep whatever was set on it since —
+    // services, price, EPA log, program step — instead of adding a duplicate.
+    let resumedVisit = null;
+    if (resumeId != null) {
+      resumedVisit = await db.visits.get(resumeId);
+      if (!resumedVisit) resumeId = null; // deleted in the meantime — log fresh
+    }
+
+    // Leaf job: leaves come up in the same pass as the mow, so the whole job
+    // is one clock. If the driver marked this lawn (before or during the job)
+    // the visit is tagged — it stays out of the plain mowing numbers and is
+    // compared with other leaf visits. Still changeable on the completion card.
+    const markedLeafJob = leafJobIdsRef.current.includes(customer.id);
+    // (Only a mow can be a leaf job — a planned clean-up is its own service.)
+    let visitConditions = status === 'completed' && activeModeRef.current === 'mowing' && markedLeafJob && isMowVisit({ appliedServices })
+      ? [LEAF_CONDITION]
+      : [];
+    // The mark is used up once the stop is logged (completed or skipped).
+    if (markedLeafJob) setLeafJob(customer.id, false);
+
+    let visitId;
+    if (resumedVisit) {
+      visitId = resumeId;
+      await db.visits.update(resumeId, {
+        durationSecs: durationSecs || 0,
+        exitTime: exitStamp,
+        ...(note ? { note } : {})
+      });
+      priceEarned = resumedVisit.priceEarned ?? priceEarned;
+      appliedServices = resumedVisit.appliedServices ?? appliedServices;
+      visitConditions = resumedVisit.conditions ?? visitConditions;
+    } else {
+      visitId = await db.visits.add({
+        routeId: route ? route.id : null,
+        customerId: customer.id,
+        status: status || 'completed',
+        durationSecs: durationSecs || 0,
+        driveTimeSecs: driveTimeSecs || 0,
+        entryTime: entryTime || Date.now(),
+        // When the lawn was actually left — not when this record was written
+        // (which trails by the exit debounce, or by minutes when a short-visit
+        // prompt is answered late).
+        exitTime: exitStamp,
+        weather: weatherRef.current || null,
+        priceEarned: priceEarned || 0,
+        appliedServices: appliedServices || [],
+        note: note || '',
+        division: activeModeRef.current,
+        ...(visitConditions.length > 0 ? { conditions: visitConditions } : {}),
+        // Skip semantics: { catchUp: true } = still needs service (Dropped card),
+        // { countsForSchedule: true } = deliberate cycle skip (anchors the clock).
+        ...extra
+      });
+    }
+    if (opts.exitRecord) opts.exitRecord.visitId = visitId;
+
+    // Leaf job: record its leaf time and the suggested hourly charge. Nothing
+    // is added to the price until the driver decides (completion card, or
+    // later from Analytics → Leaf Billing). servicePrice is the price without
+    // any leaf charge; a resumed job may already carry a decided one.
+    const priorLeafCharge = resumedVisit?.leafDecided ? (resumedVisit.leafCharge || 0) : null;
+    const servicePrice = Math.max(0, priceEarned - (priorLeafCharge || 0));
+    // (A clean-up planned on the stop gets its whole-visit suggestion the same way.)
+    if (status === 'completed' && (visitConditions.includes(LEAF_CONDITION) ||
+        isCleanupVisit({ division: activeModeRef.current, appliedServices }))) {
+      await syncLeafBilling(visitId);
+    }
 
     // Show completion panel only for completed jobs
     if (status === 'completed') {
@@ -746,6 +1011,11 @@ export default function LiveMap() {
       let nearbyCandidates = [];
       let historicalAverageSecs = null;
       let historicalVisitCount = 0;
+      // Both baselines go to the panel so ticking / unticking Leaves there
+      // switches the comparison without another DB read.
+      let usualMow;
+      let usualLeaf;
+      const leafTagged = visitConditions.includes(LEAF_CONDITION);
       const mode = activeModeRef.current;
       const freshCustomers = allCustomersRef.current;
       const pos = positionRef.current;
@@ -756,18 +1026,24 @@ export default function LiveMap() {
       let programStepCompleted = null;
       let allTreatments = [];
       let autoLog = null;
-      if (mode === 'fertilizer') {
+      if (mode === 'fertilizer' && resumedVisit) {
+        // Already filed and already counted toward the program at the first
+        // exit — re-running either would overwrite an edited log and tick off
+        // the NEXT program step.
+        autoLog = resumedVisit.complianceLog || null;
+        allTreatments = await db.treatments.toArray();
+      } else if (mode === 'fertilizer') {
         // Auto-file the EPA compliance log: this lawn's own product pick (set
         // from the live panel) wins over the day tank mix. takeStopMix also
         // clears the slot so it can never bleed onto the next stop.
         const mix = takeStopMix(customer.id) || getTodaysMix();
         if (mix) {
-          autoLog = buildLogFromMix(mix, { customer, exitTime: Date.now(), durationSecs });
+          autoLog = buildLogFromMix(mix, { customer, exitTime: exitStamp, durationSecs });
           await db.visits.update(visitId, { complianceLog: autoLog });
         }
         const step = await autoCompleteStepFromVisit(customer.id, {
           id: visitId,
-          exitTime: Date.now(),
+          exitTime: exitStamp,
           priceEarned,
           durationSecs,
           weather: weatherRef.current || null,
@@ -781,19 +1057,34 @@ export default function LiveMap() {
       {
         const allDbVisits = await db.visits.toArray();
 
+        const mowIds = mowingServiceIds();
+        const thisIsMow = isMowVisit({ appliedServices }, mowIds);
         // Calculate historical average for this specific mode (no GPS needed)
         const priorVisits = allDbVisits.filter(v =>
           v.customerId === customer.id &&
           v.status === 'completed' &&
           v.durationSecs > 0 &&
           v.id !== visitId &&
-          (!v.division || v.division === mode)
+          (!v.division || v.division === mode) &&
+          // mows against mows, clean-ups against clean-ups
+          isMowVisit(v, mowIds) === thisIsMow
         );
 
-        if (priorVisits.length > 0) {
-          const sum = priorVisits.reduce((acc, v) => acc + v.durationSecs, 0);
-          historicalAverageSecs = Math.round(sum / priorVisits.length);
-          historicalVisitCount = priorVisits.length;
+        const usualFrom = (wantLeaf) => {
+          const list = comparableVisits(priorVisits, wantLeaf);
+          if (list.length === 0) return null;
+          return {
+            secs: Math.round(list.reduce((acc, v) => acc + v.durationSecs, 0) / list.length),
+            count: list.length,
+            fromLeafVisits: isLeafVisit(list[0]),
+          };
+        };
+        usualMow = usualFrom(false);
+        usualLeaf = usualFrom(true);
+        const usual = leafTagged ? usualLeaf : usualMow;
+        if (usual) {
+          historicalAverageSecs = usual.secs;
+          historicalVisitCount = usual.count;
         }
 
         if (pos) {
@@ -829,10 +1120,10 @@ export default function LiveMap() {
 
             // Expected time: this lawn's own average in this mode, else the trend
             // curve from its sqft — drives the smart split-time defaults.
-            const own = allDbVisits.filter(v =>
+            const own = comparableVisits(allDbVisits.filter(v =>
               v.customerId === c.id && v.status === 'completed' && v.durationSecs > 0 &&
-              (!v.division || v.division === mode)
-            );
+              (!v.division || v.division === mode) && isMowVisit(v, mowIds) === thisIsMow
+            ), leafTagged);
             let expectedSecs = null;
             let expectedSource = null; // 'history' | 'estimate' — shown in the split modal
             if (own.length > 0) {
@@ -901,8 +1192,9 @@ export default function LiveMap() {
       setPanelNote(note || '');
       // Seed the selection refs to match the panel's initial state so an
       // auto-dismiss before the user touches anything is a no-op.
-      panelConditionsRef.current = [];
+      panelConditionsRef.current = visitConditions;
       panelServicesRef.current = appliedServices || [];
+      panelLeafChargeRef.current = { visitId, amount: priorLeafCharge };
       const newPanel = {
         custName: customer.name,
         durationSecs,
@@ -912,8 +1204,14 @@ export default function LiveMap() {
         nearbyCandidates,
         historicalAverageSecs,
         historicalVisitCount,
+        usualMow,
+        usualLeaf,
+        conditions: visitConditions,
+        servicePrice,
+        leafRate: leafHourlyRate(),
+        leafCharge: priorLeafCharge, // null = not decided yet
         primaryCustomer: customer,
-        exitTime: Date.now(),
+        exitTime: exitStamp,
         appliedServices,
         programStepCompleted,
         complianceLog: autoLog
@@ -945,7 +1243,7 @@ export default function LiveMap() {
         setActiveEpaJob({
           id: visitId,
           custName: customer.name,
-          exitTime: Date.now(),
+          exitTime: exitStamp,
           durationSecs,
           custLawnSize: customer.lawnSize,
           phone: customer.phone,
@@ -1017,12 +1315,37 @@ export default function LiveMap() {
 
     const updateObj = {};
     if (note) updateObj.note = note;
-    if (appliedServices) updateObj.appliedServices = appliedServices;
-    if (conditions && conditions.length > 0) updateObj.conditions = conditions;
+    if (appliedServices) {
+      updateObj.appliedServices = appliedServices;
+      // Services changed on the card (e.g. Fall Clean-up picked in place of
+      // Mowing): the visit is saved as that, at that service's price. Add-ons
+      // and a decided leaf charge ride on top as before.
+      const visit = await db.visits.get(visitId);
+      const before = visit?.appliedServices || [];
+      const changed = before.length !== appliedServices.length || appliedServices.some(id => !before.includes(id));
+      if (visit && changed) {
+        const cust = allCustomersRef.current?.find(c => c.id === visit.customerId);
+        const services = (cust?.services || []).filter(s => appliedServices.includes(s.id));
+        const addOns = Array.isArray(visit.addOns) ? visit.addOns.reduce((sum, a) => sum + (a.price || 0), 0) : 0;
+        updateObj.priceEarned = Math.round((services.reduce((sum, s) => sum + (s.price || 0), 0) + addOns + (visit.leafCharge || 0)) * 100) / 100;
+        updateObj.revenueBreakdown = undefined; // rebuilt from the new services
+        updateObj.cleanupFlatPrice = undefined; // and any remembered clean-up flat price is stale
+        updateObj.leafDecided = false;
+      }
+    }
+    // Written even when empty: unticking the pre-set Leaves tag has to stick.
+    if (conditions) updateObj.conditions = conditions;
 
     if (Object.keys(updateObj).length > 0) {
       await db.visits.update(visitId, updateObj);
     }
+    // The Leaf job chip may have been ticked or unticked — refresh the leaf
+    // time and suggestion, then apply the charge if the driver picked one.
+    const synced = await syncLeafBilling(visitId);
+    const picked = details?.leafCharge !== undefined
+      ? details.leafCharge
+      : (panelLeafChargeRef.current.visitId === visitId ? panelLeafChargeRef.current.amount : null);
+    if (synced && (isLeafVisit(synced) || isCleanupVisit(synced)) && picked != null) await setLeafCharge(visitId, picked);
   };
 
   const handleSaveCompletion = async (details) => {
@@ -1035,11 +1358,15 @@ export default function LiveMap() {
   const handleSaveEditedJob = async (updatedData) => {
     if (!completionPanel?.visitId) return;
     
-    // updatedData contains { appliedServices, addOns, priceEarned, note }
+    // updatedData contains { appliedServices, addOns, priceEarned, note }.
+    // Its price is services + add-ons; a leaf job's hourly leaf charge rides
+    // on top and must not be wiped by an edit.
+    const current = await db.visits.get(completionPanel.visitId);
+    const leafCharge = current?.leafCharge || 0;
     const updateObj = {
       appliedServices: updatedData.appliedServices,
       addOns: updatedData.addOns,
-      priceEarned: updatedData.priceEarned
+      priceEarned: Math.round((updatedData.priceEarned + leafCharge) * 100) / 100
     };
     if (updatedData.note) {
       updateObj.note = updatedData.note;
@@ -1050,7 +1377,8 @@ export default function LiveMap() {
     // Update the completion panel state to reflect the new total and note (if we want to keep it open)
     setCompletionPanel(prev => ({
       ...prev,
-      priceEarned: updatedData.priceEarned,
+      priceEarned: updateObj.priceEarned,
+      servicePrice: updatedData.priceEarned,
       appliedServices: updatedData.appliedServices,
       addOns: updatedData.addOns
     }));
@@ -1059,13 +1387,45 @@ export default function LiveMap() {
     setIsEditJobOpen(false);
   };
 
+  // status: 'completed' | 'skipped' | 'ignore'.
+  // 'ignore' = just driving past — log nothing, the stop stays pending and
+  // will arrive normally later. (The prompt used to offer only Skipped or
+  // Normal Service, so a pass-by had to be recorded as one or the other.)
   const handleDrivebyResolution = (status) => {
+    const p = drivebyPrompt;
+    setDrivebyPrompt(null);
+    if (!p || status === 'ignore') return;
+
+    // The driver has ruled on this stop — it is no longer a job that could
+    // "resume" (that would log a second visit on top of this answer).
+    if (lastExitRef.current?.customerId === p.customer.id) lastExitRef.current = null;
+    if (engineRef.current?.resumable?.id === p.customer.id) engineRef.current.resumable = null;
+
+    // The drive clock kept running after the short visit. If it was a real
+    // visit, the leg that led to it belongs to that visit — take it back out
+    // so the next stop isn't charged for it too.
+    const legSecs = status === 'completed' ? (p.driveTime || 0) : 0;
+    if (legSecs > 0) {
+      accumulatedDriveTimeRef.current = Math.max(0, accumulatedDriveTimeRef.current - legSecs);
+      if (activeGeofenceIdRef.current != null) {
+        capturedDriveTimeSecsRef.current = Math.max(0, capturedDriveTimeSecsRef.current - legSecs);
+      }
+    }
+
     // A driveby resolved as "Skipped" means the lawn didn't get serviced —
     // flag it catch-up so it surfaces on the Dashboard instead of vanishing.
-    logVisit(drivebyPrompt.customer, drivebyPrompt.duration, drivebyPrompt.entry, status, drivebyPrompt.note || '', drivebyPrompt.driveTime,
-      status === 'skipped' ? { catchUp: true } : {});
-    setDrivebyPrompt(null);
+    logVisit(p.customer, p.duration, p.entry, status, p.note || '', legSecs,
+      status === 'skipped' ? { catchUp: true } : {},
+      { exitAt: p.exitAt, keepDriveTimer: true, noDriveFallback: true });
   };
+
+  // An unanswered short-visit prompt closes itself as "just passing" — the
+  // driver is driving, and nothing should be logged without a choice.
+  useEffect(() => {
+    if (!drivebyPrompt) return;
+    const t = setTimeout(() => setDrivebyPrompt(cur => (cur === drivebyPrompt ? null : cur)), 60000);
+    return () => clearTimeout(t);
+  }, [drivebyPrompt]);
 
   const handleAddOpportunity = async (customer) => {
     await handleAddUnplannedStop(customer);
@@ -1125,6 +1485,7 @@ export default function LiveMap() {
 
     // Preserve any note / conditions / service selections the driver made in the
     // completion panel before choosing to split — otherwise they were silently lost.
+    // (flush also re-settles a leaf job's hourly charge for the corrected time)
     await flushCompletionDetails(primaryVisitId);
 
     const dayMix = activeMode === 'fertilizer' ? getTodaysMix() : null;
@@ -1188,9 +1549,13 @@ export default function LiveMap() {
         priceEarned: companionPrice,
         appliedServices: companionServices,
         division: activeMode,
+        // Neighbors done in the same leaf pass are leaf visits too.
+        ...(isLeafVisit(primaryVisit) ? { conditions: [LEAF_CONDITION] } : {}),
         complianceLog: compLog,
         note: `${mode === 'simultaneous' ? 'Simultaneous' : 'Split'} visit with ${primaryCustomer?.name ?? 'adjacent property'}`
       });
+
+      if (isLeafVisit(primaryVisit)) await syncLeafBilling(compVisitId);
 
       // Same bridge as logVisit: a split-off fertilizer application also
       // completes the companion's open program step.
@@ -1437,22 +1802,7 @@ export default function LiveMap() {
       )}
 
       {/* Driveby Prompt Modal */}
-      {drivebyPrompt && (
-        <div className="modal-overlay">
-          <div className="modal-content">
-            <h3 style={{ marginTop: 0 }}>Short Visit Detected</h3>
-            <p>You were at <strong>{drivebyPrompt.customer.name}</strong> for only {drivebyPrompt.duration} seconds.</p>
-            <div style={{ display: 'flex', gap: '1rem', marginTop: '1.5rem' }}>
-              <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => handleDrivebyResolution('skipped')}>
-                <FastForward size={18} /> Skipped
-              </button>
-              <button className="btn btn-primary" style={{ flex: 1 }} onClick={() => handleDrivebyResolution('completed')}>
-                <CheckCircle size={18} /> Normal Service
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <DrivebyPromptModal drivebyPrompt={drivebyPrompt} handleDrivebyResolution={handleDrivebyResolution} />
 
       
       <JobCompletionModal
@@ -1477,9 +1827,10 @@ export default function LiveMap() {
           durationSecs: cp.durationSecs
         })}
         handleSaveCompletion={handleSaveCompletion}
-        onSelectionsChange={(conditions, appliedServices) => {
+        onSelectionsChange={(conditions, appliedServices, leafCharge, forVisitId) => {
           panelConditionsRef.current = conditions;
           panelServicesRef.current = appliedServices;
+          panelLeafChargeRef.current = { visitId: forVisitId, amount: leafCharge };
         }}
       />
 
@@ -1551,12 +1902,24 @@ export default function LiveMap() {
               : `${missingEpaToday.length} stops today are missing EPA logs — tap to fill them`}
           </button>
         )}
-        {gpsError && (
+        {/* GPS health. These used to be wired to a flag nothing ever set, so a
+            dead location feed — and with it all auto-tracking — was silent. */}
+        {gpsStatus === 'denied' && (
           <div style={{ background: '#ef4444', color: 'white', fontSize: '0.85rem', fontWeight: 600, textAlign: 'center', padding: '10px', borderRadius: 'var(--radius-md)', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', boxShadow: '0 4px 12px rgba(239,68,68,0.4)', marginBottom: '0.8rem' }}>
-            <AlertTriangle size={18} /> Location unavailable — check permissions in your phone settings.
+            <AlertTriangle size={18} /> Location is off for this app — jobs won't auto-track. Turn it on in the tablet's settings.
           </div>
         )}
-        {poorGps && !gpsError && (
+        {gpsStatus === 'silent' && (activeRoute || activeGeofence) && (
+          <div style={{ background: '#ef4444', color: 'white', fontSize: '0.85rem', fontWeight: 600, textAlign: 'center', padding: '10px', borderRadius: 'var(--radius-md)', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', boxShadow: '0 4px 12px rgba(239,68,68,0.4)', marginBottom: '0.8rem' }}>
+            <AlertTriangle size={18} /> No GPS updates for 30+ seconds — auto-tracking is on hold until the signal returns.
+          </div>
+        )}
+        {pausedAway && activeGeofence && (
+          <div style={{ background: '#fffbeb', color: '#b45309', border: '1px solid rgba(245,158,11,0.6)', fontSize: '0.85rem', fontWeight: 700, textAlign: 'center', padding: '10px', borderRadius: 'var(--radius-md)', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', boxShadow: '0 2px 8px rgba(0,0,0,0.08)', marginBottom: '0.8rem' }}>
+            <Pause size={18} /> Still paused at {activeGeofence.name} — you've left the lawn. Tap Resume, or Done to log it.
+          </div>
+        )}
+        {poorGps && gpsStatus === 'ok' && (
           <div style={{ background: '#ef4444', color: 'white', fontSize: '0.85rem', fontWeight: 600, textAlign: 'center', padding: '10px', borderRadius: 'var(--radius-md)', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', boxShadow: '0 4px 12px rgba(239,68,68,0.4)', marginBottom: '0.8rem' }}>
             <AlertTriangle size={18} /> Poor GPS Signal — Auto-routing paused
           </div>
@@ -1574,20 +1937,26 @@ export default function LiveMap() {
             handleManualDone={handleManualDone}
             allVisits={allVisits}
             globalPace={globalPace}
+            isLeafJob={leafJobIds.includes(activeGeofence.id)}
+            onToggleLeafJob={showLeafTools || leafJobIds.includes(activeGeofence.id) ? () => toggleLeafJob(activeGeofence.id) : undefined}
             onCancelJob={() => {
               activeGeofenceIdRef.current = null;
               setActiveGeofence(null);
               anchorGeofenceRef.current = null;
               resetJobTimer();
+              clearActiveJob();
+              lastExitRef.current = null;
+              resumeVisitIdRef.current = null;
               setLiveNote('');
               // A product pick made for the discarded job must not file later.
               clearStopMix();
-              
-              if (engineRef.current) {
-                engineRef.current.activeGeofenceId = null;
-                engineRef.current.activeCustomer = null;
-                engineRef.current.jobStartTime = null;
-              }
+              // The truck is back to "driving" — the clock was paused on arrival.
+              resumeDriveTimer();
+
+              // Full engine reset, and no re-arrival at this stop until the
+              // truck has left its zone (cancelling while still parked there
+              // used to restart the job 8 seconds later).
+              if (engineRef.current) engineRef.current.finishActiveJob();
             }}
           />
         ) : (
@@ -1672,11 +2041,8 @@ export default function LiveMap() {
 
                   <div style={{ display: 'flex', gap: '0.6rem', marginTop: '0.9rem' }}>
                     <button style={{ flex: 2, height: '54px', border: 'none', borderRadius: '16px', background: 'var(--color-primary)', color: '#fff', fontSize: '1rem', fontWeight: 700, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }} onClick={() => {
-                      anchorGeofenceRef.current = currentPosition ? { lat: currentPosition.lat, lng: currentPosition.lng } : 'no-gps';
                       dismissedOpportunitiesRef.current.clear();
-                      if (engineRef.current) {
-                        engineRef.current.manualStartJob(nextStop);
-                      }
+                      startJobManually(nextStop);
                     }}>
                       <Play fill="currentColor" size={18} /> Start job
                     </button>
@@ -1685,8 +2051,22 @@ export default function LiveMap() {
                     </button>
                   </div>
 
+                  {/* Leaf job toggle — mark it before you start, from the truck */}
+                  {(showLeafTools || leafJobIds.includes(nextStop.id)) && (() => {
+                    const on = leafJobIds.includes(nextStop.id);
+                    return (
+                      <button
+                        aria-pressed={on}
+                        onClick={() => toggleLeafJob(nextStop.id)}
+                        style={{ width: '100%', minHeight: '46px', marginTop: '0.6rem', padding: '0.5rem 0.8rem', borderRadius: '14px', cursor: 'pointer', fontSize: '0.9rem', fontWeight: 700, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.4rem', border: on ? '2px solid #b45309' : '1px dashed var(--color-border)', background: on ? 'rgba(180,83,9,0.12)' : 'var(--color-bg-main)', color: on ? '#b45309' : 'var(--color-text-muted)' }}
+                      >
+                        {on ? '🍂 Leaf job — tap to undo' : '🍂 Picking up leaves here? Tap to mark as a leaf job'}
+                      </button>
+                    );
+                  })()}
+
                   <div style={{ marginTop: '0.5rem' }}>
-                    <CustomerDetailsDropdown customer={nextStop} allVisits={allVisits} globalPace={globalPace} darkTheme={true} />
+                    <CustomerDetailsDropdown customer={nextStop} allVisits={allVisits} globalPace={globalPace} darkTheme={true} isLeafJob={leafJobIds.includes(nextStop.id)} />
                   </div>
                 </div>
               );
@@ -1727,8 +2107,8 @@ export default function LiveMap() {
       {isLoaded && !loadError ? (
         <GoogleMap
           mapContainerStyle={mapContainerStyle}
-          center={currentPosition || { lat: 39.8283, lng: -98.5795 }}
-          zoom={currentPosition ? 16 : 4}
+          center={currentPosition || NO_FIX_CENTER}
+          zoom={currentPosition ? 16 : NO_FIX_ZOOM}
           onLoad={(map) => {
             onMapLoad(map);
             trackApiCall('mapLoad');
@@ -1831,14 +2211,13 @@ export default function LiveMap() {
         progressInfo={progressInfo}
         onAddUnplanned={() => setShowQuickAdd(true)}
         onStartJob={(stop) => {
-          anchorGeofenceRef.current = position ? { lat: position.lat, lng: position.lng } : 'no-gps';
           setIsRouteListOpen(false);
-          
-          if (engineRef.current) {
-            engineRef.current.manualStartJob(stop);
-          }
+          startJobManually(stop);
         }}
         onForceEndRoute={handleForceEndRoute}
+        jobActive={!!activeGeofence}
+        leafJobIds={leafJobIds}
+        onToggleLeafJob={showLeafTools ? toggleLeafJob : undefined}
       />
 
       {/* Recenter Button if autoCenter is disabled */}

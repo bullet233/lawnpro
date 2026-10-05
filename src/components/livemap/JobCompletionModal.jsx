@@ -1,9 +1,14 @@
 import { useRef, useState, useEffect } from 'react';
-import { CheckCircle, ClipboardList, Scissors, Droplets, Wind, Sun, Edit2 } from 'lucide-react';
+import { CheckCircle, ClipboardList, Scissors, Droplets, Wind, Sun, Edit2, Leaf } from 'lucide-react';
 import { formatLiveTimer } from '../../utils/dateUtils';
 import { useServiceMode } from '../ServiceProvider';
+import { LEAF_CONDITION, leafToolsVisible, computeLeafBilling, computeCleanupSuggestion, isMowVisit, isCleanupVisit } from '../../utils/leaves';
 
 const CONDITIONS = [
+  // Leaf job is more than a note: a leaf visit is kept out of the lawn's plain
+  // mowing times (see utils/leaves). Pre-ticked when the driver marked the
+  // lawn as a leaf job before or during the job.
+  { id: LEAF_CONDITION, label: 'Leaf job', icon: Leaf, color: '#b45309' },
   { id: 'overgrown', label: 'Overgrown', icon: Scissors, color: '#10b981' },
   { id: 'wet', label: 'Wet/Soggy', icon: Droplets, color: '#3b82f6' },
   { id: 'debris', label: 'Lots of Debris', icon: Wind, color: '#f59e0b' },
@@ -34,22 +39,59 @@ export default function JobCompletionModal({
   const [selectedConditions, setSelectedConditions] = useState([]);
   const [selectedServices, setSelectedServices] = useState([]);
   const [selectedCompanions, setSelectedCompanions] = useState([]);
+  // What to charge for leaves on a leaf job: null = not decided yet (it stays
+  // on the Leaf Billing list), a number = decided (0 = no charge).
+  const [leafCharge, setLeafCharge] = useState(null);
+  const [leafOther, setLeafOther] = useState(null); // text while typing another amount
 
+  // Seed the picks once per job. Keyed on the visit, not the panel object: the
+  // panel is re-created by ordinary updates (dismissing the neighbor prompt,
+  // saving an edit), and re-seeding on those wiped whatever conditions the
+  // driver had ticked — or re-ticked a Leaves tag they had just removed.
+  const panelVisitId = completionPanel?.visitId;
+  const panelConditions = completionPanel?.conditions;
   useEffect(() => {
-    if (completionPanel) {
-      setSelectedConditions(completionPanel.conditions || []);
-      setSelectedServices(completionPanel.appliedServices || []);
-      // Reset neighbor picks too — otherwise a selection left over from a prior
-      // stop stays armed and "Yes – Split Time" would log time against a lawn
-      // that isn't even in this panel's candidate list.
-      setSelectedCompanions([]);
-    }
-  }, [completionPanel]);
+    if (panelVisitId == null) return;
+    setSelectedConditions(panelConditions || []);
+    // Reset neighbor picks too — otherwise a selection left over from a prior
+    // stop stays armed and "Yes – Split Time" would log time against a lawn
+    // that isn't even in this panel's candidate list.
+    setSelectedCompanions([]);
+    setLeafCharge(completionPanel?.leafCharge ?? null);
+    setLeafOther(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- conditions are only the job's starting picks
+  }, [panelVisitId]);
+
+  // Services do follow the panel: Edit Job rewrites them.
+  const panelServices = completionPanel?.appliedServices;
+  useEffect(() => {
+    if (panelVisitId != null) setSelectedServices(panelServices || []);
+  }, [panelVisitId, panelServices]);
 
   // Keep the parent's refs in sync so an auto-dismiss flush captures the latest selections.
+  // A clean-up (no mowing service) can't also be a leaf job, so the tag is
+  // dropped from what gets saved.
+  const savedConditions = isMowVisit({ appliedServices: selectedServices })
+    ? selectedConditions
+    : selectedConditions.filter(c => c !== LEAF_CONDITION);
+  // Switching between a mow and a clean-up changes what the amount means
+  // (leaf add-on vs. the whole price), so the pick starts over.
+  const isMowNow = isMowVisit({ appliedServices: selectedServices });
+  const wasMowRef = useRef(isMowNow);
   useEffect(() => {
-    onSelectionsChange?.(selectedConditions, selectedServices);
-  }, [selectedConditions, selectedServices, onSelectionsChange]);
+    if (wasMowRef.current !== isMowNow) {
+      wasMowRef.current = isMowNow;
+      setLeafCharge(null);
+      setLeafOther(null);
+    }
+  }, [isMowNow]);
+
+  useEffect(() => {
+    const billable = savedConditions.includes(LEAF_CONDITION) ||
+      isCleanupVisit({ division: 'mowing', appliedServices: selectedServices });
+    onSelectionsChange?.(savedConditions, selectedServices, billable ? leafCharge : null, panelVisitId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- savedConditions is derived from the two selections below
+  }, [selectedConditions, selectedServices, leafCharge, panelVisitId, onSelectionsChange]);
 
   const toggleCondition = (id) => {
     setSelectedConditions(prev => 
@@ -65,20 +107,83 @@ export default function JobCompletionModal({
 
   if (!completionPanel) return null;
 
-  const hourlyRate = completionPanel.durationSecs > 0 
-    ? (completionPanel.priceEarned / (completionPanel.durationSecs / 3600)) 
+  // Leaf jobs: the time over this lawn's usual mow × the hourly leaf rate is a
+  // SUGGESTED charge. Pay only includes a leaf charge once the driver picks
+  // one below; undecided jobs wait on Analytics → Leaf Billing.
+  // Services offered on the card: the customer's active ones, plus (mowing
+  // mode) their clean-up service even when it isn't a regular one — so an
+  // end-of-season Fall Clean-up can be picked here in place of Mowing.
+  const custServices = completionPanel.primaryCustomer?.services || [];
+  const serviceChoices = custServices.filter(s =>
+    s.active || selectedServices.includes(s.id) ||
+    (activeMode === 'mowing' && /clean|leaf/i.test(s.name || '')));
+  const mowSelected = isMowVisit({ appliedServices: selectedServices });
+  const startServices = completionPanel.appliedServices || [];
+  const servicesChanged = selectedServices.length !== startServices.length ||
+    selectedServices.some(id => !startServices.includes(id));
+
+  // A leaf job is a mow with leaves; without a mowing service there is no
+  // "usual mow" to measure leaf time against.
+  const leafPicked = mowSelected && selectedConditions.includes(LEAF_CONDITION);
+  // Changing the services re-prices the job from the customer's service prices
+  // (saved the same way when the card closes).
+  const servicePrice = servicesChanged
+    ? custServices.filter(s => selectedServices.includes(s.id)).reduce((sum, s) => sum + (s.price || 0), 0)
+    : (completionPanel.servicePrice ?? completionPanel.priceEarned ?? 0);
+  const leafBill = leafPicked
+    ? computeLeafBilling(completionPanel.durationSecs, completionPanel.usualMow?.secs, completionPanel.leafRate)
+    : { leafSecs: 0, leafCharge: 0 };
+  const chargedLeaves = leafPicked && leafCharge != null ? leafCharge : 0;
+  // Clean-up (a non-mowing service picked in place of Mowing): the whole visit
+  // is leaf work. The hourly figure is offered as an alternative to the flat
+  // service price; the amount chosen replaces it.
+  // Only a real clean-up service counts — a trim-only visit is just flat price.
+  const cleanupOn = activeMode === 'mowing' && isCleanupVisit({ division: 'mowing', appliedServices: selectedServices });
+  const cleanupBill = cleanupOn
+    ? computeCleanupSuggestion(completionPanel.durationSecs, completionPanel.leafRate)
+    : { leafSecs: 0, leafCharge: 0 };
+  const totalPay = cleanupOn ? (leafCharge ?? servicePrice) : servicePrice + chargedLeaves;
+
+  const hourlyRate = completionPanel.durationSecs > 0
+    ? (totalPay / (completionPanel.durationSecs / 3600))
     : 0;
 
   const rateColor = hourlyRate >= 60 ? '#10b981' : hourlyRate < 45 ? '#ef4444' : '#f59e0b';
 
+  // A leaf job is measured against the lawn's other leaf jobs, a plain mow
+  // against plain mows — following the Leaves chip as it is ticked/unticked.
+  const leafOn = leafPicked;
+  // The chip is only offered in leaf season (Settings → Leaf buttons), but a
+  // job already marked as a leaf job always shows it so it can be unticked.
+  // Not offered on a clean-up (no mowing service) — that is its own service.
+  const showLeafChip = activeMode === 'mowing' && mowSelected && (leafOn || leafToolsVisible());
+  const usualMow = completionPanel.usualMow ?? (completionPanel.historicalAverageSecs
+    ? { secs: completionPanel.historicalAverageSecs, count: completionPanel.historicalVisitCount || 0 }
+    : null);
+  const usual = leafOn ? (completionPanel.usualLeaf ?? usualMow) : usualMow;
+
   const renderPaceComparison = () => {
-    if (!completionPanel.historicalAverageSecs) return null;
-    const deltaSecs = completionPanel.durationSecs - completionPanel.historicalAverageSecs;
+    // A clean-up picked in place of Mowing isn't comparable with the mow average.
+    if (activeMode === 'mowing' && !mowSelected) return null;
+    // Leaf job: say how much longer than the usual mow it ran — that extra is
+    // the leaf time, since leaves and mowing share one clock.
+    if (leafOn) {
+      if (!usualMow) return null;
+      const extraMins = Math.round((completionPanel.durationSecs - usualMow.secs) / 60);
+      if (extraMins < 1) return null;
+      return (
+        <span style={{ fontSize: '0.8rem', color: '#b45309', marginLeft: '0.4rem', fontWeight: 500 }}>
+          (+{extraMins}m leaves)
+        </span>
+      );
+    }
+    if (!usual) return null;
+    const deltaSecs = completionPanel.durationSecs - usual.secs;
     if (Math.abs(deltaSecs) < 60) return null; // within 1 minute, don't show
-    
+
     const deltaMins = Math.abs(Math.round(deltaSecs / 60));
     const isFaster = deltaSecs < 0;
-    
+
     return (
       <span style={{ fontSize: '0.8rem', color: isFaster ? '#10b981' : '#f59e0b', marginLeft: '0.4rem', fontWeight: 500 }}>
         ({deltaMins}m {isFaster ? 'faster' : 'slower'} than avg)
@@ -95,7 +200,7 @@ export default function JobCompletionModal({
       onTouchEnd={e => {
         if (panelTouchRef.current !== null) {
           const dy = e.changedTouches[0].clientY - panelTouchRef.current;
-          if (dy > 80) { handleSaveCompletion({ note: panelNote, conditions: selectedConditions, appliedServices: selectedServices }); }
+          if (dy > 80) { handleSaveCompletion({ note: panelNote, conditions: savedConditions, appliedServices: selectedServices }); }
           panelTouchRef.current = null;
         }
       }}
@@ -125,7 +230,12 @@ export default function JobCompletionModal({
         </div>
         <div style={{ flex: 1, background: 'var(--color-bg-main)', borderRadius: '14px', padding: '0.55rem 0.7rem' }}>
           <div style={{ fontSize: '0.62rem', letterSpacing: '0.5px', fontWeight: 700, color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>Pay</div>
-          <div style={{ fontSize: '1.05rem', fontWeight: 800 }}>${completionPanel.priceEarned?.toFixed(2) ?? '0.00'}</div>
+          <div style={{ fontSize: '1.05rem', fontWeight: 800 }}>${totalPay.toFixed(2)}</div>
+          {chargedLeaves > 0 && (
+            <span style={{ fontSize: '0.8rem', color: '#b45309', fontWeight: 500 }}>
+              ${servicePrice.toFixed(0)} mow + ${chargedLeaves.toFixed(2)} leaves
+            </span>
+          )}
         </div>
         <div style={{ flex: 1, background: `${rateColor}1a`, borderRadius: '14px', padding: '0.55rem 0.7rem' }}>
           <div style={{ fontSize: '0.62rem', letterSpacing: '0.5px', fontWeight: 700, color: rateColor, textTransform: 'uppercase' }}>Rate</div>
@@ -158,9 +268,9 @@ export default function JobCompletionModal({
         </button>
       )}
 
-      {completionPanel.primaryCustomer?.services && (
+      {serviceChoices.length > 0 && (
         <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.8rem' }}>
-          {completionPanel.primaryCustomer.services.filter(s => s.active).map(s => {
+          {serviceChoices.map(s => {
             const isSelected = selectedServices.includes(s.id);
             return (
               <button
@@ -183,15 +293,20 @@ export default function JobCompletionModal({
                 <div style={{ width: '12px', height: '12px', borderRadius: '50%', border: `1px solid ${isSelected ? 'var(--color-primary)' : 'var(--color-text-muted)'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', background: isSelected ? 'var(--color-primary)' : 'transparent' }}>
                   {isSelected && <CheckCircle size={8} color="#fff" />}
                 </div>
-                {s.name}
+                {s.name}{servicesChanged || !s.active ? ` $${s.price || 0}` : ''}
               </button>
             );
           })}
         </div>
       )}
+      {activeMode === 'mowing' && !mowSelected && selectedServices.length > 0 && (
+        <div style={{ margin: '-0.4rem 0 0.8rem', fontSize: '0.75rem', color: 'var(--color-primary)', fontWeight: 600 }}>
+          Saved as {serviceChoices.filter(s => selectedServices.includes(s.id)).map(s => s.name).join(' + ')} — not a mow, so this time won't count toward the lawn's mowing times.
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: completionPanel.primaryCustomer?.propertyNotes ? '0.8rem' : '1rem' }}>
-        {CONDITIONS.map(c => {
+        {CONDITIONS.filter(c => c.id !== LEAF_CONDITION || showLeafChip).map(c => {
           const isSelected = selectedConditions.includes(c.id);
           const Icon = c.icon;
           return (
@@ -218,6 +333,71 @@ export default function JobCompletionModal({
           );
         })}
       </div>
+      {showLeafChip && (
+        <div style={{ margin: '-0.5rem 0 0.8rem', fontSize: '0.75rem', color: leafOn ? '#b45309' : 'var(--color-text-muted)', fontWeight: leafOn ? 600 : 400 }}>
+          {!leafOn
+            ? 'Picked up leaves here? Tap "Leaf job" — the extra time is tracked as leaves, not counted as a slow mow.'
+            : leafBill.leafSecs == null
+              ? '🍂 Leaf job. No normal mow on record for this lawn yet, so the leaf time can\'t be worked out.'
+              : !(completionPanel.leafRate > 0)
+                ? `🍂 Leaf job: ${Math.round(leafBill.leafSecs / 60)} min of leaves. Set an hourly leaf rate in Settings to get a suggested charge.`
+                : `🍂 Leaf job: ${Math.round(leafBill.leafSecs / 60)} min over the usual ${Math.round(completionPanel.usualMow.secs / 60)} min mow. Suggested charge at $${completionPanel.leafRate}/hr: $${leafBill.leafCharge.toFixed(2)}`}
+        </div>
+      )}
+
+      {/* Leaf charge: the hourly figure is only a suggestion — the driver picks.
+          Leaving it alone is fine: the job waits on Analytics → Leaf Billing. */}
+      {((showLeafChip && leafOn) || cleanupOn) && (() => {
+        const pick = (amount) => { setLeafCharge(amount); setLeafOther(null); };
+        const btn = (active) => ({
+          flex: 1, minHeight: '44px', padding: '0.4rem 0.5rem', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+          fontSize: '0.82rem', fontWeight: 700,
+          border: active ? '2px solid #b45309' : '1px solid var(--color-border)',
+          background: active ? 'rgba(180,83,9,0.12)' : 'var(--color-bg-alt)',
+          color: active ? '#b45309' : 'var(--color-text-main)'
+        });
+        const suggested = cleanupOn ? cleanupBill.leafCharge : leafBill.leafCharge;
+        const usingSuggested = leafCharge != null && suggested > 0 && leafCharge === suggested && leafOther == null;
+        const usingFlat = cleanupOn && leafCharge != null && leafCharge === servicePrice && !usingSuggested && leafOther == null;
+        const usingOther = leafOther != null || (leafCharge != null && leafCharge > 0 && !usingSuggested && !usingFlat);
+        const undecided = leafCharge == null && leafOther == null;
+        return (
+          <div style={{ marginBottom: '0.8rem', padding: '0.6rem 0.7rem', borderRadius: 'var(--radius-sm)', border: '1px solid rgba(180,83,9,0.35)', background: 'rgba(180,83,9,0.05)' }}>
+            <div style={{ fontSize: '0.78rem', fontWeight: 700, color: '#b45309', marginBottom: '0.45rem' }}>
+              {cleanupOn
+                ? `Clean-up price? Flat price is $${servicePrice.toFixed(2)}.${suggested > 0 ? ` By the hour: ${Math.round(cleanupBill.leafSecs / 60)} min × $${completionPanel.leafRate}/hr = $${suggested.toFixed(2)}.` : ''}${undecided ? ' Left at the flat price until you choose — you can also set it later in Stats → Leaf Billing.' : ''}`
+                : `Charge for leaves?${undecided ? ' Not decided — you can also set it later in Stats → Leaf Billing.' : ''}`}
+            </div>
+            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+              {suggested > 0 && (
+                <button style={btn(usingSuggested)} onClick={() => pick(suggested)}>Use ${suggested.toFixed(2)}</button>
+              )}
+              <button style={btn(usingOther)} onClick={() => setLeafOther(leafCharge != null && leafCharge > 0 ? String(leafCharge) : '')}>Other amount</button>
+              {cleanupOn
+                ? <button style={btn(usingFlat)} onClick={() => pick(servicePrice)}>Keep ${servicePrice.toFixed(2)}</button>
+                : <button style={btn(leafCharge === 0 && leafOther == null)} onClick={() => pick(0)}>No charge</button>}
+              {!undecided && (
+                <button style={btn(false)} onClick={() => pick(null)}>Decide later</button>
+              )}
+            </div>
+            {leafOther != null && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.5rem' }}>
+                <span style={{ fontWeight: 700 }}>$</span>
+                <input
+                  type="number" step="0.01" inputMode="decimal" className="input-field" autoFocus
+                  placeholder="Leaf charge"
+                  value={leafOther}
+                  onChange={e => {
+                    setLeafOther(e.target.value);
+                    setLeafCharge(e.target.value === '' ? null : Math.max(0, parseFloat(e.target.value) || 0));
+                  }}
+                  style={{ flex: 1, padding: '0.45rem' }}
+                />
+              </div>
+            )}
+          </div>
+        );
+      })()}
       {completionPanel.primaryCustomer?.propertyNotes && (
         <div style={{ marginBottom: '0.8rem', padding: '0.6rem 0.8rem', borderRadius: 'var(--radius-sm)', background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.35)', fontSize: '0.82rem', color: '#b45309', lineHeight: 1.5 }}>
           <span style={{ fontWeight: 700, display: 'block', marginBottom: '0.2rem' }}>📋 Property Note</span>
@@ -325,9 +505,9 @@ export default function JobCompletionModal({
                   primaryCustomer: completionPanel.primaryCustomer,
                   primaryVisitId: completionPanel.visitId,
                   primaryExitTime: completionPanel.exitTime,
-                  primaryExpectedSecs: completionPanel.historicalAverageSecs,
-                  primaryVisitCount: completionPanel.historicalVisitCount || 0,
-                  primaryPrice: completionPanel.priceEarned,
+                  primaryExpectedSecs: usual?.secs ?? null,
+                  primaryVisitCount: usual?.count || 0,
+                  primaryPrice: servicePrice,
                   durationSecs: completionPanel.durationSecs,
                   companions: selectedCompanions
                 });
@@ -367,16 +547,16 @@ export default function JobCompletionModal({
       )}
       <button
         style={{ width: '100%', height: '52px', border: 'none', borderRadius: '16px', background: 'var(--color-text-main)', color: 'var(--color-bg-card)', fontSize: '1rem', fontWeight: 700, cursor: 'pointer', marginBottom: '0.5rem' }}
-        onClick={() => handleSaveCompletion({ note: panelNote, conditions: selectedConditions, appliedServices: selectedServices })}
+        onClick={() => handleSaveCompletion({ note: panelNote, conditions: savedConditions, appliedServices: selectedServices })}
       >
-        {panelNote.trim() || selectedConditions.length > 0 ? 'Save details' : 'Done'}
+        Done
       </button>
       <div style={{ display: 'flex', gap: '0.5rem' }}>
         <button
           style={{ flex: 1, height: '44px', borderRadius: '14px', background: 'transparent', border: 'none', color: 'var(--color-primary)', fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.3rem' }}
           onClick={() => { if (completionTimerRef.current) clearTimeout(completionTimerRef.current); setIsEditJobOpen(true); }}
         >
-          <Edit2 size={16} /> Edit details
+          <Edit2 size={16} /> Fix time or price
         </button>
         {/* Any fert-mode visit is a chemical application regardless of how the
             service is named ("Round 3" etc.), so the EPA button always shows there. */}
@@ -397,12 +577,6 @@ export default function JobCompletionModal({
             <ClipboardList size={16} /> {completionPanel.complianceLog ? 'EPA filed ✓' : 'EPA log'}
           </button>
         )}
-        <button
-          style={{ flex: 1, height: '44px', borderRadius: '14px', background: 'transparent', border: 'none', color: 'var(--color-text-muted)', fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer' }}
-          onClick={() => handleSaveCompletion({ note: panelNote, conditions: selectedConditions, appliedServices: selectedServices })}
-        >
-          Close
-        </button>
       </div>
     </div>
   );

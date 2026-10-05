@@ -5,6 +5,8 @@ const DEFAULT_SETTINGS = {
   rateUnderpaidThreshold: 45,
   minStopFee: 30,
   drivebyThresholdSecs: 45,
+  leafHourlyRate: 0,   // $/hr billed for leaf time on a leaf job (0 = not priced)
+  leafButtons: 'auto', // 'auto' (Oct 1 – Dec 1) | 'show' | 'hide' — see utils/leaves
   costOfGas: 3.50,
   truckMpg: 7,
   mowerGph: 1.0,

@@ -6,10 +6,13 @@ import DayReviewModal from '../components/DayReviewModal';
 import { getBusinessDayStart, getDaysSince } from '../utils/dateUtils';
 import { getVisitRevenueBreakdown, calculateServiceTotals } from '../utils/revenueUtils';
 import { getSettings } from '../db/settings';
+import { findPossibleLeafVisits, leafToolsVisible } from '../utils/leaves';
+import { setLeafTag } from '../utils/leafBilling';
 import { useServiceMode } from '../components/ServiceProvider';
 import { classifyTreatment } from '../db/treatments';
 import { defaultServicesForMode, isScheduleAnchor, findSuspectVisits } from '../utils/scheduler';
 import VisitEditModal from '../components/VisitEditModal';
+import AppDialog from '../components/AppDialog';
 import { Plus, Sunrise, Sun, Moon, Settings as SettingsIcon, Map as MapIcon, Route as RouteIcon, ClipboardList, Thermometer, CloudSun, CloudRain, Cloud, Users, AlertTriangle, TrendingUp, CheckCircle, Droplets, ChevronRight } from 'lucide-react';
 
 const formatDur = (secs) => {
@@ -65,6 +68,7 @@ export default function Dashboard() {
   const { activeMode } = useServiceMode();
   const [showDayReview, setShowDayReview] = useState(false);
   const [fixingSuspect, setFixingSuspect] = useState(null);
+  const [dialog, setDialog] = useState(null);
   const [weather, setWeather] = useState(null);
   const [isSyncing, setIsSyncing] = useState(false);
 
@@ -421,6 +425,35 @@ export default function Dashboard() {
 
   const handleSuspectOk = (visitId) => db.visits.update(visitId, { reviewedOk: true });
 
+  // Fall mows that ran long and weren't tagged as leaf jobs (see utils/leaves).
+  const possibleLeafVisits = useMemo(() => {
+    if (allVisits.length === 0 || allCustomers.length === 0 || !leafToolsVisible()) return [];
+    return findPossibleLeafVisits(allVisits)
+      .map(f => ({ ...f, customer: allCustomers.find(c => c.id === f.visit.customerId) }))
+      .filter(f => f.customer);
+  }, [allVisits, allCustomers]);
+
+  // Yes tags the visit and adds its hourly leaf charge; No just stops asking.
+  const handleLeafAnswer = (visit, wasLeaves) => wasLeaves
+    ? setLeafTag(visit.id, true, { leafChecked: true })
+    : db.visits.update(visit.id, { leafChecked: true });
+
+  // A drive-past that got logged as a visit isn't fixable by editing its time:
+  // it still counts as a completed, priced visit and keeps the lawn from
+  // auto-arriving today and tomorrow. It has to go.
+  const handleSuspectDelete = (f) => {
+    const mins = Math.max(1, Math.round(f.visit.durationSecs / 60));
+    setDialog({
+      type: 'danger',
+      title: 'Not a real visit?',
+      message: `Delete the ${mins}-minute visit to ${f.customer.name}? Its $${(f.visit.priceEarned || 0).toFixed(0)} comes off the books and the lawn goes back to needing service. This cannot be undone.`,
+      confirmLabel: 'Delete',
+      onConfirm: async () => {
+        await db.visits.delete(f.visit.id);
+      }
+    });
+  };
+
   const handleSuspectSave = async (updates) => {
     if (!fixingSuspect) return;
     // reviewedOk too: an edited-and-saved record is reviewed by definition, so
@@ -486,6 +519,7 @@ export default function Dashboard() {
   return (
     <div className="animate-fade-in" style={{ paddingBottom: '2rem' }}>
       {showDayReview && <DayReviewModal onClose={() => setShowDayReview(false)} />}
+      <AppDialog dialog={dialog} onClose={() => setDialog(null)} />
 
       {fixingSuspect && (
         <VisitEditModal
@@ -670,6 +704,54 @@ export default function Dashboard() {
           </div>
         )}
 
+        {/* Forgotten leaf tags — fall mows that ran well over the lawn's usual
+            time and weren't marked as leaf jobs. One tap either way. */}
+        {activeMode === 'mowing' && possibleLeafVisits.length > 0 && (
+          <div style={{ marginTop: '1.5rem' }}>
+            <div style={{ fontSize: '1rem', fontWeight: 600, padding: '0.4rem 0.8rem', color: '#b45309', display: 'flex', alignItems: 'center', gap: '0.4rem', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.9rem', marginBottom: '1rem' }}>
+              🍂 Were these leaf jobs?
+              <span style={{ fontSize: '0.7rem', background: '#b45309', color: 'white', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>{possibleLeafVisits.length}</span>
+            </div>
+            <div className="glass-card" style={{ padding: 0, maxHeight: '240px', overflowY: 'auto', border: '1px solid rgba(180,83,9,0.35)' }}>
+              {possibleLeafVisits.map(f => {
+                const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+                const dayWord = f.visit.exitTime >= startOfToday.getTime() ? 'today'
+                  : f.visit.exitTime >= startOfToday.getTime() - 86400000 ? 'yesterday'
+                  : new Date(f.visit.exitTime).toLocaleDateString([], { weekday: 'short' });
+                return (
+                  <div key={f.visit.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', padding: '0.7rem 0.8rem', borderBottom: '1px solid var(--color-border)' }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--color-text-main)' }}>{f.customer.name}</div>
+                      <div style={{ fontSize: '0.78rem', marginTop: '0.1rem', color: '#b45309', fontWeight: 500 }}>
+                        Took {Math.round(f.visit.durationSecs / 60)} min {dayWord} — usually {Math.round(f.avgSecs / 60)} min
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.4rem', flexShrink: 0 }}>
+                      <button
+                        className="btn btn-primary"
+                        style={{ padding: '0.45rem 0.8rem', fontSize: '0.8rem', background: '#b45309', borderColor: '#b45309' }}
+                        onClick={() => handleLeafAnswer(f.visit, true)}
+                      >
+                        🍂 Yes, leaves
+                      </button>
+                      <button
+                        className="btn btn-secondary"
+                        style={{ padding: '0.45rem 0.8rem', fontSize: '0.8rem', background: 'transparent', border: '1px solid var(--color-border)' }}
+                        onClick={() => handleLeafAnswer(f.visit, false)}
+                      >
+                        No
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <p style={{ fontSize: '0.72rem', color: 'var(--color-text-muted)', margin: '0.5rem 0.2rem 0' }}>
+              These mows ran much longer than usual. Tap Yes if you picked up leaves — the extra time is then counted as leaf time, not as a slow mow.
+            </p>
+          </div>
+        )}
+
         {/* Possible mis-counted jobs — completed visits way under the lawn's usual time */}
         {suspectVisits.length > 0 && (
           <div style={{ marginTop: '1.5rem' }}>
@@ -711,13 +793,21 @@ export default function Dashboard() {
                       >
                         ✓ OK
                       </button>
+                      <button
+                        className="btn btn-secondary"
+                        aria-label={`Delete this visit to ${f.customer.name}`}
+                        style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem', background: 'transparent', border: '1px solid var(--color-border)', color: '#b91c1c' }}
+                        onClick={() => handleSuspectDelete(f)}
+                      >
+                        Delete
+                      </button>
                     </div>
                   </div>
                 );
               })}
             </div>
             <p style={{ fontSize: '0.72rem', color: 'var(--color-text-muted)', margin: '0.5rem 0.2rem 0' }}>
-              These finished far quicker than this lawn's usual time. Fix the record if the timer mis-counted, or ✓ OK if it's right.
+              These finished far quicker than this lawn's usual time. Fix the time if the timer mis-counted, ✓ OK if it's right, or Delete if you only drove past.
             </p>
           </div>
         )}

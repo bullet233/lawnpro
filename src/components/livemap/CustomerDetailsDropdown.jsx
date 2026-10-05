@@ -3,6 +3,7 @@ import { ChevronDown, ChevronUp, RefreshCcw, FileText } from 'lucide-react';
 import { getDaysSince } from '../../utils/dateUtils';
 import { getSettings } from '../../db/settings';
 import { parseLawnSizeToSqFt } from '../../utils/parseLawnSize';
+import { comparableVisits, isMowVisit } from '../../utils/leaves';
 import { useServiceMode } from '../ServiceProvider';
 
 // Does a service belong to the currently active division? Mirrors the
@@ -23,7 +24,7 @@ function FieldLabel({ color, children }) {
   );
 }
 
-export default function CustomerDetailsDropdown({ customer, allVisits, globalPace, darkTheme = false }) {
+export default function CustomerDetailsDropdown({ customer, allVisits, globalPace, darkTheme = false, isLeafJob = false }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const { activeMode } = useServiceMode();
 
@@ -38,7 +39,11 @@ export default function CustomerDetailsDropdown({ customer, allVisits, globalPac
       if (custVisits.length > 0) {
         custVisits.sort((a, b) => b.exitTime - a.exitTime);
         lastDate = custVisits[0].exitTime;
-        const validDurations = custVisits.filter(v => v.durationSecs && v.durationSecs >= 60).map(v => v.durationSecs);
+        // Leaf visits only count toward the usual time for a job marked as a leaf job.
+        const validDurations = comparableVisits(
+          custVisits.filter(v => v.durationSecs && v.durationSecs >= 60 && (activeMode !== 'mowing' || isMowVisit(v))),
+          activeMode === 'mowing' && isLeafJob
+        ).map(v => v.durationSecs);
         if (validDurations.length > 0) {
           avgDuration = validDurations.reduce((a, b) => a + b, 0) / validDurations.length;
         }
@@ -104,7 +109,7 @@ export default function CustomerDetailsDropdown({ customer, allVisits, globalPac
       crossServiceStr,
       notes: customer.notes || ''
     };
-  }, [customer, allVisits, globalPace, activeMode]);
+  }, [customer, allVisits, globalPace, activeMode, isLeafJob]);
 
   if (!customer) return null;
 

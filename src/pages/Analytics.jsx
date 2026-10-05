@@ -3,12 +3,16 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/db';
 import { getSettings } from '../db/settings';
 import { parseLawnSizeToSqFt, calculateTieredMatrix, calculatePowerModel, predictTrendMins } from '../utils/matrix';
+import { isLeafVisit, isCleanupVisit, leafRollup, leafBillingLines } from '../utils/leaves';
+import { setLeafCharge } from '../utils/leafBilling';
 import { trackApiCall } from '../utils/apiTracker';
 import { GOOGLE_MAPS_API_KEY } from '../components/MapProvider';
 import { TrendingUp, Calculator, AlertCircle, Fuel, DollarSign, ArrowUp, ArrowDown, Edit2, Save, X, MapPin, AlertTriangle } from 'lucide-react';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import { useServiceMode } from '../components/ServiceProvider';
 import { toast } from '../utils/toast';
+import { useNavigate } from 'react-router-dom';
+import ClientMetricsTab from '../components/ClientMetricsTab';
 
 // Haversine distance helper
 const haversineDistance = (lat1, lon1, lat2, lon2) => {
@@ -284,7 +288,7 @@ function BucketHistoryModal({ bucket, minSqft, allVisits, allCustomers, onClose,
 
     allVisits.forEach(v => {
        const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id));
-       if (v.status === 'completed' && v.durationSecs >= 60 && custMap.has(v.customerId) && isMow) {
+       if (v.status === 'completed' && v.durationSecs >= 60 && custMap.has(v.customerId) && isMow && !isLeafVisit(v)) {
           const stats = custMap.get(v.customerId);
           stats.totalSecs += v.durationSecs;
           stats.count += 1;
@@ -419,6 +423,7 @@ function BucketHistoryModal({ bucket, minSqft, allVisits, allCustomers, onClose,
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export default function Analytics() {
   const { activeMode } = useServiceMode();
+  const navigate = useNavigate();
   const allVisitsRaw = useLiveQuery(() => db.visits.toArray(), []) || [];
   const allCustomersRaw = useLiveQuery(() => db.customers.toArray(), []) || [];
   
@@ -491,7 +496,7 @@ export default function Analytics() {
       if (v.status !== 'completed' || !v.durationSecs) return;
       
       const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id));
-      if (!isMow) return;
+      if (!isMow || isLeafVisit(v)) return; // leaf pickup is not mowing pace
 
       if (!customerAverages[v.customerId]) {
         customerAverages[v.customerId] = { totalSecs: 0, count: 0 };
@@ -532,7 +537,7 @@ export default function Analytics() {
       visits.forEach(v => {
         if (v.status !== 'completed' || !v.durationSecs || v.durationSecs < 60) return;
         const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id));
-        if (!isMow) return;
+        if (!isMow || isLeafVisit(v)) return; // leaf pickup is not mowing pace
         const cust = allCustomers.find(c => c.id === v.customerId);
         if (!cust) return;
         const sqft = parseLawnSizeToSqFt(cust.lawnSize);
@@ -808,6 +813,11 @@ export default function Analytics() {
     allVisits.forEach(v => {
       if (v.status !== 'completed' || !v.durationSecs || v.durationSecs < 60) return;
       if (!v.priceEarned || v.priceEarned <= 0) return;
+      // Leaf visits run long at (usually) the same price — ranked on their own
+      // in the leaf season card so they don't drag a lawn's mowing rate down.
+      if (isLeafVisit(v)) return;
+      // A clean-up is not a mow either: long, flat-priced, billed on the Leaves tab.
+      if (isCleanupVisit(v)) return;
       if (!customerStats[v.customerId]) {
         customerStats[v.customerId] = { totalSecs: 0, totalDriveSecs: 0, totalPrice: 0, count: 0 };
       }
@@ -833,6 +843,7 @@ export default function Analytics() {
         avgMins,
         avgDriveMins,
         avgPrice: avgPrice.toFixed(2),
+        avgSecs: stats.totalSecs / stats.count,
         visitCount: stats.count
       });
     });
@@ -858,7 +869,7 @@ export default function Analytics() {
     allVisitsRaw.forEach(v => {
       if (v.status !== 'completed' || !v.durationSecs || v.durationSecs < 60) return;
       const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowIds.includes(id));
-      if (!isMow) return;
+      if (!isMow || isLeafVisit(v)) return; // leaf pickup is not mowing pace
       const c = custMap.get(v.customerId);
       if (!c || c.excludeFromAnalytics || c.status === 'inactive') return;
       const sq = parseLawnSizeToSqFt(c.lawnSize);
@@ -893,32 +904,135 @@ export default function Analytics() {
   const dismissSlowFlag = (id) => db.customers.update(id, { slowMowExpected: true });
   const restoreSlowFlag = (id) => db.customers.update(id, { slowMowExpected: false });
 
+  // ── Leaf pickup ─────────────────────────────────────────────────────────
+  // Leaves come up in the same pass as the mow, so leaf time is never clocked
+  // on its own: it is each leaf visit's time over that lawn's usual plain mow.
+  // Last 6 months, so the card covers the whole fall and clears by summer.
+  const leafData = useMemo(() => {
+    const r = leafRollup(mowVisits, { since: Date.now() - 180 * 86400000 });
+    const names = new Map(allCustomers.map(c => [c.id, c.name]));
+    return { ...r, lawns: r.lawns.map(l => ({ ...l, name: names.get(l.customerId) || 'Unknown' })) };
+  }, [mowVisits, allCustomers]);
+  // Leaf billing: what to bill each customer for a month — the leaf time and
+  // charge stored on every leaf job (hourly rate × time over the usual mow).
+  const [leafMonth, setLeafMonth] = useState(() => new Date().toLocaleDateString('en-CA').slice(0, 7));
+  const [leafEdit, setLeafEdit] = useState(null); // { id, text } while typing another amount
+  const hasLeafJobs = useMemo(() => mowVisits.some(v => v.status === 'completed' && (isLeafVisit(v) || isCleanupVisit(v))), [mowVisits]);
+  const leafBilling = useMemo(() => {
+    const [y, m] = leafMonth.split('-').map(Number);
+    if (!y || !m) return { customers: [], leafSecs: 0, leafCharge: 0, visits: 0 };
+    const r = leafBillingLines(mowVisits, { from: new Date(y, m - 1, 1).getTime(), to: new Date(y, m, 1).getTime() });
+    const names = new Map(allCustomers.map(c => [c.id, c.name]));
+    return {
+      ...r,
+      customers: r.customers
+        .map(c => ({ ...c, name: names.get(c.customerId) || 'Unknown' }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    };
+  }, [mowVisits, allCustomers, leafMonth]);
+  const fmtHrsMins = (secs) => {
+    const mins = Math.round(secs / 60);
+    return mins >= 60 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${mins}m`;
+  };
+
+  // ── Money summary (top of Overview) ─────────────────────────────────────
+  // Completed visits in the active mode: this week (Monday start), this month,
+  // this year, plus revenue for each of the last 8 weeks. $/hr counts every
+  // hour on the clock — job time plus drive time.
+  const moneySummary = useMemo(() => {
+    const done = allVisits.filter(v => v.status === 'completed' && v.exitTime);
+    if (done.length === 0) return null;
+    const now = new Date();
+    const weekStart = new Date(now);
+    weekStart.setHours(0, 0, 0, 0);
+    weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
+    const total = (from, to = Infinity) => {
+      let revenue = 0, secs = 0, jobs = 0;
+      done.forEach(v => {
+        if (v.exitTime < from || v.exitTime >= to) return;
+        revenue += v.priceEarned || 0;
+        secs += (v.durationSecs || 0) + (v.driveTimeSecs || 0);
+        jobs += 1;
+      });
+      return { revenue, jobs, rate: secs >= 60 ? revenue / (secs / 3600) : null };
+    };
+    const weeks = [];
+    for (let i = 7; i >= 0; i--) {
+      const start = new Date(weekStart); start.setDate(start.getDate() - i * 7);
+      const end = new Date(start); end.setDate(end.getDate() + 7);
+      weeks.push({ start, current: i === 0, ...total(start.getTime(), end.getTime()) });
+    }
+    return {
+      week: total(weekStart.getTime()),
+      month: total(new Date(now.getFullYear(), now.getMonth(), 1).getTime()),
+      year: total(new Date(now.getFullYear(), 0, 1).getTime()),
+      weeks,
+      maxWeek: Math.max(1, ...weeks.map(w => w.revenue)),
+    };
+  }, [allVisits]);
+
+  // Leaf Billing split: jobs still to decide first, decided ones folded away.
+  const [showLeafDone, setShowLeafDone] = useState(false);
+  const splitLeaf = (decided) => leafBilling.customers
+    .map(c => {
+      const visits = c.visits.filter(v => !!v.leafDecided === decided);
+      return {
+        ...c, visits,
+        leafCharge: visits.reduce((s, v) => s + (v.leafCharge || 0), 0),
+        leafSecs: visits.reduce((s, v) => s + (v.leafSecs || 0), 0),
+        leafSuggested: visits.reduce((s, v) => s + (v.leafSuggested || 0), 0),
+      };
+    })
+    .filter(c => c.visits.length > 0);
+  const leafOpen = splitLeaf(false);
+  const leafDone = splitLeaf(true);
+  const countLeafVisits = (list) => list.reduce((s, c) => s + c.visits.length, 0);
+  const leafCleanupCount = leafBilling.customers.reduce((s, c) => s + c.visits.filter(v => v.cleanup).length, 0);
+
+  // Leaves get their own tab (mowing mode, once there is anything to show).
+  const showLeavesTab = activeMode === 'mowing' && (leafData.leafVisits > 0 || hasLeafJobs);
+  const tabs = ['overview', 'clients', ...(showLeavesTab ? ['leaves'] : []), 'bidding', 'expenses'];
+  // Clients tab: every division's visits, for customers not excluded from stats.
+  const clientVisits = useMemo(() => {
+    const ids = new Set(allCustomers.map(c => c.id));
+    return allVisitsRaw.filter(v => ids.has(v.customerId));
+  }, [allVisitsRaw, allCustomers]);
+  const currentTab = tabs.includes(activeTab) ? activeTab : 'overview';
+
+  // Bidding matrix: one row per size tier, expanded on tap.
+  const [openTiers, setOpenTiers] = useState([]);
+  const matrixPrice = (sqft) => {
+    const mins = getBaseMins(sqft);
+    return { mins, price: Math.max(settings?.minStopFee ?? 30, (mins / 60) * (settings?.targetHourlyRate || 60)) };
+  };
+
   const targetRate = settings?.targetHourlyRate || 0;
 
   return (
     <div className="animate-fade-in" style={{ paddingBottom: '5rem' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.5rem' }}>
         <TrendingUp size={24} color="var(--color-primary)" />
-        <h1 className="page-title" style={{ margin: 0 }}>Analytics & Bidding</h1>
+        <h1 className="page-title" style={{ margin: 0 }}>Stats</h1>
       </div>
 
       {/* Tab Navigation */}
       <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem', overflowX: 'auto', paddingBottom: '0.5rem' }}>
-        {['overview', 'bidding', 'expenses'].map(tab => (
+        {tabs.map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
             style={{
-              padding: '0.6rem 1.2rem',
+              padding: '0.7rem 1.3rem',
+              minHeight: '44px',
               borderRadius: '999px',
               border: 'none',
-              background: activeTab === tab ? 'var(--color-primary)' : 'var(--color-bg-card)',
-              color: activeTab === tab ? '#fff' : 'var(--color-text-main)',
+              background: currentTab === tab ? 'var(--color-primary)' : 'var(--color-bg-card)',
+              color: currentTab === tab ? '#fff' : 'var(--color-text-main)',
               fontWeight: 600,
-              fontSize: '0.9rem',
+              fontSize: '1rem',
               cursor: 'pointer',
               whiteSpace: 'nowrap',
-              boxShadow: activeTab === tab ? 'var(--shadow-md)' : 'none',
+              boxShadow: currentTab === tab ? 'var(--shadow-md)' : 'none',
               transition: 'all 0.2s ease'
             }}
           >
@@ -928,13 +1042,54 @@ export default function Analytics() {
       </div>
 
       {/* OVERVIEW TAB */}
-      {activeTab === 'overview' && (
+      {currentTab === 'overview' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem', marginTop: '1rem' }}>
+
+            {/* Money summary */}
+            {moneySummary && (
+              <div>
+                <h2 style={{ fontSize: '0.95rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--color-text-muted)', marginBottom: '1rem', marginTop: 0, fontWeight: 700 }}>Money</h2>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.8rem', marginBottom: '0.8rem' }}>
+                  {[['This week', moneySummary.week], ['This month', moneySummary.month], [`${new Date().getFullYear()} so far`, moneySummary.year]].map(([label, t], i) => (
+                    <div key={label} style={{ padding: '1rem', background: 'var(--color-bg-card)', borderRadius: 'var(--radius-md)', border: i === 0 ? '1px solid var(--color-primary)' : '1px solid var(--color-border)', borderBottom: i === 0 ? '4px solid var(--color-primary)' : '1px solid var(--color-border)' }}>
+                      <div style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--color-text-muted)', fontWeight: 700 }}>{label}</div>
+                      <div style={{ fontSize: '2rem', fontWeight: 800, lineHeight: 1.15, color: i === 0 ? 'var(--color-primary)' : 'var(--color-text-main)' }}>${t.revenue.toFixed(0)}</div>
+                      <div style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>
+                        {t.jobs} job{t.jobs === 1 ? '' : 's'}{t.rate != null ? ` · $${t.rate.toFixed(0)}/hr` : ''}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ padding: '1rem', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)' }}>
+                  <div style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', fontWeight: 600, marginBottom: '0.8rem' }}>Revenue by week · last 8 weeks</div>
+                  <div style={{ display: 'flex', alignItems: 'flex-end', gap: '0.5rem', height: '150px' }}>
+                    {moneySummary.weeks.map(w => (
+                      <div key={w.start.getTime()} style={{ flex: 1, minWidth: 0, height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', alignItems: 'center', gap: '0.25rem' }}>
+                        <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--color-text-main)', whiteSpace: 'nowrap' }}>{w.revenue > 0 ? `$${w.revenue.toFixed(0)}` : ''}</div>
+                        <div style={{ width: '100%', maxWidth: '64px', height: `${Math.max(2, (w.revenue / moneySummary.maxWeek) * 100)}px`, borderRadius: '6px 6px 0 0', background: w.current ? 'var(--color-primary)' : 'rgba(16,185,129,0.35)' }} />
+                        <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', fontWeight: w.current ? 800 : 600, whiteSpace: 'nowrap' }}>
+                          {w.start.toLocaleDateString([], { month: 'short', day: 'numeric' })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', marginTop: '0.6rem' }}>Each bar is a Monday-to-Sunday week. The solid bar is this week. $/hr counts job time plus drive time.</div>
+                </div>
+              </div>
+            )}
+
+            {/* Leaves live on their own tab — just point at anything still open */}
+            {showLeavesTab && leafBilling.undecided > 0 && (
+              <button onClick={() => setActiveTab('leaves')} className="glass-card" style={{ textAlign: 'left', cursor: 'pointer', padding: '0.9rem 1rem', borderLeft: '4px solid #b45309', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', fontSize: '1rem', fontWeight: 700, color: '#b45309', width: '100%' }}>
+                <span>🍂 {leafBilling.undecided} leaf charge{leafBilling.undecided === 1 ? '' : 's'} still to decide this month</span>
+                <span style={{ whiteSpace: 'nowrap' }}>Open Leaves →</span>
+              </button>
+            )}
 
             {/* Slow-for-size flags */}
             {(slowLawns.flagged.length > 0 || slowLawns.dismissed.length > 0) && (
               <div>
-                <h2 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--color-text-muted)', marginBottom: '1rem', marginTop: 0, fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                <h2 style={{ fontSize: '0.95rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--color-text-muted)', marginBottom: '1rem', marginTop: 0, fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                   <AlertTriangle size={15} color="#f59e0b" /> Taking Longer Than Similar Lawns
                 </h2>
 
@@ -996,7 +1151,7 @@ export default function Analytics() {
 
             {/* Efficiency & Pace Box */}
             <div>
-              <h2 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--color-text-muted)', marginBottom: '1rem', marginTop: 0, fontWeight: 700 }}>Efficiency & True Pace</h2>
+              <h2 style={{ fontSize: '0.95rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--color-text-muted)', marginBottom: '1rem', marginTop: 0, fontWeight: 700 }}>Efficiency & True Pace</h2>
               
               {paceMetrics && paceMetrics.allTimePace > 0 ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -1050,7 +1205,7 @@ export default function Analytics() {
 
             {/* Scatter Plot Chart (Moved from Bidding) */}
             <div ref={containerRef}>
-              <h2 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--color-text-muted)', marginBottom: '1rem', marginTop: 0, fontWeight: 700 }}>Historical Efficiency</h2>
+              <h2 style={{ fontSize: '0.95rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--color-text-muted)', marginBottom: '1rem', marginTop: 0, fontWeight: 700 }}>Historical Efficiency</h2>
               <div style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', padding: '1.2rem' }}>
                 <p style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', marginBottom: '1.5rem', marginTop: 0 }}>
                   Each dot is a customer. Tap a dot to see who it is. The dashed line is your trend.
@@ -1071,8 +1226,8 @@ export default function Analytics() {
           {/* Client Profitability Leaderboard */}
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '1rem' }}>
-              <h2 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--color-text-muted)', margin: 0, fontWeight: 700 }}>Client Leaderboard</h2>
-              {targetRate > 0 && <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--color-text-muted)' }}>Target: ${targetRate}/hr</span>}
+              <h2 style={{ fontSize: '0.95rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--color-text-muted)', margin: 0, fontWeight: 700 }}>Client Leaderboard</h2>
+              {targetRate > 0 && <span style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--color-text-muted)' }}>Target: ${targetRate}/hr · tap a lawn to open it</span>}
             </div>
 
             {profitabilityData.length > 0 ? (
@@ -1083,6 +1238,8 @@ export default function Analytics() {
                 const renderClient = (client) => {
                   const isAboveTarget = targetRate > 0 && client.hourlyRate >= targetRate;
                   const pctOfTarget = targetRate > 0 ? Math.round((client.hourlyRate / targetRate) * 100) : null;
+                  // Per-visit price that would put this lawn at the target rate.
+                  const raiseTo = targetRate > 0 && !isAboveTarget ? Math.ceil((targetRate * client.avgSecs) / 3600) : null;
                   
                   let rateColor = 'var(--color-text-main)';
                   if (targetRate > 0) {
@@ -1093,22 +1250,30 @@ export default function Analytics() {
                   }
 
                   return (
-                    <div key={client.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.8rem 0', borderBottom: '1px solid var(--color-border)', gap: '0.5rem', flexWrap: 'wrap' }}>
+                    <div key={client.id} role="button" tabIndex={0} title={`Open ${client.name}`}
+                      onClick={() => navigate(`/customers/${client.id}`)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') navigate(`/customers/${client.id}`); }}
+                      style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1rem 0', borderBottom: '1px solid var(--color-border)', gap: '0.5rem', flexWrap: 'wrap', cursor: 'pointer' }}>
                       <div style={{ minWidth: 0, flex: 1, paddingRight: '1rem' }}>
-                        <div style={{ fontWeight: 700, fontSize: '0.95rem', color: 'var(--color-text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <div style={{ fontWeight: 700, fontSize: '1.1rem', color: 'var(--color-text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {client.name}
                         </div>
-                        <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', fontWeight: 600, marginTop: '2px' }}>
-                          ~{client.avgMins}m • ${client.avgPrice}/visit
+                        <div style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', fontWeight: 600, marginTop: '2px' }}>
+                          ~{client.avgMins}m • ${client.avgPrice}/visit • {client.visitCount} visit{client.visitCount === 1 ? '' : 's'}
                         </div>
+                        {raiseTo != null && (
+                          <div style={{ fontSize: '0.9rem', color: '#b45309', fontWeight: 700, marginTop: '4px' }}>
+                            Raise to ${raiseTo}/visit to reach ${targetRate}/hr
+                          </div>
+                        )}
                       </div>
                       <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                        <div style={{ fontSize: '1.2rem', fontWeight: 800, color: rateColor, fontVariantNumeric: 'tabular-nums', lineHeight: 1 }}>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 800, color: rateColor, fontVariantNumeric: 'tabular-nums', lineHeight: 1 }}>
                           ${client.hourlyRate}
-                          <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginLeft: '2px' }}>/hr</span>
+                          <span style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', marginLeft: '2px' }}>/hr</span>
                         </div>
                         {pctOfTarget !== null && (
-                          <div style={{ fontSize: '0.7rem', fontWeight: 700, color: isAboveTarget ? '#10b981' : '#ef4444', marginTop: '4px' }}>
+                          <div style={{ fontSize: '0.85rem', fontWeight: 700, color: isAboveTarget ? '#10b981' : '#ef4444', marginTop: '4px' }}>
                             {pctOfTarget}% of target
                           </div>
                         )}
@@ -1121,14 +1286,14 @@ export default function Analytics() {
                   <div style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', padding: '0 1.2rem' }}>
                     {topPerformers.length > 0 && (
                       <div style={{ paddingBottom: '0.5rem' }}>
-                        {needsAttention.length > 0 && <div style={{ fontSize: '0.7rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '1px', color: '#10b981', paddingTop: '1.2rem', paddingBottom: '0.4rem', borderBottom: '1px solid var(--color-border)' }}>Meeting Target</div>}
+                        {needsAttention.length > 0 && <div style={{ fontSize: '0.85rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '1px', color: '#10b981', paddingTop: '1.2rem', paddingBottom: '0.4rem', borderBottom: '1px solid var(--color-border)' }}>Meeting Target</div>}
                         {topPerformers.map(renderClient)}
                       </div>
                     )}
                     
                     {needsAttention.length > 0 && (
                       <div style={{ paddingBottom: '0.5rem' }}>
-                        <div style={{ fontSize: '0.7rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '1px', color: '#ef4444', paddingTop: '1.2rem', paddingBottom: '0.4rem', borderBottom: '1px solid var(--color-border)' }}>Needs Attention</div>
+                        <div style={{ fontSize: '0.85rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '1px', color: '#ef4444', paddingTop: '1.2rem', paddingBottom: '0.4rem', borderBottom: '1px solid var(--color-border)' }}>Needs Attention</div>
                         {needsAttention.map(renderClient)}
                       </div>
                     )}
@@ -1146,8 +1311,210 @@ export default function Analytics() {
         </div>
       )}
 
+      {/* CLIENTS TAB */}
+      {currentTab === 'clients' && (
+        <ClientMetricsTab customers={allCustomers} visits={clientVisits} settings={settings} />
+      )}
+
+      {/* LEAVES TAB — billing first (it has things to do), then the season's numbers */}
+      {currentTab === 'leaves' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem', marginTop: '1rem' }}>
+
+            {/* Leaf billing — what to bill each customer for leaves this month */}
+            {activeMode === 'mowing' && hasLeafJobs && (
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.8rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
+                  <h2 style={{ fontSize: '0.95rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--color-text-muted)', margin: 0, fontWeight: 700 }}>
+                    🍂 Leaf Billing
+                  </h2>
+                  <input type="month" className="input-field" style={{ padding: '0.6rem 0.8rem', minHeight: '44px', fontSize: '1rem' }} value={leafMonth} onChange={e => setLeafMonth(e.target.value)} aria-label="Billing month" />
+                </div>
+                {leafBilling.visits === 0 ? (
+                  <div style={{ padding: '1rem', border: '1px dashed var(--color-border)', borderRadius: 'var(--radius-md)', color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+                    No leaf jobs in this month.
+                  </div>
+                ) : (
+                  <>
+                    <div className="glass-card" style={{ padding: '0.9rem 1rem', marginBottom: '0.8rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+                      <div style={{ fontSize: '1rem', color: 'var(--color-text-main)' }}>
+                        <strong>{leafBilling.visits - leafCleanupCount}</strong> leaf job{leafBilling.visits - leafCleanupCount === 1 ? '' : 's'}
+                        {leafCleanupCount > 0 && <> + <strong>{leafCleanupCount}</strong> clean-up{leafCleanupCount === 1 ? '' : 's'}</>}
+                        {' '}· <strong>{fmtHrsMins(leafBilling.leafSecs)}</strong> of leaf time
+                        <div style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', marginTop: '0.15rem' }}>
+                          Suggested ${leafBilling.leafSuggested.toFixed(2)}
+                          {leafBilling.undecided > 0 && (
+                            <span style={{ color: '#b45309', fontWeight: 700 }}> · {leafBilling.undecided} still to decide</span>
+                          )}
+                        </div>
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <div style={{ fontSize: '1.4rem', fontWeight: 800, color: '#b45309' }}>${leafBilling.leafCharge.toFixed(2)}</div>
+                        <div style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>charged for leaves</div>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                      {leafOpen.length === 0 && (
+                        <div style={{ padding: '0.8rem 1rem', borderRadius: 'var(--radius-md)', background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.3)', color: 'var(--color-primary)', fontWeight: 700, fontSize: '0.95rem' }}>
+                          Every leaf job this month is decided.
+                        </div>
+                      )}
+                      {[['open', leafOpen], ['done', leafDone]].map(([kind, list]) => list.length === 0 ? null : (
+                      <Fragment key={kind}>
+                        {kind === 'open' ? (
+                          <div style={{ fontSize: '0.9rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.5px', color: '#b45309', marginTop: '0.2rem' }}>
+                            To decide ({countLeafVisits(list)})
+                          </div>
+                        ) : (
+                          <button className="btn btn-secondary" aria-expanded={showLeafDone} onClick={() => setShowLeafDone(s => !s)}
+                            style={{ alignSelf: 'flex-start', marginTop: '0.6rem', padding: '0.55rem 1rem', minHeight: '44px', fontSize: '0.9rem', fontWeight: 700 }}>
+                            {showLeafDone ? '▾' : '▸'} Done ({countLeafVisits(list)}) — {showLeafDone ? 'hide' : 'show'}
+                          </button>
+                        )}
+                        {(kind === 'open' || showLeafDone) && list.map(c => (
+                        <div key={c.customerId} className="glass-card" style={{ padding: '0.85rem 1rem', borderLeft: '4px solid #b45309' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '0.8rem' }}>
+                            <div style={{ fontWeight: 700, fontSize: '1.1rem', color: 'var(--color-text-main)' }}>{c.name}</div>
+                            <div style={{ fontWeight: 800, color: '#b45309', whiteSpace: 'nowrap', textAlign: 'right' }}>
+                              ${c.leafCharge.toFixed(2)}
+                              <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--color-text-muted)' }}>
+                                {fmtHrsMins(c.leafSecs)} · suggested ${c.leafSuggested.toFixed(2)}
+                              </div>
+                            </div>
+                          </div>
+                          <div style={{ marginTop: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                            {c.visits.map(v => {
+                              const suggested = v.leafSuggested || 0;
+                              const editing = leafEdit?.id === v.id;
+                              const smallBtn = { padding: '0.55rem 1rem', fontSize: '0.9rem', minHeight: '44px' };
+                              return (
+                                <div key={v.id} style={{ padding: '0.5rem 0.6rem', borderRadius: 'var(--radius-sm)', background: 'var(--color-bg-main)', border: '1px solid var(--color-border)' }}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.8rem', fontSize: '0.95rem', color: 'var(--color-text-main)' }}>
+                                    <span>
+                                      <strong>{new Date(v.exitTime).toLocaleDateString([], { month: 'short', day: 'numeric' })}</strong>
+                                      {v.cleanup
+                                        ? ` · Clean-up, no mow · ${Math.round(v.durationSecs / 60)} min`
+                                        : ` · ${Math.round(v.durationSecs / 60)} min job${v.leafSecs != null ? ` · ${Math.round(v.leafSecs / 60)} min leaves` : ' · leaf time unknown (no normal mow to compare)'}`}
+                                    </span>
+                                    <span style={{ fontWeight: 700, whiteSpace: 'nowrap', color: v.leafDecided ? 'var(--color-text-main)' : '#b45309' }}>
+                                      {v.cleanup
+                                        ? (v.leafDecided ? `$${v.leafCharge.toFixed(2)} charged` : `$${v.leafCharge.toFixed(2)} flat price · not reviewed`)
+                                        : v.leafDecided ? (v.leafCharge > 0 ? `$${v.leafCharge.toFixed(2)} charged` : 'No charge') : 'Not decided'}
+                                    </span>
+                                  </div>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap', marginTop: '0.4rem' }}>
+                                    {editing ? (
+                                      <>
+                                        <span style={{ fontWeight: 700 }}>$</span>
+                                        <input type="number" step="0.01" inputMode="decimal" autoFocus className="input-field" style={{ width: '130px', padding: '0.5rem', minHeight: '44px', fontSize: '1rem' }}
+                                          value={leafEdit.text} placeholder="Amount"
+                                          onChange={e => setLeafEdit({ id: v.id, text: e.target.value })} />
+                                        <button className="btn btn-primary" style={smallBtn} disabled={leafEdit.text === ''}
+                                          onClick={async () => { await setLeafCharge(v.id, parseFloat(leafEdit.text) || 0); setLeafEdit(null); }}>
+                                          Save
+                                        </button>
+                                        <button className="btn btn-secondary" style={smallBtn} onClick={() => setLeafEdit(null)}>Cancel</button>
+                                      </>
+                                    ) : !v.leafDecided ? (
+                                      <>
+                                        {suggested > 0 && (
+                                          <button className="btn btn-primary" style={{ ...smallBtn, background: '#b45309', borderColor: '#b45309' }} onClick={() => setLeafCharge(v.id, suggested)}>
+                                            Use suggested ${suggested.toFixed(2)}
+                                          </button>
+                                        )}
+                                        <button className="btn btn-secondary" style={smallBtn} onClick={() => setLeafEdit({ id: v.id, text: '' })}>Other amount</button>
+                                        {v.cleanup
+                                          ? <button className="btn btn-secondary" style={smallBtn} onClick={() => setLeafCharge(v.id, v.leafCharge)}>Keep flat ${v.leafCharge.toFixed(2)}</button>
+                                          : <button className="btn btn-secondary" style={smallBtn} onClick={() => setLeafCharge(v.id, 0)}>No charge</button>}
+                                      </>
+                                    ) : (
+                                      <>
+                                        <span style={{ fontSize: '0.88rem', color: 'var(--color-text-muted)' }}>Suggested was ${suggested.toFixed(2)}</span>
+                                        <button className="btn btn-secondary" style={smallBtn} onClick={() => setLeafEdit({ id: v.id, text: String(v.leafCharge || 0) })}>Change</button>
+                                        <button className="btn btn-secondary" style={smallBtn} onClick={() => setLeafCharge(v.id, null)}>Undo</button>
+                                      </>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                      </Fragment>
+                      ))}
+                    </div>
+                  </>
+                )}
+                <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', margin: '0.6rem 0.2rem 0' }}>
+                  Leaf time is each leaf job's time over that lawn's usual mow. The suggested amount is that time at your hourly leaf rate (Settings → General) — it is only a suggestion. What you choose is added to that visit's price, on top of the mow. A clean-up with no mow counts its whole time, and the amount you choose replaces its flat price.
+                </p>
+              </div>
+            )}
+
+            {/* Leaf pickup — kept out of every mowing number above/below, reported here */}
+            {activeMode === 'mowing' && leafData.leafVisits > 0 && (
+              <div>
+                <h2 style={{ fontSize: '0.95rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--color-text-muted)', marginBottom: '1rem', marginTop: 0, fontWeight: 700 }}>
+                  🍂 Leaf Pickup · Last 6 Months
+                </h2>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '1rem', marginBottom: '1rem' }}>
+                  <div style={{ padding: '1rem', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)' }}>
+                    <div style={{ fontSize: '0.88rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Leaf jobs</div>
+                    <div style={{ fontSize: '1.6rem', fontWeight: 800, color: 'var(--color-text-main)' }}>{leafData.leafVisits}</div>
+                    <div style={{ fontSize: '0.88rem', color: 'var(--color-text-muted)' }}>mow + leaves · {leafData.lawns.length} lawn{leafData.lawns.length === 1 ? '' : 's'}</div>
+                  </div>
+                  <div style={{ padding: '1rem', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)' }}>
+                    <div style={{ fontSize: '0.88rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Extra time on leaves</div>
+                    <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#b45309' }}>
+                      {leafData.measuredVisits > 0 ? fmtHrsMins(leafData.totalExtraSecs) : '—'}
+                    </div>
+                    <div style={{ fontSize: '0.88rem', color: 'var(--color-text-muted)' }}>
+                      {leafData.measuredVisits > 0
+                        ? `+${Math.round(leafData.totalExtraSecs / leafData.measuredVisits / 60)} min per visit over a normal mow`
+                        : 'needs a normal mow to compare'}
+                    </div>
+                  </div>
+                  <div style={{ padding: '1rem', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)' }}>
+                    <div style={{ fontSize: '0.88rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Leaf-job rate</div>
+                    <div style={{ fontSize: '1.6rem', fontWeight: 800, color: 'var(--color-text-main)' }}>
+                      {leafData.leafSecs > 0 && leafData.leafRevenue > 0 ? `$${Math.round(leafData.leafRevenue / (leafData.leafSecs / 3600))}/hr` : '—'}
+                    </div>
+                    <div style={{ fontSize: '0.88rem', color: 'var(--color-text-muted)' }}>what those visits paid, on site time only</div>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                  {leafData.lawns.slice(0, 10).map(l => (
+                    <div key={l.customerId} className="glass-card" style={{ padding: '0.75rem 1rem', borderLeft: '4px solid #b45309', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.8rem' }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 700, color: 'var(--color-text-main)' }}>{l.name}</div>
+                        <div style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', marginTop: '0.15rem' }}>
+                          {Math.round(l.leafAvgSecs / 60)} min with leaves
+                          {l.mowAvgSecs != null ? ` vs ${Math.round(l.mowAvgSecs / 60)} min mow` : ' · no normal mow to compare'}
+                          <span style={{ opacity: 0.6 }}> · {l.leafCount} visit{l.leafCount === 1 ? '' : 's'}</span>
+                        </div>
+                      </div>
+                      {l.extraSecs != null && (
+                        <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                          <div style={{ fontWeight: 800, fontSize: '1.15rem', color: '#b45309' }}>+{Math.round(l.extraSecs / 60)} min</div>
+                          <div style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>per visit</div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                {leafData.lawns.length > 10 && (
+                  <div style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', marginTop: '0.5rem' }}>
+                    Showing the 10 lawns with the most leaf time, of {leafData.lawns.length}.
+                  </div>
+                )}
+              </div>
+            )}
+
+        </div>
+      )}
+
       {/* EXPENSES TAB */}
-      {activeTab === 'expenses' && (
+      {currentTab === 'expenses' && (
         <>
           {/* Fuel Costs Card */}
           <div className="glass-card" style={{ padding: '1.2rem', marginBottom: '1.5rem' }}>
@@ -1262,7 +1629,7 @@ export default function Analytics() {
       )}
 
       {/* BIDDING TAB */}
-      {activeTab === 'bidding' && (
+      {currentTab === 'bidding' && (
         <>
           {/* Pricing model A/B switch */}
           <div className="glass-card" style={{ padding: '0.9rem 1rem', marginBottom: '1rem' }}>
@@ -1467,8 +1834,8 @@ export default function Analytics() {
             </p>
             
             {tieredMatrixData ? (
-              <div style={{ overflowX: 'auto', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)', maxHeight: '450px' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+              <div style={{ overflowX: 'auto', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.95rem' }}>
                   <thead style={{ position: 'sticky', top: 0, zIndex: 1, background: 'var(--color-bg-main)' }}>
                     <tr style={{ borderBottom: '2px solid var(--color-border)', textAlign: 'left' }}>
                       <th style={{ padding: '0.6rem 0.8rem', color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>Sq Ft</th>
@@ -1477,51 +1844,67 @@ export default function Analytics() {
                     </tr>
                   </thead>
                   <tbody>
-                    {groupedBuckets.map((group) => (
+                    {groupedBuckets.map((group) => {
+                      const open = openTiers.includes(group.label);
+                      const first = matrixPrice(group.rows[0]);
+                      const last = matrixPrice(group.rows[group.rows.length - 1]);
+                      const range = (a, b, f) => (f(a) === f(b) ? f(a) : `${f(a)} – ${f(b)}`);
+                      return (
                       <Fragment key={group.label}>
-                        {/* Category Header */}
-                        <tr 
-                          style={{ background: 'var(--color-bg-main)', cursor: 'pointer' }} 
-                          onClick={() => setSelectedBucket({ bucket: group.bucket, minSqft: group.minSqft })} 
+                        {/* Tier row: tap to list every size in it */}
+                        <tr
+                          style={{ background: 'var(--color-bg-main)', cursor: 'pointer' }}
+                          aria-expanded={open}
+                          onClick={() => setOpenTiers(prev => prev.includes(group.label) ? prev.filter(l => l !== group.label) : [...prev, group.label])}
                           className="hover-highlight"
                         >
-                          <td colSpan="3" style={{ padding: '0.8rem', borderBottom: `2px solid ${group.color}40`, borderTop: '2px solid var(--color-border)' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                              <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: group.color }}></div>
+                          <td style={{ padding: '0.9rem 0.8rem', borderBottom: `2px solid ${group.color}40`, borderTop: '2px solid var(--color-border)', borderLeft: `4px solid ${group.color}` }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                              <span style={{ fontWeight: 700, color: 'var(--color-text-muted)', width: '1rem' }}>{open ? '▾' : '▸'}</span>
                               <span style={{ fontWeight: 700, color: 'var(--color-text-main)' }}>{group.label}</span>
                               {!usingTrend && (
-                                <span style={{ fontWeight: 400, fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
+                                <span style={{ fontWeight: 400, fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
                                   ({Math.round(group.pace)} sqft/m){!group.rawHasData && '*'}
                                 </span>
                               )}
+                              <button
+                                className="btn btn-secondary"
+                                style={{ padding: '0.3rem 0.7rem', minHeight: '36px', fontSize: '0.8rem' }}
+                                onClick={(e) => { e.stopPropagation(); setSelectedBucket({ bucket: group.bucket, minSqft: group.minSqft }); }}
+                              >
+                                Graph
+                              </button>
                             </div>
                           </td>
+                          <td style={{ padding: '0.9rem 0.8rem', borderBottom: `2px solid ${group.color}40`, borderTop: '2px solid var(--color-border)', fontWeight: 600 }}>
+                            {range(first.mins, last.mins, m => `${Math.round(m)}`)} min
+                          </td>
+                          <td style={{ padding: '0.9rem 0.8rem', borderBottom: `2px solid ${group.color}40`, borderTop: '2px solid var(--color-border)', fontWeight: 700, color: 'var(--color-primary)' }}>
+                            {range(first.price, last.price, p => `$${p.toFixed(0)}`)}
+                          </td>
                         </tr>
-                        
-                        {/* Rows */}
-                        {group.rows.map(sqft => {
-                          let mins = getBaseMins(sqft);
 
-                          const rawPrice = (mins / 60) * (settings?.targetHourlyRate || 60);
-                          const minFee = settings?.minStopFee ?? 30;
-                          const price = Math.max(minFee, rawPrice); // Settings floor
-                          
+                        {/* Rows */}
+                        {open && group.rows.map(sqft => {
+                          const { mins, price } = matrixPrice(sqft);
+
                           return (
                             <tr key={sqft} style={{ borderBottom: '1px solid var(--color-border)', background: 'var(--color-bg-card)' }}>
-                              <td style={{ padding: '0.6rem 0.8rem', fontWeight: 600, borderLeft: `4px solid ${group.color}` }}>{sqft.toLocaleString()}</td>
+                              <td style={{ padding: '0.6rem 0.8rem 0.6rem 2.2rem', fontWeight: 600, borderLeft: `4px solid ${group.color}` }}>{sqft.toLocaleString()}</td>
                               <td style={{ padding: '0.6rem 0.8rem' }}>{Math.round(mins)} min</td>
                               <td style={{ padding: '0.6rem 0.8rem', fontWeight: 700, color: 'var(--color-primary)' }}>${price.toFixed(2)}</td>
                             </tr>
                           );
                         })}
                       </Fragment>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
                 <div style={{ padding: '0.6rem 0.8rem', fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', position: 'sticky', bottom: 0, borderTop: '1px solid var(--color-border)' }}>
                   {usingTrend
-                    ? `Prices from the trend curve model. Minimum stop fee: $${settings?.minStopFee ?? 30}. Tap a category header to view history graph.`
-                    : `* Denotes estimated pace borrowed from nearest bucket. Minimum stop fee: $${settings?.minStopFee ?? 30}. Tap a category header to view history graph.`}
+                    ? `Prices from the trend curve model. Minimum stop fee: $${settings?.minStopFee ?? 30}. Tap a tier to list every size in it; Graph shows that tier's history.`
+                    : `* Denotes estimated pace borrowed from nearest bucket. Minimum stop fee: $${settings?.minStopFee ?? 30}. Tap a tier to list every size in it; Graph shows that tier's history.`}
                 </div>
               </div>
             ) : (

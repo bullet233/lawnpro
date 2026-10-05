@@ -10,6 +10,7 @@ import WeeklyScheduler from '../components/WeeklyScheduler';
 import { orderDayStops, eligibleForMode, defaultServicesForMode, isScheduleAnchor } from '../utils/scheduler';
 import { calculateTieredMatrix, parseLawnSizeToSqFt } from '../utils/matrix';
 import { getSettings } from '../db/settings';
+import { comparableVisits } from '../utils/leaves';
 import { useServiceMode } from '../components/ServiceProvider';
 
 const mapContainerStyle = { width: '100%', height: '300px', borderRadius: 'var(--radius-md)', marginTop: '1rem' };
@@ -59,8 +60,61 @@ export default function RouteBuilder() {
   // ── Stop management ──────────────────────────────────────────────────────────
   const defaultServiceIdsFor = (customer) => defaultServicesForMode(customer, activeMode).map(s => s.id);
 
+  // ── Today's service ──────────────────────────────────────────────────────────
+  // What this route is for. null = each customer's usual service for the mode;
+  // otherwise a service template (e.g. Fall Clean-up) that new stops come in
+  // with, and that "Apply to all stops" sets on the stops already added.
+  const [dayService, setDayService] = useState(null);
+  const dayServiceOptions = useMemo(() => {
+    const templates = settings.defaultServices || [
+      { id: 's1', name: 'Mowing', category: 'Mowing' },
+      { id: 's2', name: 'Edging/Trimming', category: 'Other' },
+      { id: 's3', name: 'Fertilizer', category: 'Fertilizer' },
+      { id: 's4', name: 'Fall Clean-up', category: 'Other' },
+    ];
+    const isFert = (s) => s.category === 'Fertilizer' || s.id === 's3';
+    return templates.filter(s => (activeMode === 'fertilizer' ? isFert(s) : !isFert(s)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- settings is re-read each render; the mode is what changes the list
+  }, [activeMode]);
+
+  // The customer's own copy of a service template (same id, else same name).
+  const customerServiceFor = (customer, template) => {
+    const list = customer.services || [];
+    return list.find(s => s.id === template.id) ||
+      list.find(s => (s.name || '').trim().toLowerCase() === (template.name || '').trim().toLowerCase()) || null;
+  };
+
+  // Planned services for a stop under today's service. A customer who has no
+  // such service keeps their usual one (the stop row says so).
+  const serviceIdsFor = (customer, template = dayService) => {
+    if (!template) return defaultServiceIdsFor(customer);
+    const svc = customerServiceFor(customer, template);
+    return svc ? [svc.id] : defaultServiceIdsFor(customer);
+  };
+
+  // Services a stop can be switched between, right on its row: the regular
+  // (active) ones, a clean-up service even when it isn't regular, whatever is
+  // already planned, and today's service.
+  const stopServiceChoices = (stop) => {
+    const today = dayService ? customerServiceFor(stop.customer, dayService) : null;
+    return (stop.customer.services || []).filter(s =>
+      s.active || stop.plannedServiceIds.includes(s.id) || (today && today.id === s.id) ||
+      (activeMode !== 'fertilizer' && /clean|leaf/i.test(s.name || '')));
+  };
+
+  // Stops whose services differ from today's service (or from the client's
+  // usual one when none is picked) — these are what "set all" would change.
+  const stopsOffDayService = selectedStops.filter(s => {
+    const want = serviceIdsFor(s.customer);
+    return want.length !== s.plannedServiceIds.length || want.some(id => !s.plannedServiceIds.includes(id));
+  }).length;
+
+  const applyDayServiceToAll = () => {
+    setSelectedStops(prev => prev.map(s => ({ ...s, plannedServiceIds: serviceIdsFor(s.customer) })));
+  };
+
   const addStop = (customer) => {
-    setSelectedStops(prev => [...prev, { customer, plannedServiceIds: defaultServiceIdsFor(customer), expanded: false }]);
+    setSelectedStops(prev => [...prev, { customer, plannedServiceIds: serviceIdsFor(customer), expanded: false }]);
   };
 
   const removeStop = (index) => setSelectedStops(prev => prev.filter((_, i) => i !== index));
@@ -407,7 +461,7 @@ export default function RouteBuilder() {
     });
 
     const stops = orderDayStops(dueCusts).map(customer => (
-      { customer, plannedServiceIds: defaultServiceIdsFor(customer), expanded: false }
+      { customer, plannedServiceIds: serviceIdsFor(customer), expanded: false }
     ));
     setSelectedStops(stops);
     setRouteName(`${day} Route`);
@@ -556,6 +610,42 @@ export default function RouteBuilder() {
               style={{ width: '100%', fontSize: '1.15rem', fontWeight: 700, border: 'none', background: 'transparent', borderBottom: '2px solid var(--color-border)', borderRadius: 0, padding: '0.5rem 0', marginBottom: '1rem', color: 'var(--color-text-main)', outline: 'none' }}
             />
 
+            {/* Today's service — what new stops come in with; one tap sets every stop */}
+            {dayServiceOptions.length > 1 && (
+              <div style={{ marginBottom: '1rem', padding: '0.7rem 0.8rem', borderRadius: 'var(--radius-sm)', background: 'var(--color-bg-main)', border: '1px solid var(--color-border)' }}>
+                <div style={{ fontSize: '0.72rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--color-text-muted)', marginBottom: '0.45rem' }}>
+                  Today's service
+                </div>
+                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                  {[{ id: null, name: "Each client's usual" }, ...dayServiceOptions].map(opt => {
+                    const on = (dayService?.id ?? null) === opt.id;
+                    return (
+                      <button
+                        key={opt.id ?? 'usual'}
+                        aria-pressed={on}
+                        onClick={() => setDayService(opt.id == null ? null : opt)}
+                        style={{ padding: '0.45rem 0.8rem', minHeight: '38px', borderRadius: 'var(--radius-full)', cursor: 'pointer', fontSize: '0.82rem', fontWeight: 700, border: on ? '2px solid var(--color-primary)' : '1px solid var(--color-border)', background: on ? 'rgba(16,185,129,0.12)' : 'var(--color-bg-card)', color: on ? 'var(--color-primary)' : 'var(--color-text-main)' }}
+                      >
+                        {opt.name}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginTop: '0.45rem', display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+                  <span>
+                    {dayService
+                      ? `Stops you add come in as ${dayService.name}. Tap a service on any stop to change just that one.`
+                      : 'Stops you add come in with each client\'s usual service. Tap a service on any stop to change it.'}
+                  </span>
+                  {selectedStops.length > 0 && stopsOffDayService > 0 && (
+                    <button className="btn btn-primary" style={{ padding: '0.35rem 0.8rem', fontSize: '0.78rem', minHeight: '34px' }} onClick={applyDayServiceToAll}>
+                      {dayService ? `Set all stops to ${dayService.name}` : 'Reset all stops to usual'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
               <span style={{ fontWeight: 600, color: 'var(--color-text-muted)', fontSize: '0.9rem', textTransform: 'uppercase', letterSpacing: '0.5px' }}>{selectedStops.length} Stops</span>
               {selectedStops.length >= 3 && (
@@ -583,10 +673,12 @@ export default function RouteBuilder() {
               )}
 
               {selectedStops.map((stop, index) => {
-                const activeServices = stop.customer.services?.filter(s => s.active) || [];
+                const activeServices = stopServiceChoices(stop);
                 const plannedTotal = activeServices
                   .filter(s => stop.plannedServiceIds.includes(s.id))
-                  .reduce((sum, s) => sum + s.price, 0);
+                  .reduce((sum, s) => sum + (s.price || 0), 0);
+                // Today's service isn't set up on this customer, so they kept their usual one.
+                const missingDayService = dayService && !customerServiceFor(stop.customer, dayService);
 
                 return (
                   <div
@@ -614,14 +706,37 @@ export default function RouteBuilder() {
                         <GripVertical size={16} />
                       </div>
                       <div style={{ fontSize: '0.8rem', fontWeight: 800, color: 'var(--color-text-muted)', minWidth: '18px', textAlign: 'center' }}>{index + 1}</div>
-                      <div style={{ flex: 1, cursor: 'pointer', overflow: 'hidden' }} onClick={() => toggleExpanded(index)}>
-                        <strong style={{ fontSize: '1rem', color: 'var(--color-text-main)', display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{stop.customer.name}</strong>
-                        <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', marginTop: '0.1rem' }}>
-                          {stop.plannedServiceIds.length > 0
-                            ? <span style={{ color: 'var(--color-primary)', fontWeight: 600 }}>${plannedTotal.toFixed(2)}</span>
-                            : 'No services'}
-                          {stop.plannedServiceIds.length > 0 && ` — ${stop.plannedServiceIds.length} svc`}
+                      <div style={{ flex: 1, overflow: 'hidden' }}>
+                        <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', cursor: 'pointer' }} onClick={() => toggleExpanded(index)}>
+                          <strong style={{ fontSize: '1rem', color: 'var(--color-text-main)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{stop.customer.name}</strong>
+                          <span style={{ fontSize: '0.8rem', fontWeight: 600, whiteSpace: 'nowrap', color: stop.plannedServiceIds.length > 0 ? 'var(--color-primary)' : '#ef4444' }}>
+                            {stop.plannedServiceIds.length > 0 ? `$${plannedTotal.toFixed(2)}` : 'No service picked'}
+                          </span>
                         </div>
+                        {/* One-tap service chips — no need to open the stop */}
+                        <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap', marginTop: '0.35rem' }}>
+                          {activeServices.map(svc => {
+                            const on = stop.plannedServiceIds.includes(svc.id);
+                            return (
+                              <button
+                                key={svc.id}
+                                aria-pressed={on}
+                                onClick={() => toggleService(index, svc.id)}
+                                style={{ padding: '0.3rem 0.65rem', minHeight: '32px', borderRadius: 'var(--radius-full)', cursor: 'pointer', fontSize: '0.78rem', fontWeight: 600, border: on ? '1px solid var(--color-primary)' : '1px dashed var(--color-border)', background: on ? 'rgba(16,185,129,0.14)' : 'transparent', color: on ? 'var(--color-primary)' : 'var(--color-text-muted)' }}
+                              >
+                                {on ? '✓ ' : ''}{svc.name}
+                              </button>
+                            );
+                          })}
+                          {activeServices.length === 0 && (
+                            <span style={{ fontSize: '0.78rem', color: 'var(--color-text-muted)' }}>No services set up for this client.</span>
+                          )}
+                        </div>
+                        {missingDayService && (
+                          <div style={{ fontSize: '0.72rem', color: '#b45309', fontWeight: 600, marginTop: '0.3rem' }}>
+                            No {dayService.name} set up for this client — kept their usual service. Add it on their Services tab.
+                          </div>
+                        )}
                       </div>
 
                       <button className="btn-icon" onClick={() => toggleExpanded(index)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)', padding: '4px' }}>
@@ -688,7 +803,7 @@ export default function RouteBuilder() {
                   }
 
                   selectedStops.forEach(s => {
-                    const activeServices = s.customer.services?.filter(srv => srv.active) || [];
+                    const activeServices = s.customer.services || [];
                     const plannedTotal = activeServices
                       .filter(srv => s.plannedServiceIds.includes(srv.id))
                       .reduce((sum, srv) => sum + (srv.price || 0), 0);
@@ -700,11 +815,12 @@ export default function RouteBuilder() {
                     let avgDuration = 900;
                     const isPlannedMow = !s.plannedServiceIds || s.plannedServiceIds.length === 0 || s.plannedServiceIds.some(id => settings?.defaultServices?.find(ds => ds.id === id)?.category === 'Mowing' || id === 's1');
 
-                    const histVisits = (allVisits || []).filter(v => {
+                    // Leaf visits stay out of the planned mow time.
+                    const histVisits = comparableVisits((allVisits || []).filter(v => {
                       if (v.customerId !== s.customer.id || v.status !== 'completed' || !v.durationSecs) return false;
                       const isHistMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => settings?.defaultServices?.find(ds => ds.id === id)?.category === 'Mowing' || id === 's1');
                       return isPlannedMow === isHistMow;
-                    });
+                    }), false);
 
                     if (histVisits.length > 0) {
                        avgDuration = histVisits.reduce((acc, v) => acc + v.durationSecs, 0) / histVisits.length;

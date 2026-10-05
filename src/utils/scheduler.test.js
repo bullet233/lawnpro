@@ -253,4 +253,24 @@ describe('findSuspectVisits', () => {
     const flagged = findSuspectVisits([...fertHistory, v(404, 4, 360, { division: 'fertilizer' })], 'fertilizer', NOW);
     expect(flagged).toHaveLength(0);
   });
+
+  it('keeps fall leaf visits from making a normal mow look short', () => {
+    // Three 20-min mows, then three 60-min leaf visits. Averaged together that
+    // is 40 min and a 15-min mow would be flagged; against plain mows it is fine.
+    const leaves = { conditions: ['leaves'] };
+    const mixed = [
+      v(501, 5, 1200, { exitTime: NOW - 60 * 24 * HOUR }),
+      v(502, 5, 1200, { exitTime: NOW - 53 * 24 * HOUR }),
+      v(503, 5, 1200, { exitTime: NOW - 46 * 24 * HOUR }),
+      v(504, 5, 3600, { exitTime: NOW - 24 * 24 * HOUR, ...leaves }),
+      v(505, 5, 3600, { exitTime: NOW - 17 * 24 * HOUR, ...leaves }),
+      v(506, 5, 3600, { exitTime: NOW - 10 * 24 * HOUR, ...leaves }),
+    ];
+    expect(findSuspectVisits([...mixed, v(507, 5, 900)], 'mowing', NOW)).toHaveLength(0);
+
+    // A leaf visit is held to the leaf average: 20 min against 60 is flagged.
+    const flagged = findSuspectVisits([...mixed, v(508, 5, 1200, leaves)], 'mowing', NOW);
+    expect(flagged).toHaveLength(1);
+    expect(flagged[0].avgSecs).toBe(3600);
+  });
 });

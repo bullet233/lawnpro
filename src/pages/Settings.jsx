@@ -6,6 +6,7 @@ import AppDialog from '../components/AppDialog';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { API_PRICES } from '../utils/apiTracker';
 import { toast } from '../utils/toast';
+import { leafToolsVisible } from '../utils/leaves';
 
 export default function Settings() {
   const [settings, setSettings] = useState(null);
@@ -41,6 +42,8 @@ export default function Settings() {
   const [newChemNotices, setNewChemNotices] = useState([]);
   const [newChemCategory, setNewChemCategory] = useState('Fertilizer');
   const [activeTab, setActiveTab] = useState('pricing');
+  const [leafButtons, setLeafButtons] = useState(() => getSettings().leafButtons || 'auto');
+  const [leafRate, setLeafRate] = useState(() => (getSettings().leafHourlyRate ? String(getSettings().leafHourlyRate) : ''));
   const [editingServiceId, setEditingServiceId] = useState(null);
   const [editingChemId, setEditingChemId] = useState(null);
   const importRef = useRef(null);
@@ -318,6 +321,8 @@ export default function Settings() {
               setUnderpaidRate(s.rateUnderpaidThreshold?.toString() || '45');
               setMinStopFee((s.minStopFee ?? 30).toString());
               setDrivebySecs((s.drivebyThresholdSecs || 45).toString());
+              setLeafButtons(s.leafButtons || 'auto');
+              setLeafRate(s.leafHourlyRate ? String(s.leafHourlyRate) : '');
               setCostOfGas((s.costOfGas || 3.50).toString());
               setTruckMpg((s.truckMpg || 7).toString());
               setMowerGph((s.mowerGph || 1.0).toString());
@@ -478,7 +483,7 @@ export default function Settings() {
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.5rem' }}>
         <SettingsIcon size={24} color="var(--color-primary)" />
         <h1 className="page-title" style={{ margin: 0 }}>Settings</h1>
-        <span style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px', border: '1px solid var(--color-border)', marginLeft: 'auto', fontWeight: 600 }}>v1.4.8</span>
+        <span style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px', border: '1px solid var(--color-border)', marginLeft: 'auto', fontWeight: 600 }}>v1.4.9</span>
       </div>
 
       <div className="tab-bar">
@@ -843,6 +848,60 @@ export default function Settings() {
           </div>
         </div>
 
+        {/* Leaf buttons — saves on tap, no Save button needed */}
+        <div className="glass-card" style={{ padding: '1.5rem', marginBottom: '1.2rem' }}>
+          <h2 style={{ fontSize: '1.1rem', marginBottom: '0.5rem' }}>🍂 Leaf Jobs</h2>
+          <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem' }}>Leaf rate ($ per hour)</label>
+          <input
+            type="number"
+            className="input-field"
+            style={{ width: '100%' }}
+            placeholder="e.g. 75"
+            value={leafRate}
+            onChange={e => {
+              setLeafRate(e.target.value);
+              saveSettings({ leafHourlyRate: Math.max(0, parseFloat(e.target.value) || 0) });
+            }}
+          />
+          <p style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem', marginTop: '0.4rem', marginBottom: '1.2rem', lineHeight: 1.5 }}>
+            Used to <strong>suggest</strong> a leaf charge — nothing is charged automatically. When a job is marked as
+            a leaf job, the time it ran over that lawn's usual mow is the leaf time. Example: a lawn that usually takes
+            30 min takes 56 min with leaves — 26 min of leaves{parseFloat(leafRate) > 0 ? `, suggested $${((26 / 60) * parseFloat(leafRate)).toFixed(2)}` : ''}.
+            You choose what to charge (the suggestion, your own amount, or nothing) on the job-complete card or later in
+            Stats → Leaf Billing. Saves as you type.
+          </p>
+          <label className="input-label" style={{ display: 'block', marginBottom: '0.4rem' }}>Show the leaf buttons</label>
+          <p style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem', marginTop: 0, marginBottom: '1rem', lineHeight: 1.5 }}>
+            When the "leaf job" buttons show on the Live screen and the job-complete card. This only shows or
+            hides the buttons — a job is never marked as a leaf job unless you tap one. You can always mark a
+            past visit from Edit Visit.
+          </p>
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            {[
+              { id: 'auto', label: 'Auto', hint: 'Oct 1 – Dec 1' },
+              { id: 'show', label: 'Always show', hint: 'all year' },
+              { id: 'hide', label: 'Always hide', hint: 'never' },
+            ].map(opt => {
+              const on = leafButtons === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  aria-pressed={on}
+                  className={on ? 'btn btn-primary' : 'btn btn-secondary'}
+                  style={{ flex: 1, minWidth: '110px', flexDirection: 'column', gap: '0.1rem', justifyContent: 'center', padding: '0.6rem' }}
+                  onClick={() => { saveSettings({ leafButtons: opt.id }); setLeafButtons(opt.id); }}
+                >
+                  <span style={{ fontWeight: 700 }}>{opt.label}</span>
+                  <span style={{ fontSize: '0.72rem', fontWeight: 500, opacity: 0.85 }}>{opt.hint}</span>
+                </button>
+              );
+            })}
+          </div>
+          <p style={{ color: 'var(--color-text-muted)', fontSize: '0.78rem', margin: '0.7rem 0 0' }}>
+            Right now the leaf buttons are <strong>{leafToolsVisible(Date.now(), leafButtons) ? 'showing' : 'hidden'}</strong>.
+          </p>
+        </div>
+
         <div className="glass-card" style={{ padding: '1.5rem' }}>
           <h2 style={{ fontSize: '1.1rem', marginBottom: '0.5rem' }}>Auto-Tracking Preferences</h2>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1.5rem' }}>
@@ -1010,6 +1069,24 @@ export default function Settings() {
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
             <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-primary)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.4.9</h3>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>October 2026</span>
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '1.2rem', color: 'var(--color-text-main)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <li><strong>Leaf Jobs:</strong> Picking up leaves while you mow? Tap 🍂 Leaves on that lawn — before (route list), during (timer) or after (job-complete card, Home, Edit Visit). The job stays one visit, but its time is kept out of your normal mow times, pace and bids. The leaf buttons show Oct 1 – Dec 1 (change it in Settings → General).</li>
+                <li><strong>Leaf Charge Suggestion:</strong> Set an hourly leaf rate in Settings → General and each leaf job shows a suggested charge (the minutes over that lawn's usual mow). It is only a suggestion — nothing is added until you pick Use suggested, another amount, or No charge, on the job-complete card or later in Stats → Leaves.</li>
+                <li><strong>Fall Clean-ups:</strong> Pick Fall Clean-up instead of Mowing and the visit is saved as a clean-up, not a mow. It keeps its flat price unless you choose the hourly figure instead.</li>
+                <li><strong>Faster Service Changes:</strong> Route Builder has a "Today's service" picker, service chips on every stop and "Set all stops to…". Logs has one-tap service chips on each finished visit.</li>
+                <li><strong>Live Page:</strong> The map frames today's stops when there is no GPS fix, the lawn you are on is highlighted in the route list, other stops can't be started mid-job, Skip and Drive are bigger, Force End Route moved to the bottom, and the job-complete card has one Done button.</li>
+                <li><strong>Logs Page:</strong> Customer search, day totals with hours and $/hr (tap a day to fold it), four summary tiles, leaf billing status on each row, bigger text and chips, and "Show last week" when the week is empty.</li>
+                <li><strong>Stats Page:</strong> New Money summary with an 8-week chart, a Leaves tab for leaf billing (jobs to decide first), a simpler bidding matrix, and a leaderboard that opens the customer and shows what price would hit your target. Clean-ups no longer skew the leaderboard.</li>
+                <li><strong>Customer Metrics:</strong> New Stats → Clients tab with a "Needs a look" list (getting slower, under target with drive time, skips, late cuts), a sortable table of every customer and a CSV export. Each customer's Stats tab gets a season scorecard.</li>
+                <li><strong>Tracking Fixes:</strong> A running job now survives a reload, and the app tells you when location is off or tracking is paused.</li>
+              </ul>
+            </div>
+
+            <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-border)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
                 <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.4.8</h3>
                 <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>August 2026</span>

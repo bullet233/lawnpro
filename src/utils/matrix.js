@@ -1,5 +1,6 @@
 import { getSettings } from '../db/settings';
 import { parseLawnSizeToSqFt } from './parseLawnSize';
+import { isLeafVisit } from './leaves';
 
 export { parseLawnSizeToSqFt };
 
@@ -27,7 +28,7 @@ export function calculateTieredMatrix(allVisits, allCustomers) {
   allVisits.forEach(v => {
     if (v.status !== 'completed' || !v.durationSecs || v.durationSecs < 60) return;
     const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id));
-    if (!isMow) return;
+    if (!isMow || isLeafVisit(v)) return; // leaf pickup is not mowing pace
     
     const cust = allCustomers.find(c => c.id === v.customerId);
     if (!cust) return;
@@ -103,7 +104,7 @@ function collectMowPoints(allVisits, allCustomers) {
   allVisits.forEach(v => {
     if (v.status !== 'completed' || !v.durationSecs || v.durationSecs < 60) return;
     const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id));
-    if (!isMow) return;
+    if (!isMow || isLeafVisit(v)) return; // leaf pickup is not mowing pace
     const cust = custById.get(v.customerId);
     if (!cust) return;
     const sqft = parseLawnSizeToSqFt(cust.lawnSize);

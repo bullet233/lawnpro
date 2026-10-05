@@ -31,16 +31,30 @@ export function useJobTimer() {
     return () => clearInterval(interval);
   }, [timerState]);
 
+  // The ref is set alongside the state in every transition: callers read it
+  // synchronously (engine callbacks, persistence) before the effect above runs.
   const startTimer = (startTime = Date.now()) => {
     jobStartRef.current = startTime;
     accumulatedTimeRef.current = 0;
     lastResumeTimeRef.current = startTime;
+    timerStateRef.current = 'running';
     setTimerState('running');
+  };
+
+  // Put a timer back exactly as it was — after an app reload, or when a job
+  // that auto-ended too early picks back up.
+  const restoreTimer = ({ jobStart, accumulatedMs = 0, lastResume = Date.now(), state = 'running' }) => {
+    jobStartRef.current = jobStart;
+    accumulatedTimeRef.current = accumulatedMs;
+    lastResumeTimeRef.current = lastResume;
+    timerStateRef.current = state;
+    setTimerState(state);
   };
 
   const pauseTimer = () => {
     if (timerStateRef.current === 'running') {
       accumulatedTimeRef.current += (Date.now() - lastResumeTimeRef.current);
+      timerStateRef.current = 'paused';
       setTimerState('paused');
     }
   };
@@ -48,6 +62,7 @@ export function useJobTimer() {
   const resumeTimer = () => {
     if (timerStateRef.current === 'paused') {
       lastResumeTimeRef.current = Date.now();
+      timerStateRef.current = 'running';
       setTimerState('running');
     }
   };
@@ -64,6 +79,7 @@ export function useJobTimer() {
     jobStartRef.current = null;
     accumulatedTimeRef.current = 0;
     lastResumeTimeRef.current = null;
+    timerStateRef.current = 'idle';
     setTimerState('idle');
   };
 
@@ -79,6 +95,7 @@ export function useJobTimer() {
     timerState,
     liveDuration,
     startTimer,
+    restoreTimer,
     pauseTimer,
     resumeTimer,
     toggleTimer,

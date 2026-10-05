@@ -540,3 +540,196 @@ describe('live opportunity scan', () => {
     expect(found.at(-1)).toBeNull();
   });
 });
+
+describe('mis-count guards (arrival speed, resume, cancel, pause, restore)', () => {
+  let engine, onEnter, onExit, onDriveBy, onPendingEnter, onPausedAway;
+  const custA = { id: 'a', name: 'A', geofence: [
+    { lat: 40.000, lng: -74.000 }, { lat: 40.010, lng: -74.000 },
+    { lat: 40.010, lng: -73.990 }, { lat: 40.000, lng: -73.990 },
+  ] };
+  const custB = { id: 'b', name: 'B', geofence: [
+    { lat: 40.020, lng: -74.000 }, { lat: 40.030, lng: -74.000 },
+    { lat: 40.030, lng: -73.990 }, { lat: 40.020, lng: -73.990 },
+  ] };
+  const IN_A = { lat: 40.005, lng: -73.995 };
+  const IN_B = { lat: 40.025, lng: -73.995 };
+  const STREET = { lat: 39.9995, lng: -73.995 };   // ~55m south of A
+  const FAR = { lat: 39.998, lng: -73.995 };       // ~222m south of A
+
+  const make = (ctx = {}) => {
+    onEnter = vi.fn(); onExit = vi.fn(); onDriveBy = vi.fn(); onPendingEnter = vi.fn(); onPausedAway = vi.fn();
+    engine = new GeofenceEngine({ onEnter, onExit, onDriveBy, onPendingEnter, onPausedAway });
+    engine.setContext({ routeStops: [custA, custB], ...ctx });
+  };
+  const fix = (loc, timestamp, speed) => engine.updateLocation({ ...loc, timestamp, ...(speed === undefined ? {} : { speed }) });
+  // Park in A at 100000 (job starts, backdated) and dwell to 160000.
+  const parkAtA = () => {
+    fix(IN_A, 100000, 0);
+    fix(IN_A, 108000, 0);
+    fix(IN_A, 130000, 0);
+    fix(IN_A, 160000, 0);
+    expect(engine.activeGeofenceId).toBe('a');
+  };
+
+  it('rolling through a zone never starts a job; parking does', () => {
+    make();
+    // 25 mph through A for 20s — well past the 8s debounce.
+    for (let t = 100000; t <= 120000; t += 2000) fix(IN_A, t, 25);
+    expect(onEnter).not.toHaveBeenCalled();
+    expect(engine.activeGeofenceId).toBe(null);
+    // The truck stops: the next slow fix opens the job, backdated to arrival.
+    fix(IN_A, 122000, 0);
+    expect(onEnter).toHaveBeenCalledWith(custA, 100000);
+  });
+
+  it('unknown speed still arrives (devices that report no speed)', () => {
+    make();
+    fix(IN_A, 100000, null);
+    fix(IN_A, 108000, null);
+    expect(onEnter).toHaveBeenCalledWith(custA, 100000);
+  });
+
+  it('snow profile has no arrival speed gate', () => {
+    make({ profile: DIVISION_PROFILES.snow });
+    fix(IN_A, 100000, 20);
+    fix(IN_A, 108000, 20);
+    expect(engine.activeGeofenceId).toBe('a');
+  });
+
+  it('a premature exit resumes the same job instead of blocking the stop', () => {
+    make();
+    parkAtA();
+    // A speed glitch "drives away": fast exit after the 3s confirm.
+    fix(STREET, 170000, 15);
+    fix(STREET, 173000, 15);
+    expect(onExit).toHaveBeenCalledWith(custA, 70, 170000);
+    // The visit is now logged, so the stop reads completed…
+    engine.setContext({ routeStops: [custA, custB], routeVisits: [{ customerId: 'a', status: 'completed' }], recentlyServicedIds: new Set(['a']) });
+    // …but the truck never moved. Back inside for 8s at parking speed: resume.
+    fix(IN_A, 180000, 0);
+    fix(IN_A, 188000, 0);
+    expect(engine.activeGeofenceId).toBe('a');
+    expect(onEnter).toHaveBeenLastCalledWith(custA, 100000, { resumed: true, reenteredAt: 180000 });
+  });
+
+  it('the resume window closes: a completed stop stays done afterwards', () => {
+    make();
+    parkAtA();
+    fix(STREET, 170000, 15);
+    fix(STREET, 173000, 15);
+    engine.setContext({ routeStops: [custA, custB], routeVisits: [{ customerId: 'a', status: 'completed' }] });
+    // Four minutes later (window is 3) the truck is back in the zone.
+    fix(IN_A, 420000, 0);
+    fix(IN_A, 428000, 0);
+    expect(engine.activeGeofenceId).toBe(null);
+    expect(onEnter).toHaveBeenCalledTimes(1);
+  });
+
+  it('rolling back past the lawn inside the window is not a resume', () => {
+    make();
+    parkAtA();
+    fix(STREET, 170000, 15);
+    fix(STREET, 173000, 15);
+    engine.setContext({ routeStops: [custA, custB], routeVisits: [{ customerId: 'a', status: 'completed' }] });
+    for (let t = 200000; t <= 216000; t += 2000) fix(IN_A, t, 12);
+    expect(engine.activeGeofenceId).toBe(null);
+    expect(onEnter).toHaveBeenCalledTimes(1);
+  });
+
+  it('arriving at the next stop closes the resume window', () => {
+    make();
+    parkAtA();
+    fix(FAR, 170000, 0);
+    fix(FAR, 173000, 0);
+    expect(onExit).toHaveBeenCalledTimes(1);
+    fix(IN_B, 200000, 0);
+    fix(IN_B, 208000, 0);
+    expect(engine.activeGeofenceId).toBe('b');
+    expect(engine.hasOpenResumeWindow(208000)).toBe(false);
+  });
+
+  it('Cancel / Done while still parked does not re-arrive until the truck leaves', () => {
+    make();
+    parkAtA();
+    engine.finishActiveJob();
+    for (let t = 170000; t <= 230000; t += 10000) fix(IN_A, t, 0);
+    expect(engine.activeGeofenceId).toBe(null);
+    expect(onEnter).toHaveBeenCalledTimes(1);
+    // Leave the zone, then come back and park: normal arrival again.
+    fix(FAR, 240000, 0);
+    fix(IN_A, 250000, 0);
+    fix(IN_A, 258000, 0);
+    expect(engine.activeGeofenceId).toBe('a');
+    expect(onEnter).toHaveBeenLastCalledWith(custA, 250000);
+  });
+
+  it('a tapped Done is final — no resume window', () => {
+    make();
+    parkAtA();
+    engine.manualExitJob(170000);
+    expect(engine.hasOpenResumeWindow(171000)).toBe(false);
+  });
+
+  it('forgotten Pause: parking at the next stop takes over after provably leaving', () => {
+    make();
+    parkAtA();
+    engine.setContext({ routeStops: [custA, custB], isJobPaused: true });
+    // Paused jobs never end on departure alone…
+    fix(FAR, 170000, 30);
+    fix(FAR, 190000, 30);
+    expect(engine.activeGeofenceId).toBe('a');
+    expect(onPausedAway).toHaveBeenLastCalledWith(true);
+    // …but parking at B after that drive is a forgotten Pause: B takes over
+    // and A closes out at the last fix that was actually at A.
+    fix(IN_B, 200000, 0);
+    fix(IN_B, 208000, 0);
+    expect(engine.activeGeofenceId).toBe('b');
+    expect(onExit).toHaveBeenCalledWith(custA, 60, 160000);
+    expect(onPausedAway).toHaveBeenLastCalledWith(false);
+  });
+
+  it('manual start: the anchor adds to the fence instead of replacing it', () => {
+    make();
+    // Start tapped ~1.1km north of A's zone (anchor), then the truck drives
+    // into A's own fence — far outside the 150m circle. Must stay active.
+    engine.manualStartJob(custA, 100000, { lat: 40.020, lng: -73.995 });
+    for (let t = 110000; t <= 170000; t += 10000) fix(IN_A, t, 0);
+    expect(engine.activeGeofenceId).toBe('a');
+    expect(onExit).not.toHaveBeenCalled();
+    expect(onDriveBy).not.toHaveBeenCalled();
+  });
+
+  it('manual start while another job runs keeps the new anchor', () => {
+    make();
+    parkAtA();
+    const noFence = { id: 'n', name: 'No fence' };
+    engine.setContext({ routeStops: [custA, custB, noFence] });
+    engine.manualStartJob(noFence, 170000, { lat: 40.005, lng: -73.995 });
+    expect(engine.anchorGeofence).toEqual({ lat: 40.005, lng: -73.995 });
+    fix(IN_A, 180000, 0);
+    fix(IN_A, 200000, 0);
+    expect(engine.activeGeofenceId).toBe('n');
+  });
+
+  it('restored job: still at the lawn → carries on', () => {
+    make();
+    engine.restoreJob({ customer: custA, startTime: 100000, lastAliveTs: 400000 });
+    fix(IN_A, 460000, 0);
+    fix(IN_A, 470000, 0);
+    expect(engine.activeGeofenceId).toBe('a');
+    expect(onExit).not.toHaveBeenCalled();
+    // Later real departure is stamped normally, not at the old heartbeat.
+    fix(FAR, 480000, 0);
+    fix(FAR, 483000, 0);
+    expect(onExit).toHaveBeenCalledWith(custA, 380, 480000);
+  });
+
+  it('restored job: truck already gone → ends where the app was last alive', () => {
+    make();
+    engine.restoreJob({ customer: custA, startTime: 100000, lastAliveTs: 400000 });
+    // App was dead for 10 minutes; first fixes are far from the lawn.
+    fix(FAR, 1000000, 0);
+    fix(FAR, 1003000, 0);
+    expect(onExit).toHaveBeenCalledWith(custA, 300, 400000);
+  });
+});

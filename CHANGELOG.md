@@ -3,6 +3,149 @@
 All notable changes to the app. Everything under **Unreleased** is local only —
 not yet deployed to the tablet (deploy = `npm run deploy` → gh-pages).
 
+## [Unreleased]
+
+## [1.4.9] - 2026-10-04
+
+### Customer service metrics (2026-10-04)
+- New `utils/customerMetrics` (tested): per customer, this calendar year —
+  revenue split by service / leaf charges / add-ons, $/hr per kind of work,
+  $/hr with drive time, share of visits with extras, mow-time trend (last 3
+  plain mows vs earlier), shortest / usual / longest mow, time vs similar-size
+  lawns, days between cuts vs planned, skips and skips in a row, cuts vs
+  planned, and leaf history.
+- **Stats → Clients** tab: "Needs a look" list (each customer with its reasons),
+  a sortable table of every customer, and **Export CSV**.
+- **Customer → Stats**: a season scorecard (Money, Mow time, Service, Leaves)
+  with the same "Needs a look" reasons.
+
+### Stats page rework (2026-10-04)
+- **Fix:** Fall Clean-ups no longer count in the Client Leaderboard (they
+  inflated a lawn's average time and price); leaf jobs were already left out.
+- Page title is **Stats**. New **Money** block at the top of Overview: this
+  week / this month / year so far (revenue, jobs, $/hr) and an 8-week bar chart.
+- Leaf Pickup and Leaf Billing moved to their own **Leaves** tab (mowing mode,
+  only when there is leaf data); Overview shows a one-line "N leaf charges
+  still to decide" link.
+- Leaf Billing lists jobs **to decide** first; decided ones fold under "Done".
+  Summary reads "2 leaf jobs + 1 clean-up".
+- Leaderboard rows open the customer, show the visit count, and under-target
+  lawns show "Raise to $X/visit to reach $Y/hr".
+- Bidding matrix shows one row per size tier (time and price range); tap to
+  list every size, "Graph" for the tier's history.
+- Bigger text and buttons throughout.
+
+### Logs page tidy-up (2026-10-04)
+- Page title is **Logs**, matching the tab.
+- Drive / Job / Total boxes are labelled "What the time is worth at your
+  $X/hr target" (they are time × target rate, not what was charged).
+- Leaf jobs and clean-ups show their billing status on the row ("Leaf charge:
+  not decided · suggested $X", "+$25.00 leaves", "Clean-up price set").
+- Skipped stops no longer show a time range or "$0.00".
+- Bigger text, chips, filter pills and Edit/Delete buttons.
+- Calendar opens on the latest month that has jobs when the shown month is
+  empty; days show leaf-job and clean-up counts.
+- Revenue breakdown names leaf money "Leaf charges" instead of "Other".
+- Customer / address search box above the date pills.
+- Day headers show jobs · hours · revenue · $/hr and fold shut on tap.
+- Summary is four compact tiles (Visits, Revenue, Time in Field, Average
+  $/hr) with the revenue split as chips underneath.
+- Empty ranges say why and offer the nearest one ("Show last week",
+  "Show yesterday", "Show last month", "Show all time").
+
+### Live page tidy-up (2026-10-04)
+- **Force End Route** moved to the bottom of the route list, away from the
+  handle and the first stop.
+- With no GPS fix the map frames today's stops instead of the whole country.
+- The stop being worked is highlighted in the route list ("MOWING NOW").
+- While a job is running, other stops have no Start button (one job at a time).
+- Route-list Skip and Drive buttons are bigger and labelled.
+- Job-complete card: one **Done** button (always saves) plus "Fix time or
+  price"; the duplicate Close button is gone.
+- Route panel header is one line ("Saturday Route · 1 of 4 done") with the
+  finish time large on the right.
+- Timer card: Note is a labelled button; Cancel job sits on its own under the
+  slider.
+
+### Leaf jobs (2026-10-03)
+- Leaves are picked up in the same pass as the mow, so there is one clock. A
+  visit is tagged as a **leaf job** instead (`conditions: ['leaves']`) and
+  kept out of every plain-mowing number: per-lawn usual time, bidding pace and
+  trend curve, slow-lawn flag, short-job check, $/hr leaderboard and profile
+  rate. Leaf time = leaf-visit average minus the lawn's normal mow average.
+- Nothing is tagged by default (not every lawn on a route has leaves). Tag
+  before (🍂 button on the route list and the Next Job card), during (🍂 button
+  on the live timer; survives a reload) or after (Leaf job chip on the
+  job-complete card, Edit Visit).
+- The 🍂 buttons and the Home leaf check only show in leaf season: Settings →
+  General → Leaf Buttons = Auto (Oct 1 – Dec 1, default) / Always show /
+  Always hide. Visibility only — it never tags a visit. Edit Visit's chip and
+  the leaf cards/badges stay available all year.
+- Home "Were these leaf jobs?" card: untagged mows from the
+  last 3 days that ran 30%+ and 5+ min over the lawn's usual time (3+ prior
+  mows). Yes tags it; No stops asking.
+- Leaf billing — the hourly rate is a SUGGESTION, never charged automatically.
+  Settings → General → Leaf Jobs → leaf rate ($/hr). Each leaf job stores
+  `leafSecs` (minutes over the lawn's usual plain mow), `leafSuggested`
+  (leafSecs × rate), `leafCharge` (what was actually charged, inside
+  `priceEarned`) and `leafDecided`. The driver decides — Use suggested / Other
+  amount / No charge — on the job-complete card, in Edit Visit, or later in
+  Analytics → Leaf Billing (month view per customer, shows what is still
+  undecided, Change / Undo). Tagging or untagging a visit refreshes the leaf
+  time and suggestion on that lawn's other leaf jobs (its usual mow moved);
+  charges already decided are never changed. Revenue breakdowns show the
+  charge as its own "Leaves" line. Logs CSV export gained Leaf Job / Leaf
+  Time / Leaf Suggested / Leaf Charged columns. A lawn with no plain mow on
+  record can't be measured (no suggestion; enter leaf time in Edit Visit).
+- Fall Clean-up (leaf-only, no mowing): pick the Fall Clean-up service in place
+  of Mowing on the job-complete card (offered there even when it isn't one of
+  the customer's regular services) or in Edit Visit. The visit is saved as that
+  service at its price — changing services on the card now re-prices the visit,
+  it used to keep the old price. A visit with no mowing service is not a mow
+  (`isMowVisit`): it stays out of the lawn's usual mow time, the leaf-job
+  baseline, the short-job check and the "Were these leaf jobs?" check, and the
+  Leaf job chip is not offered on it.
+- Clean-ups get an hourly suggestion too: whole visit × the leaf rate
+  (`leafSecs` = duration, `leafSuggested`), offered against the flat service
+  price on the job-complete card (Use suggested / Other amount / Keep flat),
+  in Edit Visit, and in Analytics → Leaf Billing, where clean-ups are listed
+  with leaf jobs. The chosen amount replaces the visit's price; the flat price
+  is remembered (`cleanupFlatPrice`) so Undo restores it. CSV "Leaf Job"
+  column reads "Clean-up" for these.
+- Route Builder, faster service changes: (1) each stop row shows its services
+  as one-tap chips (no expanding), including the client's clean-up service
+  even when it isn't a regular one; (2) "Today's service" picker — Each
+  client's usual / Mowing / Fall Clean-up / … — sets what newly added and
+  day-loaded stops come in with; (3) "Set all stops to …" applies it to the
+  stops already on the route. A client without that service keeps their usual
+  one and the row says so. Planned totals now count non-regular services.
+- Only mow + leaves jobs and Fall Clean-ups appear in Leaf Billing. A clean-up
+  is a visit with a clean-up service ('s4', or a service template named
+  "…clean…" / "…leaf…") and no mowing; other non-mowing visits (trim-only) are
+  plain flat-price visits with no suggestion box or clean-up label.
+- Logs: each completed visit's services are one-tap chips (the client's
+  regular services plus their clean-up service). Tapping re-prices the visit
+  from the client's service prices, keeps add-ons, settles leaf / clean-up
+  numbers (`changeVisitServices`), and shows a toast with the old and new
+  price. The last service can't be removed.
+- Fixed: Edit Visit opened from a customer profile dropped job conditions.
+- Customer profile "With leaves" card and 🍂 badge in the visit log; Analytics
+  "Leaf Pickup · Last 6 Months" card.
+- Job-complete card: condition picks no longer reset when the neighbor prompt
+  is dismissed or the job is edited; unticking a condition now saves.
+
+### Tracking / timer fixes (2026-10-03)
+- A job only starts on a fix slower than 6 mph (rolling past no longer
+  arrives; off for snow).
+- A running job survives an app reload (`lawnpro_active_job`, 10s heartbeat).
+- A premature auto-exit can resume the same job within 3 minutes and updates
+  the one visit instead of logging a second.
+- Cancel / Done no longer re-arrive at the same lawn until the truck leaves.
+- Forgotten Pause: banner once the truck has left; the next stop can take over.
+- GPS banners: location denied, and no fixes for 30s during a route or job.
+- Short-visit prompt: "Just passing by" (logs nothing) is now the default.
+- "Check these job times" card: Delete button for drive-pasts.
+
 ## [1.4.8] - 2026-08-20
 
 ### Mis-counted job alert (2026-08-20)

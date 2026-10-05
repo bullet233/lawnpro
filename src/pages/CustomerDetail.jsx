@@ -17,6 +17,10 @@ import { getSettings } from '../db/settings';
 import { trackApiCall } from '../utils/apiTracker';
 import { getDaysSince } from '../utils/dateUtils';
 import { getVisitRevenueBreakdown } from '../utils/revenueUtils';
+import { isLeafVisit, leafSummary } from '../utils/leaves';
+import { computeCustomerMetrics } from '../utils/customerMetrics';
+import { calculatePowerModel } from '../utils/matrix';
+import CustomerScorecard from '../components/CustomerScorecard';
 
 export default function CustomerDetail() {
   const { id } = useParams();
@@ -34,6 +38,17 @@ export default function CustomerDetail() {
   , [id]) || [];
 
   const allCustomers = useLiveQuery(() => db.customers.toArray(), []) || [];
+  // Every visit, for the "vs similar-size lawns" line of the scorecard.
+  const allVisitsForModel = useLiveQuery(() => (isNew ? [] : db.visits.toArray()), [isNew]) || [];
+  const scorecard = useMemo(() => {
+    if (!customer) return null;
+    const s = getSettings();
+    return computeCustomerMetrics(customer, customerVisits, {
+      targetRate: s.targetHourlyRate || 0,
+      defaultServices: s.defaultServices || [],
+      model: calculatePowerModel(allVisitsForModel, allCustomers),
+    });
+  }, [customer, customerVisits, allVisitsForModel, allCustomers]);
   const programs = useLiveQuery(() => db.treatmentPrograms.toArray(), []) || [];
   const customerTreatments = useLiveQuery(() =>
     isNew ? [] : db.treatments.where({ customerId: Number(id) }).toArray()
@@ -238,18 +253,9 @@ export default function CustomerDetail() {
   const handleSaveEditedJob = async (updatedData) => {
     if (!editingJob) return;
     
-    const updateObj = {
-      appliedServices: updatedData.appliedServices,
-      addOns: updatedData.addOns,
-      priceEarned: updatedData.priceEarned,
-      durationSecs: updatedData.durationSecs,
-      driveTimeSecs: updatedData.driveTimeSecs,
-      note: updatedData.note,
-      exitTime: updatedData.exitTime,
-      entryTime: updatedData.entryTime
-    };
-    
-    await db.visits.update(editingJob.id, updateObj);
+    // Everything Edit Visit returns (it used to cherry-pick fields here, which
+    // dropped the conditions — so a Leaf job tick never saved from this page).
+    await db.visits.update(editingJob.id, updatedData);
     setEditingJob(null);
   };
 
@@ -428,7 +434,7 @@ export default function CustomerDetail() {
               // Preserve any add-on revenue so retroactively re-pricing base services
               // doesn't silently erase add-on charges from past visits.
               const addOnTotal = Array.isArray(v.addOns) ? v.addOns.reduce((sum, a) => sum + (a.price || 0), 0) : 0;
-              newPriceEarned += addOnTotal;
+              newPriceEarned += addOnTotal + (v.leafCharge || 0); // and a leaf job's hourly charge
               if (newPriceEarned > 0 && newPriceEarned !== v.priceEarned) {
                 await db.visits.update(v.id, { priceEarned: newPriceEarned });
               }
@@ -775,7 +781,9 @@ export default function CustomerDetail() {
           const mowingServiceIds = globalDefaults.filter(s => s.category === 'Mowing' || s.id === 's1').map(s => s.id);
           const fertServiceIds = globalDefaults.filter(s => s.category === 'Fertilizer' || s.id === 's3').map(s => s.id);
 
-          const mowVisits = sortedByDate.filter(v => !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id)));
+          // 's1' is the built-in Mowing service — counted even when the service
+          // templates were never saved in Settings (same rule as the route ETAs).
+          const mowVisits = sortedByDate.filter(v => !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id) || id === 's1'));
           const fertVisits = sortedByDate.filter(v => v.appliedServices && v.appliedServices.some(id => fertServiceIds.includes(id)));
 
           // Full visit log = completed AND skipped (true history), newest first.
@@ -853,16 +861,22 @@ export default function CustomerDetail() {
           // kept OUT of the headline rate: it's a big, route-dependent variable that
           // would distort a customer's true pace, so it's tracked separately as a
           // helper. This keeps the profile rate consistent with the leaderboard.
-          const totalWorkSecs = completed.reduce((s, v) => s + (v.durationSecs || 0), 0);
-          const totalDriveSecs = completed.reduce((s, v) => s + (v.driveTimeSecs || 0), 0);
-          const avgPerHr = totalWorkSecs > 0 ? (totalRevenue / (totalWorkSecs / 3600)) : 0;
+          // Fall leaf visits run long at (usually) the mow price, so they are
+          // left out of the rate and the mow time here — same as the Analytics
+          // leaderboard — and reported in their own card below.
+          const leaf = leafSummary(mowVisits);
+          const rated = completed.filter(v => !isLeafVisit(v));
+          const ratedRevenue = customerVisits.filter(v => !isLeafVisit(v)).reduce((s, v) => s + (v.priceEarned || 0), 0);
+          const totalWorkSecs = rated.reduce((s, v) => s + (v.durationSecs || 0), 0);
+          const totalDriveSecs = rated.reduce((s, v) => s + (v.driveTimeSecs || 0), 0);
+          const avgPerHr = totalWorkSecs > 0 ? (ratedRevenue / (totalWorkSecs / 3600)) : 0;
           // Helper only — the rate if drive time were folded in. Shown small so you
           // can eyeball how much the commute to this stop is costing you.
-          const avgPerHrWithDrive = (totalWorkSecs + totalDriveSecs) > 0 ? (totalRevenue / ((totalWorkSecs + totalDriveSecs) / 3600)) : 0;
+          const avgPerHrWithDrive = (totalWorkSecs + totalDriveSecs) > 0 ? (ratedRevenue / ((totalWorkSecs + totalDriveSecs) / 3600)) : 0;
 
           // Per-service average times
           const serviceTimeMap = {};
-          completed.forEach(v => {
+          rated.forEach(v => {
             if (!v.appliedServices?.length) return;
             v.appliedServices.forEach(sid => {
               if (!serviceTimeMap[sid]) serviceTimeMap[sid] = { totalSecs: 0, count: 0 };
@@ -882,7 +896,7 @@ export default function CustomerDetail() {
           });
 
           // Overall avg blade & drive time
-          const avgBladeSecs = mowVisits.length > 0 ? mowVisits.reduce((s, v) => s + v.durationSecs, 0) / mowVisits.length : 0;
+          const avgBladeSecs = leaf.mowAvgSecs || 0;
           const avgDriveSecs = visitCount > 0 ? completed.reduce((s, v) => s + (v.driveTimeSecs || 0), 0) / visitCount : 0;
 
           let ehrColor = 'var(--color-primary)';
@@ -936,7 +950,7 @@ export default function CustomerDetail() {
                         <DollarSign size={11} /> Avg $/hr
                       </div>
                       <div style={{ fontSize: '1.4rem', fontWeight: 700, color: ehrColor }}>${avgPerHr.toFixed(2)}</div>
-                      <div style={{ fontSize: '0.68rem', color: 'var(--color-text-muted)', fontWeight: 600, marginTop: '2px' }}>work time only</div>
+                      <div style={{ fontSize: '0.68rem', color: 'var(--color-text-muted)', fontWeight: 600, marginTop: '2px' }}>work time only{leaf.leafCount > 0 ? ' · leaf visits not counted' : ''}</div>
                       {totalDriveSecs > 0 && (
                         <div style={{ fontSize: '0.68rem', color: 'var(--color-text-muted)', fontWeight: 600, marginTop: '1px' }} title="Rate if drive time were counted — shown as a helper, not baked into the rate">
                           ${avgPerHrWithDrive.toFixed(2)}/hr w/ drive
@@ -944,6 +958,46 @@ export default function CustomerDetail() {
                       )}
                     </div>
                   </div>
+
+                  {/* This season's scorecard: money, time, reliability, leaves */}
+                  <CustomerScorecard metrics={scorecard} targetRate={settings?.targetHourlyRate || 0} />
+
+                  {/* Leaf visits — one clock with the mow, so leaf time is the
+                      extra over this lawn's normal mow */}
+                  {leaf.leafCount > 0 && (
+                    <div style={{ background: 'var(--color-bg-main)', padding: '0.8rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)', borderLeft: '4px solid #b45309' }}>
+                      <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--color-text-muted)', marginBottom: '0.3rem' }}>
+                        🍂 With Leaves · {leaf.leafCount} visit{leaf.leafCount === 1 ? '' : 's'}
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.8rem', flexWrap: 'wrap' }}>
+                        <div style={{ fontSize: '1.4rem', fontWeight: 700 }}>{Math.round(leaf.leafAvgSecs / 60)}m</div>
+                        {leaf.extraSecs != null ? (
+                          <div style={{ fontSize: '0.9rem', fontWeight: 700, color: '#b45309' }}>
+                            +{Math.round(leaf.extraSecs / 60)} min over a normal {Math.round(leaf.mowAvgSecs / 60)}m mow
+                          </div>
+                        ) : (
+                          <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>no normal mow on record to compare</div>
+                        )}
+                      </div>
+                      {(() => {
+                        const billedSecs = mowVisits.filter(isLeafVisit).reduce((s, v) => s + (v.leafSecs || 0), 0);
+                        const billed = mowVisits.filter(isLeafVisit).reduce((s, v) => s + (v.leafCharge || 0), 0);
+                        const suggestedTotal = mowVisits.filter(isLeafVisit).reduce((s, v) => s + (v.leafSuggested || 0), 0);
+                        const undecided = mowVisits.filter(v => isLeafVisit(v) && !v.leafDecided).length;
+                        return (
+                          <div style={{ fontSize: '0.8rem', color: 'var(--color-text-main)', fontWeight: 600, marginTop: '0.3rem' }}>
+                            Leaf time: {Math.round(billedSecs / 60)} min · charged ${billed.toFixed(2)} (suggested ${suggestedTotal.toFixed(2)})
+                            {undecided > 0 && <span style={{ color: '#b45309' }}> · {undecided} not decided</span>}
+                          </div>
+                        );
+                      })()}
+                      {leaf.leafRevenue > 0 && (
+                        <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', fontWeight: 600, marginTop: '0.2rem' }}>
+                          ${(leaf.leafRevenue / (leaf.leafSecs / 3600)).toFixed(2)}/hr on leaf visits (mow + leaves)
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Last Mowed */}
                   {lastMowedDate && (
@@ -1112,6 +1166,11 @@ export default function CustomerDetail() {
                                         ${perHr.toFixed(0)}/hr
                                       </span>
                                     )}
+                                    {isLeafVisit(v) && (
+                                      <span style={{ display: 'inline-flex', alignItems: 'center', background: 'rgba(180,83,9,0.1)', border: '1px solid rgba(180,83,9,0.35)', padding: '0.1rem 0.4rem', borderRadius: 'var(--radius-sm)', fontSize: '0.68rem', fontWeight: 700, color: '#b45309' }} title="Leaf visit — not counted in normal mowing times">
+                                        🍂 Leaves
+                                      </span>
+                                    )}
                                   </div>
                                 )}
                               </div>
@@ -1134,7 +1193,7 @@ export default function CustomerDetail() {
                             </div>
                             <div style={{ fontWeight: 700, color: isSkipped ? 'var(--color-text-muted)' : 'var(--color-primary)', flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
                               ${(v.priceEarned || 0).toFixed(0)}
-                              {v.appliedServices?.length > 1 && (() => {
+                              {(v.appliedServices?.length > 1 || v.leafCharge > 0) && (() => {
                                 const breakdown = getVisitRevenueBreakdown(v, customer, settings?.defaultServices);
                                 if (Object.keys(breakdown).length > 1) {
                                   return (

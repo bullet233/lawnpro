@@ -8,6 +8,7 @@
 // scheduler can't use it for instant, offline "hours after this move" math.
 
 import { parseLawnSizeToSqFt } from './matrix';
+import { comparableVisits, isLeafVisit, isMowVisit, mowingServiceIds } from './leaves';
 
 export const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 export const DAY_LETTERS = { Monday: 'M', Tuesday: 'T', Wednesday: 'W', Thursday: 'T', Friday: 'F', Saturday: 'S', Sunday: 'S' };
@@ -94,13 +95,21 @@ export function findSuspectVisits(allVisits, mode, now = Date.now()) {
   d.setHours(0, 0, 0, 0);
   const windowStart = d.getTime() - SUSPECT_WINDOW_DAYS * 86400000;
   const inMode = (v) => !v.division || v.division === mode;
+  const mowIds = mowingServiceIds();
   return (allVisits || [])
     .filter((v) => v.status === 'completed' && inMode(v) && !v.reviewedOk &&
       v.exitTime >= windowStart && v.durationSecs > 0)
     .map((v) => {
-      const prior = allVisits.filter((o) =>
+      // Like against like: a leaf visit is judged by the lawn's leaf visits
+      // (plain mows until it has some), and leaf visits never raise the bar a
+      // plain mow is held to.
+      // Same for mows vs. everything else (a Fall Clean-up is not a slow mow,
+      // and a mow is not a short clean-up).
+      const vIsMow = isMowVisit(v, mowIds);
+      const prior = comparableVisits(allVisits.filter((o) =>
         o.customerId === v.customerId && o.id !== v.id &&
-        o.status === 'completed' && inMode(o) && o.durationSecs > 0);
+        o.status === 'completed' && inMode(o) && o.durationSecs > 0 &&
+        isMowVisit(o, mowIds) === vIsMow), isLeafVisit(v));
       const avgSecs = prior.length > 0
         ? Math.round(prior.reduce((s, o) => s + o.durationSecs, 0) / prior.length)
         : null;

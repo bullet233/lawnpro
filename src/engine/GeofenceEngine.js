@@ -128,10 +128,12 @@ export const findOverlappingCustomers = (fence, customers, selfId = null) => {
 // snow profile disables the speed rule and instead widens the buffer (pushing
 // snow across the street is part of the job) and leans on distance + arriving
 // at the next stop. Snow is pre-tuned for when that division gets built.
+// arrivalMaxMph is the other half of the same idea: a job can only START on a
+// fix at parking speed, so rolling past a fence never opens one (off for snow).
 export const DIVISION_PROFILES = {
-  mowing:     { enterDebounceMs: 8000, exitDebounceMs: 15000, exitBufferMeters: 20, speedExitMph: 10,   distanceExitMeters: 100, fastExitConfirmMs: 3000 },
-  fertilizer: { enterDebounceMs: 8000, exitDebounceMs: 15000, exitBufferMeters: 20, speedExitMph: 10,   distanceExitMeters: 100, fastExitConfirmMs: 3000 },
-  snow:       { enterDebounceMs: 8000, exitDebounceMs: 40000, exitBufferMeters: 50, speedExitMph: null, distanceExitMeters: 150, fastExitConfirmMs: 3000 },
+  mowing:     { enterDebounceMs: 8000, exitDebounceMs: 15000, exitBufferMeters: 20, speedExitMph: 10,   distanceExitMeters: 100, fastExitConfirmMs: 3000, arrivalMaxMph: 6 },
+  fertilizer: { enterDebounceMs: 8000, exitDebounceMs: 15000, exitBufferMeters: 20, speedExitMph: 10,   distanceExitMeters: 100, fastExitConfirmMs: 3000, arrivalMaxMph: 6 },
+  snow:       { enterDebounceMs: 8000, exitDebounceMs: 40000, exitBufferMeters: 50, speedExitMph: null, distanceExitMeters: 150, fastExitConfirmMs: 3000, arrivalMaxMph: null },
 };
 
 export class GeofenceEngine {
@@ -154,6 +156,12 @@ export class GeofenceEngine {
     // fixes rejected for poor accuracy), debounce clocks restart rather than
     // letting a pre-gap blip count the whole gap as elapsed evidence.
     this.gapResetMs = config.gapResetMs || 30000;
+    // A job only starts on a fix slower than this (mph). null = no gate.
+    this.arrivalMaxMph = config.arrivalMaxMph !== undefined ? config.arrivalMaxMph : 6;
+    // After an automatic exit the same stop may pick its job back up for this
+    // long — a premature exit (drift, speed glitch) heals itself instead of
+    // leaving the rest of the mow untracked behind a "completed" visit.
+    this.resumeWindowMs = config.resumeWindowMs ?? 180000;
 
     // Callbacks
     this.onEnter = config.onEnter || (() => {});
@@ -161,6 +169,7 @@ export class GeofenceEngine {
     this.onExit = config.onExit || (() => {});
     this.onDriveBy = config.onDriveBy || (() => {});
     this.onOpportunityFound = config.onOpportunityFound || (() => {});
+    this.onPausedAway = config.onPausedAway || (() => {});
 
     // State
     this.activeGeofenceId = null;
@@ -178,6 +187,16 @@ export class GeofenceEngine {
     this.leftActiveEvidence = false;
 
     this.jobStartTime = null;
+
+    // { id, until, startTime } — the job that just auto-ended and may resume.
+    this.resumable = null;
+    // Stops the driver dismissed by hand (Done / Cancel) while still parked
+    // there: no auto-arrival until the truck has clearly left the zone.
+    this.suppressedIds = new Set();
+    // Set when a job is restored after an app reload: if the truck turns out
+    // to be gone, the job ends at the last moment the app was alive at it.
+    this.exitStampOverride = null;
+    this.pausedAway = false;
 
     // Context Data
     this.routeStops = [];
@@ -219,6 +238,27 @@ export class GeofenceEngine {
     if ('speedExitMph' in p) this.speedExitMph = p.speedExitMph; // null = rule off
     if (p.distanceExitMeters != null) this.distanceExitMeters = p.distanceExitMeters;
     if (p.fastExitConfirmMs != null) this.fastExitConfirmMs = p.fastExitConfirmMs;
+    if ('arrivalMaxMph' in p) this.arrivalMaxMph = p.arrivalMaxMph; // null = gate off
+    if (p.resumeWindowMs != null) this.resumeWindowMs = p.resumeWindowMs;
+  }
+
+  setPausedAway(value) {
+    if (this.pausedAway === value) return;
+    this.pausedAway = value;
+    this.onPausedAway(value);
+  }
+
+  // Is the just-ended job still allowed to pick back up?
+  hasOpenResumeWindow(timestamp = Date.now()) {
+    return !!(this.resumable && timestamp <= this.resumable.until);
+  }
+
+  // Not inside the zone and past its buffer — the truck has really moved on.
+  isClearlyAway(loc, customer) {
+    if (this.checkInsideCustomer(loc, customer)) return false;
+    const fence = customer.geofence;
+    if (!fence || fence.length < 3) return true;
+    return metersToPolygonEdge(loc, fence) > this.exitBufferMeters;
   }
 
   isCustomerCompleted(customerId) {
@@ -226,11 +266,13 @@ export class GeofenceEngine {
   }
 
   checkInsideCustomer(loc, customer) {
-    // Manual anchor override
+    // Manual anchor: the 150m circle around where Start was tapped counts IN
+    // ADDITION to the lawn's own fence — on a big property, driving further in
+    // must not end a manually started job.
     if (this.activeGeofenceId === customer.id && this.anchorGeofence) {
       if (this.anchorGeofence === 'no-gps') return true;
       const d = getDistance(loc.lat, loc.lng, this.anchorGeofence.lat, this.anchorGeofence.lng);
-      return d <= 150;
+      if (d <= 150) return true;
     }
 
     if (customer.geofence && customer.geofence.length > 0) {
@@ -264,15 +306,19 @@ export class GeofenceEngine {
   metersBeyondActive(loc) {
     const customer = this.activeCustomer;
     if (!customer) return 0;
+    let viaAnchor = Infinity;
     if (this.anchorGeofence && this.activeGeofenceId === customer.id) {
       if (this.anchorGeofence === 'no-gps') return 0;
       const d = getDistance(loc.lat, loc.lng, this.anchorGeofence.lat, this.anchorGeofence.lng);
-      return Math.max(0, d - 150);
+      viaAnchor = Math.max(0, d - 150);
     }
+    let viaFence = Infinity;
     const fence = customer.geofence;
-    if (!fence || fence.length < 3) return 0;
-    if (pointInPolygon(loc, fence)) return 0;
-    return metersToPolygonEdge(loc, fence);
+    if (fence && fence.length >= 3) {
+      viaFence = pointInPolygon(loc, fence) ? 0 : metersToPolygonEdge(loc, fence);
+    }
+    const best = Math.min(viaAnchor, viaFence);
+    return best === Infinity ? 0 : best;
   }
 
   updateLocation({ lat, lng, accuracy, speed = null, timestamp = Date.now() }) {
@@ -289,12 +335,26 @@ export class GeofenceEngine {
     const loc = { lat, lng };
     let insideCustomers = [];
 
+    if (this.resumable && timestamp > this.resumable.until) this.resumable = null;
+
+    // A hand-dismissed stop re-arms once the truck has clearly left its zone.
+    for (const id of [...this.suppressedIds]) {
+      const c = this.routeStops.find(s => s.id === id);
+      if (!c || this.isClearlyAway(loc, c)) this.suppressedIds.delete(id);
+    }
+
     // 1. Scan planned route stops first. The active job is scanned even when a
     // visit already exists (a redo of a completed/skipped stop must not get
     // force-exited just because the engine can no longer "see" the customer).
+    // The stop that just auto-ended is scanned too while its resume window is
+    // open, so a premature exit can pick the same job back up.
     for (const customer of this.routeStops) {
-      if (customer.id !== this.activeGeofenceId &&
-          (this.isCustomerCompleted(customer.id) || this.recentlyServicedIds.has(customer.id))) continue;
+      if (customer.id !== this.activeGeofenceId) {
+        if (this.suppressedIds.has(customer.id)) continue;
+        const canResume = this.resumable && this.resumable.id === customer.id;
+        if (!canResume &&
+            (this.isCustomerCompleted(customer.id) || this.recentlyServicedIds.has(customer.id))) continue;
+      }
 
       if (this.checkInsideCustomer(loc, customer)) {
         insideCustomers.push(customer);
@@ -333,13 +393,22 @@ export class GeofenceEngine {
     // both drift exits (a few meters over the line) and neighbor steal when
     // working near a shared/overlapping edge — the neighbor only gets a shot
     // once the fix is clearly beyond the active fence plus buffer.
-    if (this.activeGeofenceId && this.activeCustomer && this.checkNearActiveCustomer(loc)) {
+    const atActive = !!(this.activeGeofenceId && this.activeCustomer && this.checkNearActiveCustomer(loc));
+    if (atActive) {
       insideCustomers = [this.activeCustomer];
       // Settled at the job: remember the moment (honest exit stamps) and clear
       // any leave-proof so a later drift restarts the takeover requirements.
       this.lastAtActiveTs = timestamp;
       this.leftActiveEvidence = false;
+      this.exitStampOverride = null; // restored job confirmed still here
     }
+
+    // A paused job never auto-ends on departure alone, so say so when the
+    // truck is clearly gone — a forgotten Pause is otherwise invisible.
+    this.setPausedAway(!!(
+      this.activeGeofenceId && this.isJobPaused && !atActive &&
+      this.metersBeyondActive(loc) >= (this.distanceExitMeters ?? 100)
+    ));
 
     // 3b. Resolve which customer we are officially inside right now
     let insideCustomer = null;
@@ -378,18 +447,21 @@ export class GeofenceEngine {
           this.onPendingEnter(null, 0);
         }
       } else {
-        // Takeover while a job is running never happens while paused: paused
-        // means "parked here on purpose", not "gone".
-        if (this.activeGeofenceId && this.isJobPaused) {
+        // Driving speed while standing in another stop's zone is leave-proof too.
+        if (this.activeGeofenceId && this.speedExitMph != null && speed != null && speed >= this.speedExitMph) {
+          this.leftActiveEvidence = true;
+        }
+        // A paused job is "parked here on purpose", so drift alone can never
+        // hand it to a neighbor. But parking at ANOTHER stop after provably
+        // leaving is a forgotten Pause — let that stop take over (the paused
+        // job closes out with the time it had), or every later stop on the
+        // route would go untracked.
+        if (this.activeGeofenceId && this.isJobPaused && !this.leftActiveEvidence) {
           if (this.potentialEnter) {
             this.potentialEnter = null;
             this.onPendingEnter(null, 0);
           }
           return;
-        }
-        // Driving speed while standing in another stop's zone is leave-proof too.
-        if (this.activeGeofenceId && this.speedExitMph != null && speed != null && speed >= this.speedExitMph) {
-          this.leftActiveEvidence = true;
         }
         // Takeover fast-lane: with proof we actually left the active job (a fix
         // clearly beyond its buffer, or driving speed), the next stop takes over
@@ -408,14 +480,24 @@ export class GeofenceEngine {
         } else {
           // Update last seen
           this.potentialEnter.lastSeen = timestamp;
+          const rolling = this.arrivalMaxMph != null && speed != null && speed >= this.arrivalMaxMph;
+          const resuming = !!(this.resumable && this.resumable.id === insideCustomer.id);
+          // Picking a just-ended job back up needs the full window at parking
+          // speed — a slow roll back past the lawn is not a resume.
+          if (resuming && rolling) this.potentialEnter.timestamp = timestamp;
+
           const elapsed = timestamp - this.potentialEnter.timestamp;
           const remaining = Math.max(0, Math.ceil((requiredMs - elapsed) / 1000));
           this.onPendingEnter(insideCustomer, remaining);
 
-          if (elapsed >= requiredMs) {
+          // A job only starts on a fix at parking speed: rolling through or
+          // past a zone — however long traffic holds you in it — never opens
+          // one. Unknown speed (null) can't prove motion, so it passes.
+          if (elapsed >= requiredMs && !rolling) {
             // WE HAVE OFFICIALLY ENTERED! The job started when we first hit
             // the zone (potentialEnter), not when the debounce finished.
-            const startedAt = this.potentialEnter.timestamp;
+            const reenteredAt = this.potentialEnter.timestamp;
+            const startedAt = resuming ? this.resumable.startTime : reenteredAt;
             if (this.activeGeofenceId) {
               this.forceExit(timestamp);
             }
@@ -426,8 +508,13 @@ export class GeofenceEngine {
             this.lastAtActiveTs = timestamp;
             this.leftActiveEvidence = false;
             this.potentialEnter = null;
+            this.resumable = null; // a job is running — nothing left to resume
 
-            this.onEnter(insideCustomer, startedAt);
+            if (resuming) {
+              this.onEnter(insideCustomer, startedAt, { resumed: true, reenteredAt });
+            } else {
+              this.onEnter(insideCustomer, startedAt);
+            }
           }
         }
       }
@@ -474,15 +561,17 @@ export class GeofenceEngine {
     }
   }
 
-  forceExit(timestamp = Date.now()) {
+  forceExit(timestamp = Date.now(), { manual = false } = {}) {
     if (!this.activeGeofenceId || !this.jobStartTime) return;
 
     // We exited when the exit clock started (potentialExit). On a takeover —
     // where being inside the next zone kept clearing that clock — fall back to
     // the last fix actually AT this job, so the drive over and the takeover
-    // debounce never count as time on the lawn.
-    const exitTime = this.potentialExit ?? this.lastAtActiveTs ?? timestamp;
-    const durationSecs = Math.max(0, Math.floor((exitTime - this.jobStartTime) / 1000));
+    // debounce never count as time on the lawn. A job restored after a reload
+    // that turns out to be over ends where the app was last alive at it.
+    const exitTime = (manual ? null : this.exitStampOverride) ?? this.potentialExit ?? this.lastAtActiveTs ?? timestamp;
+    const startTime = this.jobStartTime;
+    const durationSecs = Math.max(0, Math.floor((exitTime - startTime) / 1000));
 
     const exitedCustomer = this.activeCustomer;
 
@@ -493,6 +582,12 @@ export class GeofenceEngine {
     this.potentialExit = null;
     this.lastAtActiveTs = null;
     this.leftActiveEvidence = false;
+    this.exitStampOverride = null;
+    this.setPausedAway(false);
+    // Only an automatic exit can have been premature; a tapped Done is final.
+    this.resumable = (!manual && this.resumeWindowMs > 0 && exitedCustomer)
+      ? { id: exitedCustomer.id, until: timestamp + this.resumeWindowMs, startTime }
+      : null;
 
     // Callbacks get the moment the fence was actually left (exitTime), so the
     // caller can end the logged duration there instead of "now" — otherwise
@@ -505,10 +600,16 @@ export class GeofenceEngine {
   }
 
   // To be called when user taps "Done" or "Start Job"
-  manualStartJob(customer, timestamp = Date.now()) {
+  // `anchor` (optional) is where Start was tapped. It is applied AFTER any
+  // running job is closed out — closing a job clears the anchor, which used to
+  // wipe the new job's anchor when Start was tapped mid-job.
+  manualStartJob(customer, timestamp = Date.now(), anchor = undefined) {
     if (this.activeGeofenceId) {
       this.forceExit(timestamp);
     }
+    this.resumable = null;
+    this.suppressedIds.delete(customer.id);
+    if (anchor !== undefined) this.anchorGeofence = anchor;
     this.activeGeofenceId = customer.id;
     this.activeCustomer = customer;
     this.jobStartTime = timestamp;
@@ -521,6 +622,44 @@ export class GeofenceEngine {
 
   manualExitJob(timestamp = Date.now()) {
     this.potentialExit = timestamp; // Ensure the exit time reflects exactly when they tapped
-    this.forceExit(timestamp);
+    this.forceExit(timestamp, { manual: true });
+  }
+
+  // The driver ended the job by hand (Done or Cancel) and the caller does its
+  // own bookkeeping: drop every trace of the job without firing callbacks, and
+  // hold off auto-arrival at this stop until the truck has actually left —
+  // otherwise a Cancel while still parked there restarts the job 8s later.
+  finishActiveJob({ suppress = true } = {}) {
+    const id = this.activeGeofenceId;
+    this.activeGeofenceId = null;
+    this.activeCustomer = null;
+    this.anchorGeofence = null;
+    this.jobStartTime = null;
+    this.potentialEnter = null;
+    this.potentialExit = null;
+    this.lastAtActiveTs = null;
+    this.leftActiveEvidence = false;
+    this.exitStampOverride = null;
+    this.resumable = null;
+    this.setPausedAway(false);
+    this.onPendingEnter(null, 0);
+    if (suppress && id != null) this.suppressedIds.add(id);
+  }
+
+  // Put a job back after an app reload. `lastAliveTs` is the last moment the
+  // app was known to be running at the job; if the first fixes show the truck
+  // already gone, the job ends there rather than at "now".
+  restoreJob({ customer, startTime, lastAliveTs, anchor = null }) {
+    this.activeGeofenceId = customer.id;
+    this.activeCustomer = customer;
+    this.jobStartTime = startTime;
+    this.anchorGeofence = anchor;
+    this.lastAtActiveTs = lastAliveTs ?? startTime;
+    this.exitStampOverride = lastAliveTs ?? null;
+    this.leftActiveEvidence = false;
+    this.potentialEnter = null;
+    this.potentialExit = null;
+    this.resumable = null;
+    this.suppressedIds.delete(customer.id);
   }
 }

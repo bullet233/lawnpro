@@ -1,8 +1,19 @@
+import { LEAF_REVENUE_KEY } from './leaves';
+
+// A leaf job's hourly leaf charge is its own line ("Leaves"), not mowing revenue.
 export function getVisitRevenueBreakdown(visit, customer, defaultServices) {
+  const leaf = visit.leafCharge > 0 ? visit.leafCharge : 0;
+  if (!leaf) return getServiceBreakdown(visit, customer, defaultServices);
+  const services = getServiceBreakdown(
+    { ...visit, priceEarned: Math.max(0, (visit.priceEarned || 0) - leaf) }, customer, defaultServices);
+  return { ...services, [LEAF_REVENUE_KEY]: leaf };
+}
+
+function getServiceBreakdown(visit, customer, defaultServices) {
   if (visit.revenueBreakdown) return visit.revenueBreakdown;
-  
+
   const breakdown = {};
-  
+
   if (!visit.priceEarned) return breakdown;
   
   if (!visit.appliedServices || visit.appliedServices.length === 0) {

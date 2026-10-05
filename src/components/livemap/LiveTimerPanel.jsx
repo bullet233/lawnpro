@@ -4,6 +4,7 @@ import { formatLiveTimer } from '../../utils/dateUtils';
 import SlideToFinish from '../SlideToFinish';
 import CustomerDetailsDropdown from './CustomerDetailsDropdown';
 import { useServiceMode } from '../ServiceProvider';
+import { comparableVisits, isLeafVisit, isMowVisit } from '../../utils/leaves';
 import TodaysMixModal from './TodaysMixModal';
 import { getTodaysMix, peekStopMix, setStopMix, clearStopMix } from '../../utils/todaysMix';
 
@@ -37,6 +38,8 @@ export default function LiveTimerPanel({
   onCancelJob,
   allVisits,
   globalPace,
+  isLeafJob = false,
+  onToggleLeafJob,
 }) {
   const { activeMode } = useServiceMode();
   // Per-lawn product pick: set while still on the property so even a geofence
@@ -51,20 +54,27 @@ export default function LiveTimerPanel({
   const theme = isPaused ? PAUSED : (HERO[activeMode] || HERO.mowing);
 
   // Pace cue: compare the running clock to this customer's average duration.
+  // A job marked as a leaf job is compared with this lawn's leaf visits once
+  // it has any (against a normal mow time it would always read "over").
   let paceCue = null;
+  const leafJob = activeMode === 'mowing' && isLeafJob;
   if (allVisits) {
-    const durs = allVisits
-      .filter(v => v.customerId === activeGeofence.id && v.status === 'completed' && v.durationSecs >= 60)
-      .map(v => v.durationSecs);
+    const compared = comparableVisits(
+      allVisits.filter(v => v.customerId === activeGeofence.id && v.status === 'completed' && v.durationSecs >= 60 &&
+        (activeMode !== 'mowing' || isMowVisit(v))), // a Fall Clean-up is not this lawn's usual mow
+      leafJob
+    );
+    const durs = compared.map(v => v.durationSecs);
     if (durs.length > 0) {
       const avg = durs.reduce((a, b) => a + b, 0) / durs.length;
       const avgMin = Math.round(avg / 60);
       const over = liveDuration > avg + 60;
+      const label = leafJob && isLeafVisit(compared[0]) ? 'leaf avg' : leafJob ? 'mow avg' : 'avg';
       // Neutral "avg ~Xm" until the clock actually passes the average — being
       // "ahead" 30 seconds into a job is noise, not information.
       paceCue = over
-        ? { text: `over ~${avgMin}m avg`, color: PAUSED.soft }
-        : { text: `avg ~${avgMin}m`, color: 'rgba(255,255,255,0.75)' };
+        ? { text: `over ~${avgMin}m ${label}`, color: PAUSED.soft }
+        : { text: `${label} ~${avgMin}m`, color: 'rgba(255,255,255,0.75)' };
     }
   }
 
@@ -105,12 +115,8 @@ export default function LiveTimerPanel({
         </div>
         <div style={{ display: 'flex', gap: '0.1rem', flexShrink: 0 }}>
           <button onClick={() => setShowLiveNoteModal(true)} aria-label="Add note"
-            style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.85)', cursor: 'pointer', padding: '0.4rem' }}>
-            <FileText size={20} />
-          </button>
-          <button onClick={handleCancel} aria-label="Cancel job"
-            style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.85)', cursor: 'pointer', padding: '0.4rem' }}>
-            <X size={20} />
+            style={{ background: 'rgba(255,255,255,0.18)', border: 'none', borderRadius: '999px', color: '#fff', cursor: 'pointer', padding: '0.5rem 0.9rem', minHeight: '40px', fontSize: '0.85rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+            <FileText size={18} /> Note
           </button>
         </div>
       </div>
@@ -127,7 +133,7 @@ export default function LiveTimerPanel({
         <div style={{ minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.72rem', letterSpacing: '1px', fontWeight: 800, color: 'rgba(255,255,255,0.9)' }}>
             <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: isPaused ? PAUSED.soft : theme.soft, display: 'inline-block' }} />
-            {isPaused ? 'TIMER PAUSED' : 'JOB RUNNING'}
+            {isPaused ? 'TIMER PAUSED' : leafJob ? 'JOB RUNNING · 🍂 LEAVES' : 'JOB RUNNING'}
           </div>
           {paceCue && <div style={{ fontSize: '0.75rem', color: paceCue.color, fontWeight: 700, marginTop: '2px' }}>{paceCue.text}</div>}
         </div>
@@ -141,6 +147,28 @@ export default function LiveTimerPanel({
           </div>
         </div>
       </div>
+
+      {/* Leaf job toggle (mowing): one tap any time during the job. The whole
+          job is then logged as a leaf visit, kept out of normal mow times. */}
+      {activeMode === 'mowing' && onToggleLeafJob && (
+        <button
+          onClick={onToggleLeafJob}
+          aria-pressed={isLeafJob}
+          style={{
+            width: '100%', minHeight: '46px', marginBottom: '0.9rem', padding: '0.6rem 0.9rem', cursor: 'pointer',
+            borderRadius: 'var(--radius-md)', textAlign: 'left', fontSize: '0.9rem', fontWeight: 700,
+            display: 'flex', alignItems: 'center', gap: '0.5rem',
+            border: isLeafJob ? '2px solid #fff' : '1px dashed rgba(255,255,255,0.6)',
+            background: isLeafJob ? '#fff' : 'rgba(255,255,255,0.12)',
+            color: isLeafJob ? '#b45309' : '#fff'
+          }}
+        >
+          <span style={{ fontSize: '1.1rem' }}>🍂</span>
+          {isLeafJob
+            ? <span>Leaf job ✓ <span style={{ fontWeight: 500 }}>— tap to undo</span></span>
+            : <span>Picking up leaves? <span style={{ fontWeight: 500 }}>Tap to mark as a leaf job</span></span>}
+        </button>
+      )}
 
       {/* Per-lawn products (fert mode): what will file on exit — this lawn's
           own pick, else the day mix, else a manual log. */}
@@ -186,10 +214,18 @@ export default function LiveTimerPanel({
         />
       )}
 
-      <CustomerDetailsDropdown customer={activeGeofence} allVisits={allVisits} globalPace={globalPace} darkTheme={false} />
+      <CustomerDetailsDropdown customer={activeGeofence} allVisits={allVisits} globalPace={globalPace} darkTheme={false} isLeafJob={leafJob} />
 
       <div style={{ marginTop: '0.9rem' }}>
         <SlideToFinish onComplete={handleManualDone} />
+      </div>
+
+      {/* Cancel lives down here on its own, well away from Note and Pause. */}
+      <div style={{ display: 'flex', justifyContent: 'center', marginTop: '0.5rem' }}>
+        <button onClick={handleCancel} aria-label="Cancel job"
+          style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.8)', cursor: 'pointer', padding: '0.5rem 1rem', minHeight: '40px', fontSize: '0.8rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+          <X size={15} /> Cancel job (don't save)
+        </button>
       </div>
     </div>
   );
