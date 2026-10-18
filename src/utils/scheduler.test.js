@@ -237,6 +237,20 @@ describe('findSuspectVisits', () => {
     expect(findSuspectVisits(all, 'mowing', NOW)).toHaveLength(0);
   });
 
+  it('flags a 0-second copy logged right after a real visit, however old', () => {
+    const old = NOW - 60 * 24 * HOUR;
+    const real = v(401, 4, 1460, { exitTime: old });
+    const copy = v(402, 4, 0, { exitTime: old });
+    const flagged = findSuspectVisits([...history, real, copy], 'mowing', NOW);
+    expect(flagged).toHaveLength(1);
+    expect(flagged[0].visit.id).toBe(402);
+    expect(flagged[0].duplicateOf.id).toBe(401);
+    // a 0-second visit on its own (e.g. a manual entry with no time) is left alone
+    expect(findSuspectVisits([v(403, 5, 0, { exitTime: old })], 'mowing', NOW)).toHaveLength(0);
+    // once marked OK it stays quiet
+    expect(findSuspectVisits([real, { ...copy, reviewedOk: true }], 'mowing', NOW)).toHaveLength(0);
+  });
+
   it('only looks at the recent window', () => {
     const old = v(109, 1, 300, { exitTime: NOW - 5 * 24 * HOUR });
     expect(findSuspectVisits([...history, old], 'mowing', NOW)).toHaveLength(0);

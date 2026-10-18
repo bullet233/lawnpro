@@ -15,12 +15,13 @@ import { enrollCustomer, unenrollCustomer, completeTreatment, skipTreatment, cla
 import { toast } from '../utils/toast';
 import { getSettings } from '../db/settings';
 import { trackApiCall } from '../utils/apiTracker';
-import { getDaysSince } from '../utils/dateUtils';
+import { getDaysSince, parseLocalDate } from '../utils/dateUtils';
 import { getVisitRevenueBreakdown } from '../utils/revenueUtils';
-import { isLeafVisit, leafSummary } from '../utils/leaves';
-import { computeCustomerMetrics } from '../utils/customerMetrics';
+import { isLeafVisit, isCleanupVisit, leafSummary, leafLevelLabel } from '../utils/leaves';
+import { computeCustomerMetrics, visitKind } from '../utils/customerMetrics';
 import { calculatePowerModel } from '../utils/matrix';
 import CustomerScorecard from '../components/CustomerScorecard';
+import { ClientTimeCard } from '../components/ClientTimeCards';
 
 export default function CustomerDetail() {
   const { id } = useParams();
@@ -93,6 +94,22 @@ export default function CustomerDetail() {
   const [visitSort, setVisitSort] = useState('date-desc'); // {field}-{dir} for the visit log
   const [visitFilter, setVisitFilter] = useState('all'); // service-id filter for the visit log
   const [groupByMonth, setGroupByMonth] = useState(false); // group the visit log under month headers
+  // Visit log quick filters — what kind of visit, and which dates. The kind
+  // is remembered on this device (an older "hide skips" choice carries over
+  // as "Completed").
+  const [logKind, setLogKind] = useState(() => {
+    try {
+      return localStorage.getItem('lawnpro_log_kind')
+        || (localStorage.getItem('lawnpro_log_hide_skips') === '1' ? 'completed' : 'all');
+    } catch { return 'all'; }
+  });
+  const pickLogKind = (k) => {
+    setLogKind(k);
+    try { localStorage.setItem('lawnpro_log_kind', k); } catch { /* storage unavailable */ }
+  };
+  const [logRange, setLogRange] = useState('all'); // all | 30d | month | season | custom
+  const [logFrom, setLogFrom] = useState('');
+  const [logTo, setLogTo] = useState('');
   const [loggingTreatment, setLoggingTreatment] = useState(null);
   const [isDirty, setIsDirty] = useState(false);
   const initialDataRef = useRef(null);
@@ -810,7 +827,61 @@ export default function CustomerDetail() {
           const serviceNameFor = (id) => services.find(s => s.id === id)?.name || settings?.defaultServices?.find(s => s.id === id)?.name || id;
           // Guard so switching to a client without the selected service falls back to "all".
           const effectiveFilter = (visitFilter !== 'all' && distinctServiceIds.includes(visitFilter)) ? visitFilter : 'all';
-          const filteredLog = effectiveFilter === 'all' ? logVisits : logVisits.filter(v => svcIdsFor(v).includes(effectiveFilter));
+          const serviceLog = effectiveFilter === 'all' ? logVisits : logVisits.filter(v => svcIdsFor(v).includes(effectiveFilter));
+
+          // Date range.
+          const rangeStart = (() => {
+            const now = new Date();
+            if (logRange === '30d') return Date.now() - 30 * 86400000;
+            if (logRange === 'month') return new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+            if (logRange === 'season') return new Date(now.getFullYear(), 0, 1).getTime();
+            if (logRange === 'custom' && logFrom) return parseLocalDate(logFrom).getTime();
+            return -Infinity;
+          })();
+          const rangeEnd = logRange === 'custom' && logTo ? parseLocalDate(logTo).getTime() + 86400000 - 1 : Infinity;
+          const rangedLog = serviceLog.filter(v => { const t = v.exitTime || v.entryTime || 0; return t >= rangeStart && t <= rangeEnd; });
+
+          // What's off about a visit — the only rows that get colour. A job is
+          // slow when it ran 30%+ (and 5+ min) over this lawn's usual time for
+          // that kind of work.
+          const usualByKind = Object.fromEntries((scorecard?.timeByKind || []).filter(k => k.visits >= 3).map(k => [k.key, k.usualMins]));
+          const kindKeyOf = (v) => {
+            const k = visitKind(v);
+            return k === 'other' ? `other:${[...(v.appliedServices || [])].sort().join('+')}` : k;
+          };
+          const issuesFor = (v) => {
+            if (v.status === 'skipped') return [];
+            const out = [];
+            const usual = usualByKind[kindKeyOf(v)];
+            const mins = (v.durationSecs || 0) / 60;
+            if (usual && mins >= usual * 1.3 && mins - usual >= 5) out.push({ key: 'slow', text: `Slow: ${Math.round(mins)} min vs usual ${Math.round(usual)}` });
+            const s = (v.durationSecs || 0) + (v.driveTimeSecs || 0);
+            const rate = s > 0 ? (v.priceEarned || 0) / (s / 3600) : 0;
+            // The underpaid line, not the target: a third of real visits sit
+            // under the $100 target once drive time counts, which would colour
+            // most of the log.
+            const low = settings?.rateUnderpaidThreshold;
+            if (low && rate > 0 && rate < low) out.push({ key: 'rate', text: `$${Math.round(rate)}/hr — under your $${low}/hr underpaid line` });
+            const g = gapById[v.id];
+            const iv = isFertVisit(v) ? (formData.fertilizerInterval || 30) : (formData.mowingInterval || 7);
+            if (g != null && g > iv + 2) out.push({ key: 'gap', text: `${g} days since the last visit (plan: every ${iv})` });
+            if ((isLeafVisit(v) || isCleanupVisit(v)) && !v.leafDecided) out.push({ key: 'leaf', text: isCleanupVisit(v) ? 'Clean-up price not decided' : 'Leaf charge not decided' });
+            return out;
+          };
+
+          // Kind of visit.
+          const KIND_TESTS = {
+            completed: v => v.status === 'completed',
+            skipped: v => v.status === 'skipped',
+            leaf: v => v.status === 'completed' && isLeafVisit(v),
+            cleanup: v => v.status === 'completed' && isCleanupVisit(v),
+            notes: v => !!(v.note && v.note.trim()),
+            slow: v => issuesFor(v).some(i => i.key === 'slow'),
+          };
+          const kindCounts = Object.fromEntries(Object.entries(KIND_TESTS).map(([k, t]) => [k, rangedLog.filter(t).length]));
+          // A remembered filter this client has nothing for falls back to All.
+          const effectiveKind = logKind !== 'all' && kindCounts[logKind] > 0 ? logKind : 'all';
+          const filteredLog = effectiveKind === 'all' ? rangedLog : rangedLog.filter(KIND_TESTS[effectiveKind]);
 
           // Display sort (gap chips are computed from chronological order, unaffected).
           const [sortField, sortDir] = visitSort.split('-');
@@ -962,6 +1033,9 @@ export default function CustomerDetail() {
                   {/* This season's scorecard: money, time, reliability, leaves */}
                   <CustomerScorecard metrics={scorecard} targetRate={settings?.targetHourlyRate || 0} />
 
+                  {/* Job times by kind of work, and month by month */}
+                  {scorecard?.timeByKind?.length > 0 && <ClientTimeCard m={scorecard} showName={false} />}
+
                   {/* Leaf visits — one clock with the mow, so leaf time is the
                       extra over this lawn's normal mow */}
                   {leaf.leafCount > 0 && (
@@ -1065,10 +1139,11 @@ export default function CustomerDetail() {
                           // metric above (which counts only completed jobs). The log
                           // also lists skipped visits, so a bare total looked wrong
                           // (e.g. "# Visits 8" but "Visit Log (9)").
-                          const doneN = filteredLog.filter(v => v.status === 'completed').length;
-                          const skipN = filteredLog.filter(v => v.status === 'skipped').length;
+                          const doneN = serviceLog.filter(v => v.status === 'completed').length;
+                          const skipN = serviceLog.filter(v => v.status === 'skipped').length;
+                          const filtered = filteredLog.length !== serviceLog.length;
                           return (
-                            <>Visit Log <span style={{ opacity: 0.6 }}>({doneN} completed{skipN > 0 ? ` · ${skipN} skipped` : ''})</span></>
+                            <>Visit Log <span style={{ opacity: 0.6 }}>({doneN} completed{skipN > 0 ? ` · ${skipN} skipped` : ''}{filtered ? ` · showing ${filteredLog.length}` : ''})</span></>
                           );
                         })()}
                       </div>
@@ -1093,13 +1168,45 @@ export default function CustomerDetail() {
                         })}
                       </div>
                     )}
+                    {/* Quick filters: kind of visit, then dates */}
+                    {serviceLog.length > 0 && (() => {
+                      const chip = (active, onClick, label, key) => (
+                        <button key={key} onClick={onClick} aria-pressed={active}
+                          style={{ padding: '0.45rem 0.9rem', minHeight: '42px', fontSize: '0.9rem', fontWeight: 700, borderRadius: '999px', cursor: 'pointer', whiteSpace: 'nowrap',
+                            border: active ? '1px solid var(--color-primary)' : '1px solid var(--color-border)',
+                            background: active ? 'rgba(16,185,129,0.12)' : 'var(--color-bg-main)',
+                            color: active ? 'var(--color-primary)' : 'var(--color-text-muted)' }}>
+                          {label}
+                        </button>
+                      );
+                      const KINDS = [['completed', 'Completed'], ['skipped', 'Skipped'], ['leaf', '🍂 Leaf jobs'], ['cleanup', 'Clean-ups'], ['notes', 'Has notes'], ['slow', 'Slow jobs']];
+                      const RANGES = [['all', 'All time'], ['30d', 'Last 30 days'], ['month', 'This month'], ['season', 'This season'], ['custom', 'Custom']];
+                      return (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '0.7rem' }}>
+                          <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                            {chip(effectiveKind === 'all', () => pickLogKind('all'), 'All', 'all')}
+                            {KINDS.filter(([k]) => kindCounts[k] > 0).map(([k, label]) => chip(effectiveKind === k, () => pickLogKind(k), `${label} (${kindCounts[k]})`, k))}
+                          </div>
+                          <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                            {RANGES.map(([k, label]) => chip(logRange === k, () => setLogRange(k), label, k))}
+                            {logRange === 'custom' && (
+                              <>
+                                <input type="date" className="input-field" aria-label="From" value={logFrom} onChange={e => setLogFrom(e.target.value)} style={{ width: 'auto', minHeight: '42px', fontSize: '0.95rem' }} />
+                                <span style={{ color: 'var(--color-text-muted)', fontWeight: 600 }}>to</span>
+                                <input type="date" className="input-field" aria-label="To" value={logTo} onChange={e => setLogTo(e.target.value)} style={{ width: 'auto', minHeight: '42px', fontSize: '0.95rem' }} />
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
                     {filteredLog.length > 1 && (
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.7rem', flexWrap: 'wrap' }}>
                         {!groupByMonth && (
                           <>
-                            <span style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Sort</span>
+                            <span style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Sort</span>
                             <select value={visitSort} onChange={e => setVisitSort(e.target.value)} className="input-field"
-                              style={{ padding: '0.3rem 0.5rem', fontSize: '0.78rem', width: 'auto' }}>
+                              style={{ padding: '0.45rem 0.6rem', minHeight: '42px', fontSize: '0.95rem', width: 'auto' }}>
                               <option value="date-desc">Newest first</option>
                               <option value="date-asc">Oldest first</option>
                               <option value="price-desc">Highest $</option>
@@ -1112,7 +1219,7 @@ export default function CustomerDetail() {
                           </>
                         )}
                         <button onClick={() => setGroupByMonth(!groupByMonth)}
-                          style={{ padding: '0.3rem 0.7rem', fontSize: '0.75rem', fontWeight: 600, borderRadius: '999px', cursor: 'pointer',
+                          style={{ padding: '0.45rem 0.9rem', minHeight: '42px', fontSize: '0.9rem', fontWeight: 700, borderRadius: '999px', cursor: 'pointer',
                             border: groupByMonth ? '1px solid var(--color-primary)' : '1px solid var(--color-border)',
                             background: groupByMonth ? 'rgba(16,185,129,0.1)' : 'var(--color-bg-main)',
                             color: groupByMonth ? 'var(--color-primary)' : 'var(--color-text-muted)' }}>
@@ -1120,12 +1227,17 @@ export default function CustomerDetail() {
                         </button>
                       </div>
                     )}
+                    {serviceLog.length > 0 && filteredLog.length === 0 && (
+                      <div style={{ padding: '1rem', textAlign: 'center', border: '1px dashed var(--color-border)', borderRadius: 'var(--radius-sm)', color: 'var(--color-text-muted)', fontSize: '0.95rem' }}>
+                        No visits in this date range.
+                      </div>
+                    )}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', maxHeight: (showAllVisits || groupByMonth) ? '620px' : '340px', overflowY: 'auto' }}>
                       {displayItems.map((item) => {
                         if (item.__header) return (
                           <div key={item.key} style={{ position: 'sticky', top: 0, zIndex: 1, background: 'var(--color-bg-card)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.4rem 0.2rem 0.35rem', borderTop: '1px solid var(--color-border)', marginTop: '0.2rem' }}>
-                            <span style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--color-text-main)' }}>{item.label}</span>
-                            <span style={{ fontSize: '0.72rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>{item.count} visit{item.count !== 1 ? 's' : ''} · ${item.revenue.toFixed(0)}</span>
+                            <span style={{ fontSize: '1rem', fontWeight: 800, color: 'var(--color-text-main)' }}>{item.label}</span>
+                            <span style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>{item.count} visit{item.count !== 1 ? 's' : ''} · ${item.revenue.toFixed(0)}</span>
                           </div>
                         );
                         const v = item;
@@ -1135,69 +1247,85 @@ export default function CustomerDetail() {
                         const perHr = secs > 0 ? (v.priceEarned || 0) / (secs / 3600) : 0;
                         const gap = gapById[v.id];
                         const interval = isFertVisit(v) ? (formData.fertilizerInterval || 30) : (formData.mowingInterval || 7);
-                        const gapColor = gap == null ? null : gap > interval * 1.6 ? '#ef4444' : gap > interval + 2 ? '#f59e0b' : 'var(--color-text-muted)';
+                        const gapColor = gap == null ? null : gap > interval * 1.6 ? '#b91c1c' : gap > interval + 2 ? '#b45309' : 'var(--color-text-muted)';
                         const hasEpa = !!v.complianceLog;
+                        // Colour only where it matters: a plain row unless something is off.
+                        const issues = issuesFor(v);
+                        const flagged = issues.length > 0;
+                        const rateOff = issues.some(i => i.key === 'rate');
+                        const chipStyle = { display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', padding: '0.2rem 0.55rem', borderRadius: 'var(--radius-sm)', fontSize: '0.85rem', fontWeight: 600 };
+                        const chipLabel = { fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.5px', opacity: 0.8 };
 
                         return (
-                          <div key={v.id} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.6rem', padding: '0.6rem 0.7rem', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)', fontSize: '0.8rem', opacity: isSkipped ? 0.7 : 1 }}>
-                            <div style={{ width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0, marginTop: '0.35rem', background: v.status === 'completed' ? 'var(--color-primary)' : '#ef4444' }} />
+                          <div key={v.id} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.7rem', padding: '0.8rem 0.9rem', borderRadius: 'var(--radius-sm)', fontSize: '1rem',
+                            background: flagged ? 'rgba(245,158,11,0.07)' : 'var(--color-bg-main)',
+                            border: '1px solid var(--color-border)',
+                            borderLeft: flagged ? '4px solid #b45309' : isSkipped ? '4px solid var(--color-border)' : '1px solid var(--color-border)',
+                            opacity: isSkipped ? 0.75 : 1 }}>
                             <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontWeight: 600, color: 'var(--color-text-main)', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                                <span>{v.exitTime ? new Date(v.exitTime).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}</span>
+                              <div style={{ fontWeight: 700, color: 'var(--color-text-main)', display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+                                <span style={{ fontSize: '1.05rem' }}>{v.exitTime ? new Date(v.exitTime).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}</span>
                                 {gap != null && (
-                                  <span style={{ fontSize: '0.65rem', fontWeight: 600, color: gapColor }} title={`${gap} days since previous ${isFertVisit(v) ? 'fertilizer' : 'mow'} visit`}>
+                                  <span style={{ fontSize: '0.85rem', fontWeight: 600, color: gapColor }} title={`${gap} days since previous ${isFertVisit(v) ? 'fertilizer' : 'mow'} visit`}>
                                     +{gap}d
                                   </span>
                                 )}
                                 {isSkipped ? (
-                                  <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#ef4444', background: 'rgba(239,68,68,0.1)', padding: '0.1rem 0.4rem', borderRadius: 'var(--radius-sm)' }}>SKIPPED</span>
+                                  <span style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--color-text-muted)', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', padding: '0.15rem 0.5rem', borderRadius: 'var(--radius-sm)' }}>SKIPPED</span>
                                 ) : (
-                                  <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
-                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', padding: '0.1rem 0.4rem', borderRadius: 'var(--radius-sm)', fontSize: '0.68rem', fontWeight: 600 }} title="Drive Time">
-                                      <span style={{ fontSize: '0.58rem', textTransform: 'uppercase', letterSpacing: '0.5px', opacity: 0.8 }}>Drive</span>
+                                  <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                    <span style={chipStyle} title="Drive Time">
+                                      <span style={chipLabel}>Drive</span>
                                       <span style={{ color: 'var(--color-text-main)', fontWeight: 700 }}>{Math.round((v.driveTimeSecs || 0) / 60)}m</span>
                                     </span>
-                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', padding: '0.1rem 0.4rem', borderRadius: 'var(--radius-sm)', fontSize: '0.68rem', fontWeight: 600 }} title="Job Time">
-                                      <span style={{ fontSize: '0.58rem', textTransform: 'uppercase', letterSpacing: '0.5px', opacity: 0.8 }}>Job</span>
-                                      <span style={{ color: 'var(--color-text-main)', fontWeight: 700 }}>{Math.round((v.durationSecs || 0) / 60)}m</span>
+                                    <span style={{ ...chipStyle, ...(issues.some(i => i.key === 'slow') ? { borderColor: '#b45309', color: '#b45309' } : {}) }} title="Job Time">
+                                      <span style={chipLabel}>Job</span>
+                                      <span style={{ fontWeight: 700 }}>{Math.round((v.durationSecs || 0) / 60)}m</span>
                                     </span>
                                     {perHr > 0 && (
-                                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', padding: '0.1rem 0.4rem', borderRadius: 'var(--radius-sm)', fontSize: '0.68rem', fontWeight: 700, color: settings && perHr < settings.rateUnderpaidThreshold ? '#ef4444' : settings && perHr < settings.targetHourlyRate ? '#f59e0b' : 'var(--color-primary)' }} title="Effective rate (job + drive)">
+                                      <span style={{ ...chipStyle, fontWeight: 700, color: rateOff ? '#b45309' : 'var(--color-text-main)', ...(rateOff ? { borderColor: '#b45309' } : {}) }} title="Effective rate (job + drive)">
                                         ${perHr.toFixed(0)}/hr
                                       </span>
                                     )}
                                     {isLeafVisit(v) && (
-                                      <span style={{ display: 'inline-flex', alignItems: 'center', background: 'rgba(180,83,9,0.1)', border: '1px solid rgba(180,83,9,0.35)', padding: '0.1rem 0.4rem', borderRadius: 'var(--radius-sm)', fontSize: '0.68rem', fontWeight: 700, color: '#b45309' }} title="Leaf visit — not counted in normal mowing times">
-                                        🍂 Leaves
+                                      <span style={{ ...chipStyle, background: 'rgba(180,83,9,0.08)', borderColor: 'rgba(180,83,9,0.35)', color: '#b45309', fontWeight: 700 }} title="Leaf visit — not counted in normal mowing times">
+                                        🍂 {leafLevelLabel(v.leafLevel) ? `${leafLevelLabel(v.leafLevel)} leaves` : 'Leaves'}
                                       </span>
                                     )}
                                   </div>
                                 )}
                               </div>
                               {(svcNames.length > 0 || hasEpa) && (
-                                <div style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', marginTop: '0.2rem', display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', marginTop: '0.3rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                                   {svcNames.length > 0 && <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{svcNames.join(', ')}</span>}
                                   {hasEpa && (
                                     <button onClick={() => navigate(`/print-epa/${v.id}`)} title="View / print EPA compliance log"
-                                      style={{ fontSize: '0.62rem', fontWeight: 700, color: '#0ea5e9', background: 'rgba(14,165,233,0.1)', border: '1px solid rgba(14,165,233,0.3)', borderRadius: 'var(--radius-sm)', padding: '0.05rem 0.35rem', cursor: 'pointer', flexShrink: 0 }}>
+                                      style={{ fontSize: '0.8rem', fontWeight: 700, color: '#0ea5e9', background: 'rgba(14,165,233,0.1)', border: '1px solid rgba(14,165,233,0.3)', borderRadius: 'var(--radius-sm)', padding: '0.2rem 0.5rem', minHeight: '32px', cursor: 'pointer', flexShrink: 0 }}>
                                       🧪 EPA log
                                     </button>
                                   )}
                                 </div>
                               )}
+                              {flagged && (
+                                <div style={{ marginTop: '0.35rem', display: 'flex', flexDirection: 'column', gap: '0.1rem' }}>
+                                  {issues.map(i => (
+                                    <div key={i.key} style={{ fontSize: '0.88rem', fontWeight: 700, color: '#b45309' }}>• {i.text}</div>
+                                  ))}
+                                </div>
+                              )}
                               {v.note && v.note.trim() && (
-                                <div style={{ fontSize: '0.72rem', color: 'var(--color-text-main)', fontStyle: 'italic', marginTop: '0.35rem', background: 'var(--color-bg-card)', borderLeft: '3px solid #f59e0b', padding: '0.35rem 0.5rem', borderRadius: '4px' }}>
+                                <div style={{ fontSize: '0.92rem', color: 'var(--color-text-main)', fontStyle: 'italic', marginTop: '0.4rem', background: 'var(--color-bg-card)', borderLeft: '3px solid var(--color-border)', padding: '0.4rem 0.6rem', borderRadius: '4px' }}>
                                   “{v.note}”
                                 </div>
                               )}
                             </div>
-                            <div style={{ fontWeight: 700, color: isSkipped ? 'var(--color-text-muted)' : 'var(--color-primary)', flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                            <div style={{ fontWeight: 800, fontSize: '1.15rem', color: isSkipped ? 'var(--color-text-muted)' : 'var(--color-text-main)', flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
                               ${(v.priceEarned || 0).toFixed(0)}
                               {(v.appliedServices?.length > 1 || v.leafCharge > 0) && (() => {
                                 const breakdown = getVisitRevenueBreakdown(v, customer, settings?.defaultServices);
                                 if (Object.keys(breakdown).length > 1) {
                                   return (
-                                    <div style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', fontWeight: 600, marginTop: '0.1rem', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.1rem' }}>
+                                    <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: 600, marginTop: '0.15rem', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.1rem' }}>
                                       {Object.entries(breakdown).map(([sid, amt]) => {
                                         const sName = customer?.services?.find(s => s.id === sid)?.name || settings?.defaultServices?.find(s => s.id === sid)?.name || sid;
                                         return <div key={sid}>{sName}: ${amt.toFixed(0)}</div>;
@@ -1210,11 +1338,12 @@ export default function CustomerDetail() {
                             </div>
                             <button
                               className="btn btn-secondary"
-                              style={{ padding: '0.3rem', flexShrink: 0, marginLeft: '0.2rem', color: 'var(--color-text-muted)' }}
+                              style={{ width: '44px', height: '44px', padding: 0, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--color-text-muted)' }}
                               onClick={() => setEditingJob(v)}
                               title="Edit Visit"
+                              aria-label="Edit visit"
                             >
-                              <Edit2 size={14} />
+                              <Edit2 size={18} />
                             </button>
                           </div>
                         );

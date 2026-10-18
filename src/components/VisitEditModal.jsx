@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Save, X, CheckCircle } from 'lucide-react';
-import { LEAF_CONDITION, computeLeafBilling, computeCleanupSuggestion, isCleanupVisit } from '../utils/leaves';
+import { LEAF_CONDITION, LEAF_LEVELS, computeLeafBilling, computeCleanupSuggestion, isCleanupVisit } from '../utils/leaves';
 import { leafHourlyRate, usualMowSecs, syncLeafBilling } from '../utils/leafBilling';
 
 // Formats a Date object to "HH:MM" for input type="time"
@@ -49,6 +49,7 @@ const VisitEditModal = ({ job, customer, defaultServices, onClose, onSave }) => 
   // can't also be a leaf job.
   const isCleanup = isCleanupVisit({ division: job?.division, appliedServices: editingServices });
   const isLeafJob = !isCleanup && editingConditions.includes(LEAF_CONDITION);
+  const [editingLeafLevel, setEditingLeafLevel] = useState(job?.leafLevel ?? null);
   const round2 = (n) => Math.round(n * 100) / 100;
   const cleanupSuggested = isCleanup
     ? computeCleanupSuggestion((parseInt(editingDuration) || 0) * 60, leafRate).leafCharge
@@ -59,6 +60,7 @@ const VisitEditModal = ({ job, customer, defaultServices, onClose, onSave }) => 
     if (!job) return;
     const wasLeafJob = Array.isArray(job.conditions) && job.conditions.includes(LEAF_CONDITION);
     setEditingLeafMins(wasLeafJob && job.leafSecs != null ? String(Math.round(job.leafSecs / 60)) : '');
+    setEditingLeafLevel(job.leafLevel ?? null);
     setEditingLeafCharge(job.leafDecided ? String(job.leafCharge || 0) : '');
     setLeafMinsTyped(false);
     let alive = true;
@@ -222,6 +224,7 @@ const VisitEditModal = ({ job, customer, defaultServices, onClose, onSave }) => 
     updates.leafSuggested = isLeafJob ? leafSuggested : 0;
     updates.cleanupFlatPrice = undefined; // the price was set by hand here
     updates.leafSecsManual = isLeafJob && (leafMinsTyped || !!job.leafSecsManual);
+    updates.leafLevel = isLeafJob ? editingLeafLevel : null;
 
     // Construct new service details breakdown (services only — the leaf
     // charge is its own line, added by getVisitRevenueBreakdown)
@@ -394,6 +397,21 @@ const VisitEditModal = ({ job, customer, defaultServices, onClose, onSave }) => 
           </div>
         )}
 
+        {isLeafJob && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap', marginBottom: '0.8rem' }}>
+            <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#b45309' }}>How heavy?</span>
+            {LEAF_LEVELS.map(l => {
+              const on = editingLeafLevel === l.id;
+              return (
+                <button key={l.id} type="button" aria-pressed={on} onClick={() => setEditingLeafLevel(on ? null : l.id)}
+                  style={{ minHeight: '40px', padding: '0.4rem 0.9rem', borderRadius: '999px', cursor: 'pointer', fontSize: '0.88rem', fontWeight: 700,
+                    border: `1px solid ${on ? '#b45309' : 'var(--color-border)'}`, background: on ? 'rgba(180,83,9,0.14)' : 'transparent', color: on ? '#b45309' : 'var(--color-text-main)' }}>
+                  {l.label}
+                </button>
+              );
+            })}
+          </div>
+        )}
         {isLeafJob && (
           <div style={{ marginTop: '-0.7rem', marginBottom: '1.5rem', padding: '0.8rem', borderRadius: 'var(--radius-sm)', border: '1px solid rgba(180,83,9,0.35)', borderLeft: '4px solid #b45309', background: 'rgba(180,83,9,0.06)' }}>
             <div style={{ fontSize: '0.78rem', fontWeight: 700, color: '#b45309', textTransform: 'uppercase', marginBottom: '0.5rem' }}>🍂 Leaf billing</div>

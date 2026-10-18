@@ -23,6 +23,7 @@ function Row({ name, children, color }) {
 export default function CustomerScorecard({ metrics: m, targetRate = 0 }) {
   if (!m || (m.visits === 0 && m.skipCount === 0)) return null;
   const year = new Date().getFullYear();
+  const has = (key) => m.flags.some((f) => f.key === key);
   const under = (r) => targetRate > 0 && r != null && r < targetRate;
   const trendText = !m.trend ? 'Needs 5 mows'
     : m.trend.direction === 'steady' ? `Steady · ${mins(m.trend.recentMins)}`
@@ -81,14 +82,14 @@ export default function CustomerScorecard({ metrics: m, targetRate = 0 }) {
         {/* Reliability */}
         <div style={card}>
           <div style={title}>Service · {year}</div>
-          <Row name="Days between cuts" color={m.cadence && m.cadence.avgDays > m.plannedDays * 1.3 ? AMBER : undefined}>
+          <Row name="Days between cuts" color={has('cadence') ? AMBER : undefined}>
             {m.cadence ? `${m.cadence.avgDays.toFixed(1)} · planned ${m.plannedDays}` : `— · planned ${m.plannedDays}`}
           </Row>
-          <Row name="Cuts vs planned" color={m.cutsVsExpected?.missed >= 2 ? AMBER : undefined}>
+          <Row name="Cuts vs planned" color={has('missed') ? AMBER : undefined}>
             {m.cutsVsExpected ? `${m.cutsVsExpected.actual} of ${m.cutsVsExpected.expected}` : '—'}
           </Row>
-          <Row name="Skips" color={m.skipStreak >= 2 || m.skipCount >= 3 ? AMBER : undefined}>
-            {m.skipCount}{m.skipStreak >= 2 ? ` · ${m.skipStreak} in a row` : ''}
+          <Row name="Skips" color={has('skips') ? AMBER : undefined}>
+            {m.skipCount} this season{m.skipStreak >= 2 ? ` · ${m.skipStreak} in a row` : m.recentSkips ? ` · ${m.recentSkips} in last 30 days` : ''}
           </Row>
         </div>
 
@@ -97,6 +98,9 @@ export default function CustomerScorecard({ metrics: m, targetRate = 0 }) {
           <div style={{ ...card, borderLeft: `4px solid ${AMBER}` }}>
             <div style={title}>🍂 Leaves · {year}</div>
             <Row name="Leaf jobs">{m.leaf.jobs}</Row>
+            {Object.keys(m.leaf.byLevel || {}).length > 0 && (
+              <Row name="How heavy">{['light', 'medium', 'heavy'].filter(k => m.leaf.byLevel[k]).map(k => `${m.leaf.byLevel[k]} ${k}`).join(' · ')}</Row>
+            )}
             {m.leaf.jobs > 0 && <Row name="Avg leaf time">{m.leaf.avgLeafMins != null ? mins(m.leaf.avgLeafMins) : '—'}</Row>}
             {m.leaf.jobs > 0 && <Row name="Charged / suggested">{dollars(m.leaf.charged, 2)} / {dollars(m.leaf.suggested, 2)}</Row>}
             <Row name="Clean-ups">{m.leaf.cleanups}{m.leaf.cleanups > 0 ? ` · ${dollars(m.leaf.cleanupRevenue, 2)}` : ''}</Row>

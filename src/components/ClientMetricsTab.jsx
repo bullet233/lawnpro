@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowUp, ArrowDown } from 'lucide-react';
-import { buildCustomerMetrics, METRICS_CSV_HEADERS, metricsCsvRow } from '../utils/customerMetrics';
+import { buildCustomerMetrics, METRICS_CSV_HEADERS, metricsCsvRow, seasonCurve } from '../utils/customerMetrics';
+import { SeasonCurve } from './ClientTimeCards';
 
 // Stats → Clients: who needs a look (and why), then every customer as a
 // sortable row. Numbers are this season's, from utils/customerMetrics.
@@ -18,9 +19,9 @@ const COLUMNS = [
   { key: 'rateWithDrive', label: '$/hr + drive', get: (m) => m.rateWithDrive, show: (m) => (m.rateWithDrive != null ? `$${m.rateWithDrive.toFixed(0)}` : '—'), under: (m, t) => t > 0 && m.rateWithDrive != null && m.rateWithDrive < t },
   { key: 'usual', label: 'Usual mow', get: (m) => m.consistency?.usualMins, show: (m) => (m.consistency ? `${Math.round(m.consistency.usualMins)}m` : '—') },
   { key: 'trend', label: 'Trend', get: (m) => m.trend?.deltaMins, show: (m) => (!m.trend ? '—' : m.trend.direction === 'steady' ? 'steady' : `${m.trend.deltaMins > 0 ? '▲' : '▼'} ${Math.abs(m.trend.deltaMins).toFixed(0)}m`), under: (m) => m.trend?.direction === 'slower' },
-  { key: 'cadence', label: 'Days between', get: (m) => m.cadence?.avgDays, show: (m) => (m.cadence ? `${m.cadence.avgDays.toFixed(1)} / ${m.plannedDays}` : '—'), under: (m) => m.cadence && m.cadence.avgDays > m.plannedDays * 1.3 },
-  { key: 'cuts', label: 'Cuts', get: (m) => m.cutsVsExpected?.missed, show: (m) => (m.cutsVsExpected ? `${m.cutsVsExpected.actual} of ${m.cutsVsExpected.expected}` : '—'), under: (m) => m.cutsVsExpected?.missed >= 2 },
-  { key: 'skips', label: 'Skips', get: (m) => m.skipCount, show: (m) => m.skipCount, under: (m) => m.skipStreak >= 2 || m.skipCount >= 3 },
+  { key: 'cadence', label: 'Days between', get: (m) => m.cadence?.avgDays, show: (m) => (m.cadence ? `${m.cadence.avgDays.toFixed(1)} / ${m.plannedDays}` : '—'), under: (m) => m.flags.some((f) => f.key === 'cadence') },
+  { key: 'cuts', label: 'Cuts', get: (m) => m.cutsVsExpected?.missed, show: (m) => (m.cutsVsExpected ? `${m.cutsVsExpected.actual} of ${m.cutsVsExpected.expected}` : '—'), under: (m) => m.flags.some((f) => f.key === 'missed') },
+  { key: 'skips', label: 'Skips', get: (m) => m.skipCount, show: (m) => m.skipCount, under: (m) => m.flags.some((f) => f.key === 'skips') },
   { key: 'extras', label: 'Extras', get: (m) => m.extrasRate, show: (m) => (m.extrasRate != null ? `${Math.round(m.extrasRate * 100)}%` : '—') },
   { key: 'leaf', label: 'Leaf jobs', get: (m) => m.leaf.jobs + m.leaf.cleanups, show: (m) => (m.leaf.jobs + m.leaf.cleanups > 0 ? `${m.leaf.jobs}${m.leaf.cleanups ? ` + ${m.leaf.cleanups}` : ''}` : '—'), under: (m) => m.leaf.undecided > 0 },
 ];
@@ -34,6 +35,8 @@ export default function ClientMetricsTab({ customers, visits, settings }) {
     () => buildCustomerMetrics(customers, visits, { targetRate, defaultServices: settings?.defaultServices || [] }),
     [customers, visits, targetRate, settings]
   );
+
+  const curve = useMemo(() => seasonCurve(customers, visits), [customers, visits]);
 
   const sorted = useMemo(() => {
     const col = COLUMNS.find((c) => c.key === sort.key) || COLUMNS[0];
@@ -80,6 +83,9 @@ export default function ClientMetricsTab({ customers, visits, settings }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem', marginTop: '1rem' }}>
+      {/* Season curve: how much slower or faster each month runs */}
+      <SeasonCurve curve={curve} />
+
       {/* Needs a look */}
       <div>
         <h2 style={{ ...h2, marginBottom: '1rem' }}>Needs a look ({needsLook.length})</h2>

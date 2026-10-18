@@ -2,7 +2,9 @@ import { useRef, useState, useEffect } from 'react';
 import { CheckCircle, ClipboardList, Scissors, Droplets, Wind, Sun, Edit2, Leaf } from 'lucide-react';
 import { formatLiveTimer } from '../../utils/dateUtils';
 import { useServiceMode } from '../ServiceProvider';
-import { LEAF_CONDITION, leafToolsVisible, computeLeafBilling, computeCleanupSuggestion, isMowVisit, isCleanupVisit } from '../../utils/leaves';
+import { LEAF_CONDITION, LEAF_LEVELS, leafToolsVisible, computeLeafBilling, computeCleanupSuggestion, isMowVisit, isCleanupVisit } from '../../utils/leaves';
+import { setLeafLevel as saveLeafLevel } from '../../utils/leafBilling';
+import { db } from '../../db/db';
 
 const CONDITIONS = [
   // Leaf job is more than a note: a leaf visit is kept out of the lawn's plain
@@ -43,6 +45,8 @@ export default function JobCompletionModal({
   // on the Leaf Billing list), a number = decided (0 = no charge).
   const [leafCharge, setLeafCharge] = useState(null);
   const [leafOther, setLeafOther] = useState(null); // text while typing another amount
+  // How heavy the leaves were — saved straight to the visit when tapped.
+  const [leafLevel, setLeafLevelState] = useState(null);
 
   // Seed the picks once per job. Keyed on the visit, not the panel object: the
   // panel is re-created by ordinary updates (dismissing the neighbor prompt,
@@ -59,6 +63,8 @@ export default function JobCompletionModal({
     setSelectedCompanions([]);
     setLeafCharge(completionPanel?.leafCharge ?? null);
     setLeafOther(null);
+    setLeafLevelState(null);
+    db.visits.get(panelVisitId).then(v => setLeafLevelState(v?.leafLevel ?? null)).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps -- conditions are only the job's starting picks
   }, [panelVisitId]);
 
@@ -338,10 +344,28 @@ export default function JobCompletionModal({
           {!leafOn
             ? 'Picked up leaves here? Tap "Leaf job" — the extra time is tracked as leaves, not counted as a slow mow.'
             : leafBill.leafSecs == null
-              ? '🍂 Leaf job. No normal mow on record for this lawn yet, so the leaf time can\'t be worked out.'
+              ? '🍂 Leaf job. No normal mow on record for this lawn yet — pick how heavy and its suggestion uses the average for that level.'
               : !(completionPanel.leafRate > 0)
                 ? `🍂 Leaf job: ${Math.round(leafBill.leafSecs / 60)} min of leaves. Set an hourly leaf rate in Settings to get a suggested charge.`
                 : `🍂 Leaf job: ${Math.round(leafBill.leafSecs / 60)} min over the usual ${Math.round(completionPanel.usualMow.secs / 60)} min mow. Suggested charge at $${completionPanel.leafRate}/hr: $${leafBill.leafCharge.toFixed(2)}`}
+        </div>
+      )}
+
+      {/* How heavy were the leaves? One tap; tap again to clear. */}
+      {showLeafChip && leafOn && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap', marginBottom: '0.8rem' }}>
+          <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#b45309' }}>How heavy?</span>
+          {LEAF_LEVELS.map(l => {
+            const on = leafLevel === l.id;
+            return (
+              <button key={l.id} aria-pressed={on}
+                onClick={() => { const next = on ? null : l.id; setLeafLevelState(next); if (panelVisitId != null) saveLeafLevel(panelVisitId, next); }}
+                style={{ minHeight: '40px', padding: '0.4rem 0.9rem', borderRadius: '999px', cursor: 'pointer', fontSize: '0.88rem', fontWeight: 700,
+                  border: `1px solid ${on ? '#b45309' : 'var(--color-border)'}`, background: on ? 'rgba(180,83,9,0.14)' : 'var(--color-bg-alt)', color: on ? '#b45309' : 'var(--color-text-main)' }}>
+                {l.label}
+              </button>
+            );
+          })}
         </div>
       )}
 

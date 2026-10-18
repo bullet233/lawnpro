@@ -829,6 +829,10 @@ export default function LiveMap() {
   };
 
   const handleManualDone = () => {
+    // Only a running job can be finished. A second finish arriving after the
+    // job already ended (double slide, or the geofence exit got there first)
+    // must not log the lawn again.
+    if (activeGeofenceIdRef.current == null) return;
     // accumulatedTimeRef is in MILLISECONDS — same unit fix as handleExitGeofence.
     const finalDuration = Math.floor(
       accumulatedTimeRef.current / 1000 +

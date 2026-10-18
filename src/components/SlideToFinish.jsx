@@ -4,6 +4,10 @@ import { FastForward } from 'lucide-react';
 export default function SlideToFinish({ onComplete }) {
   const [progress, setProgress] = useState(0);
   const trackRef = useRef(null);
+  // One slide finishes the job once. Touch moves keep arriving past 95%
+  // before the reset renders, and each one used to call onComplete again —
+  // logging the job a second time as a 0-second visit.
+  const firedRef = useRef(false);
   
   const handleMove = (clientX) => {
     if (!trackRef.current) return;
@@ -11,7 +15,8 @@ export default function SlideToFinish({ onComplete }) {
     const x = Math.max(0, Math.min(clientX - rect.left, rect.width));
     const p = x / rect.width;
     setProgress(p);
-    if (p > 0.95) {
+    if (p > 0.95 && !firedRef.current) {
+      firedRef.current = true;
       onComplete();
       setProgress(0);
     }
@@ -19,7 +24,8 @@ export default function SlideToFinish({ onComplete }) {
 
   const handleTouchMove = (e) => handleMove(e.touches[0].clientX);
   const handleMouseMove = (e) => { if (e.buttons === 1) handleMove(e.clientX); };
-  const handleEnd = () => { if (progress < 0.95) setProgress(0); };
+  // Lifting the finger re-arms the slider for the next job.
+  const handleEnd = () => { firedRef.current = false; if (progress < 0.95) setProgress(0); };
 
   return (
     <div 

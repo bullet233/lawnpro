@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isMowVisit, isCleanupVisit, computeCleanupSuggestion, isLeafVisit, comparableVisits, leafSummary, leafRollup, findPossibleLeafVisits, isLeafSeasonDate, leafToolsVisible, computeLeafBilling, leafBillingLines } from './leaves';
+import { isMowVisit, isCleanupVisit, computeCleanupSuggestion, isLeafVisit, comparableVisits, leafSummary, leafRollup, findPossibleLeafVisits, isLeafSeasonDate, leafToolsVisible, computeLeafBilling, leafBillingLines, leafLevelStats, levelLeafSecs, leafLevelLabel } from './leaves';
 import { getVisitRevenueBreakdown } from './revenueUtils';
 
 describe('mow visit vs. clean-up', () => {
@@ -268,5 +268,30 @@ describe('leafRollup', () => {
     expect(r.leafVisits).toBe(1);
     expect(r.unmeasuredLawns).toBe(1);
     expect(r.totalExtraSecs).toBe(0);
+  });
+});
+
+describe('leaf levels', () => {
+  const leaf = (id, level, leafSecs, extra = {}) => ({ id, customerId: id, status: 'completed', division: 'mowing', appliedServices: ['s1'], conditions: ['leaves'], durationSecs: 1800 + (leafSecs || 0), exitTime: 1, leafLevel: level, leafSecs, leafSuggested: leafSecs ? leafSecs / 60 : 0, ...extra });
+
+  it('averages measured leaf time per level and leaves borrowed figures out', () => {
+    const stats = leafLevelStats([
+      leaf(1, 'heavy', 1800), leaf(2, 'heavy', 1200),
+      leaf(3, 'light', 120),
+      leaf(4, 'heavy', 600, { leafSecsFromLevel: true }), // borrowed, not measured
+      leaf(5, 'medium', null),                             // no baseline
+      { ...leaf(6, 'heavy', 900), conditions: [] },        // not a leaf job
+    ]);
+    expect(stats.heavy).toMatchObject({ jobs: 3, measured: 2, avgLeafSecs: 1500, avgSuggested: 25 });
+    expect(stats.light).toMatchObject({ jobs: 1, measured: 1, avgLeafSecs: 120 });
+    expect(stats.medium).toMatchObject({ jobs: 1, measured: 0, avgLeafSecs: null });
+  });
+
+  it('only lends a level average once it rests on 2+ measured jobs', () => {
+    const stats = leafLevelStats([leaf(1, 'heavy', 1800), leaf(2, 'heavy', 1200), leaf(3, 'light', 120)]);
+    expect(levelLeafSecs(stats, 'heavy')).toBe(1500);
+    expect(levelLeafSecs(stats, 'light')).toBe(null);
+    expect(levelLeafSecs(stats, undefined)).toBe(null);
+    expect(leafLevelLabel('heavy')).toBe('Heavy');
   });
 });

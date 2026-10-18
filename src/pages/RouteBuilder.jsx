@@ -1,4 +1,5 @@
-import { useState, useMemo, useRef } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/db';
 import { GoogleMap, Polyline, Marker } from '@react-google-maps/api';
@@ -428,6 +429,24 @@ export default function RouteBuilder() {
       }
     });
   };
+
+  // Lawns handed over from Home ("Plan route with …"): load them in drive
+  // order, once, then clear the hand-off so a refresh doesn't reload them.
+  const location = useLocation();
+  const navigateTo = useNavigate();
+  const preloadDone = useRef(false);
+  useEffect(() => {
+    const ids = location.state?.preloadIds;
+    if (!ids?.length || !customers || preloadDone.current) return;
+    preloadDone.current = true;
+    const picked = customers.filter(c => ids.includes(c.id));
+    setSelectedStops(orderDayStops(picked).map(customer => ({ customer, plannedServiceIds: serviceIdsFor(customer), expanded: false })));
+    setRouteName("Today's Route");
+    setActiveTab('build');
+    navigateTo(location.pathname, { replace: true, state: null });
+    setDialog({ type: 'info', title: 'Route started from Home', message: `${picked.length} stop${picked.length !== 1 ? 's' : ''} added in drive order. Check the order and services, then save.` });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customers, location.state]);
 
   const handleLoadDayRoute = (day) => {
     if (!customers) return;

@@ -1,6 +1,6 @@
 import { db } from '../db/db';
 import { getSettings } from '../db/settings';
-import { LEAF_CONDITION, isLeafVisit, isMowVisit, isCleanupVisit, mowingServiceIds, computeLeafBilling, computeCleanupSuggestion } from './leaves';
+import { LEAF_CONDITION, isLeafVisit, isMowVisit, isCleanupVisit, mowingServiceIds, computeLeafBilling, computeCleanupSuggestion, leafLevelStats, levelLeafSecs } from './leaves';
 
 // The DB side of leaf billing (the math lives in utils/leaves).
 //
@@ -54,9 +54,9 @@ export async function syncLeafBilling(visitId) {
     await db.visits.update(visitId, next);
     result = { ...visit, ...next };
   } else if (!isLeafVisit(visit)) {
-    if (visit.leafCharge || visit.leafSecs || visit.leafSuggested || visit.leafDecided) {
+    if (visit.leafCharge || visit.leafSecs || visit.leafSuggested || visit.leafDecided || visit.leafLevel) {
       const cleared = {
-        leafSecs: 0, leafSuggested: 0, leafCharge: 0, leafDecided: false,
+        leafSecs: 0, leafSuggested: 0, leafCharge: 0, leafDecided: false, leafLevel: null, leafSecsFromLevel: false,
         priceEarned: round2(Math.max(0, (visit.priceEarned || 0) - (visit.leafCharge || 0))),
       };
       await db.visits.update(visitId, cleared);
@@ -68,13 +68,27 @@ export async function syncLeafBilling(visitId) {
   const usual = await usualMowSecs(visit.customerId);
   const rate = leafHourlyRate();
   const siblings = await db.visits.where('customerId').equals(visit.customerId).toArray();
+  // A lawn with no plain mow to measure against borrows the average leaf time
+  // of other jobs marked at the same level (Light / Medium / Heavy).
+  const needsLevel = usual == null && siblings.some(v => isLeafVisit(v) && v.leafLevel);
+  const levelStats = needsLevel ? leafLevelStats(await db.visits.toArray()) : null;
   for (const v of siblings) {
     if (v.status !== 'completed' || !isLeafVisit(v) || isCleanupVisit(v)) continue;
     if (v.leafSecsManual) continue; // leaf time typed by hand in Edit Visit
-    const { leafSecs, leafCharge } = computeLeafBilling(v.durationSecs, usual, rate);
-    if (v.leafSecs === leafSecs && v.leafSuggested === leafCharge) continue;
-    await db.visits.update(v.id, { leafSecs, leafSuggested: leafCharge });
-    if (v.id === visitId) result = { ...result, leafSecs, leafSuggested: leafCharge };
+    let { leafSecs, leafCharge } = computeLeafBilling(v.durationSecs, usual, rate);
+    let fromLevel = false;
+    if (leafSecs == null && v.leafLevel) {
+      const borrowed = levelLeafSecs(levelStats, v.leafLevel);
+      if (borrowed != null) {
+        const mins = Math.round(borrowed / 60);
+        leafSecs = mins * 60;
+        leafCharge = round2((mins / 60) * rate);
+        fromLevel = true;
+      }
+    }
+    if (v.leafSecs === leafSecs && v.leafSuggested === leafCharge && !!v.leafSecsFromLevel === fromLevel) continue;
+    await db.visits.update(v.id, { leafSecs, leafSuggested: leafCharge, leafSecsFromLevel: fromLevel });
+    if (v.id === visitId) result = { ...result, leafSecs, leafSuggested: leafCharge, leafSecsFromLevel: fromLevel };
   }
   return result;
 }
@@ -141,4 +155,14 @@ export async function setLeafCharge(visitId, amount) {
   };
   await db.visits.update(visitId, next);
   return { ...visit, ...next };
+}
+
+// How heavy the leaves were on a leaf job ('light' | 'medium' | 'heavy', or
+// null to clear). Only changes the suggestion when the lawn has no plain mow
+// to measure against.
+export async function setLeafLevel(visitId, level) {
+  const visit = await db.visits.get(visitId);
+  if (!visit) return null;
+  await db.visits.update(visitId, { leafLevel: level || null });
+  return syncLeafBilling(visitId);
 }

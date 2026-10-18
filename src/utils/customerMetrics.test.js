@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeCustomerMetrics, visitKind, metricsCsvRow, METRICS_CSV_HEADERS } from './customerMetrics';
+import { computeCustomerMetrics, visitKind, metricsCsvRow, METRICS_CSV_HEADERS, seasonCurve } from './customerMetrics';
 
 const NOW = new Date('2026-10-04T18:00:00').getTime();
 const DAY = 86400000;
@@ -66,6 +66,31 @@ describe('computeCustomerMetrics', () => {
     expect(computeCustomerMetrics(cust, weekly([30, 45, 50]), opts).trend).toBe(null);
   });
 
+  it('only calls out skips that are recent or back to back', () => {
+    const old = [visit(120, 0, { status: 'skipped' }), visit(110, 30), visit(100, 0, { status: 'skipped' }), visit(90, 30), visit(80, 0, { status: 'skipped' }), visit(7, 30)];
+    const m = computeCustomerMetrics(cust, old, opts);
+    expect(m.skipCount).toBe(3);
+    expect(m.flags.some((f) => f.key === 'skips')).toBe(false);
+    const recent = computeCustomerMetrics(cust, [visit(40, 30), visit(20, 0, { status: 'skipped' }), visit(13, 30), visit(6, 0, { status: 'skipped' }), visit(1, 30)], opts);
+    expect(recent.recentSkips).toBe(2);
+    expect(recent.flags.find((f) => f.key === 'skips').text).toBe('2 skips in the last 30 days');
+  });
+
+  it('needs 3+ missed cuts and over 15% of the plan before calling it out', () => {
+    // 10 weekly cuts with one week missed: 1 short, not a problem
+    const one = weekly([30, 30, 30, 30, 30, 30, 30, 30, 30, 30]).filter((_, i) => i !== 4);
+    expect(computeCustomerMetrics(cust, one, opts).flags.some((f) => f.key === 'missed')).toBe(false);
+  });
+
+  it('compares the real shortest and longest mow, and needs 15+ minutes between them', () => {
+    // 8 vs 14 min is a big percentage but only 6 minutes: not a swing
+    expect(computeCustomerMetrics(cust, weekly([8, 10, 10, 11, 14]), opts).flags.some((f) => f.key === 'swing')).toBe(false);
+    // one long mow counts — nothing is trimmed off
+    const m = computeCustomerMetrics(cust, weekly([20, 21, 20, 22, 21, 20, 45]), opts);
+    expect(m.consistency.maxMins).toBe(45);
+    expect(m.flags.some((f) => f.key === 'swing')).toBe(true);
+  });
+
   it('reports shortest, usual and longest mow', () => {
     const m = computeCustomerMetrics(cust, weekly([20, 30, 30, 32, 50]), opts);
     expect(m.consistency).toMatchObject({ minMins: 20, usualMins: 30, maxMins: 50, count: 5 });
@@ -114,7 +139,7 @@ describe('computeCustomerMetrics', () => {
     ];
     const m = computeCustomerMetrics(cust, visits, opts);
     expect(m.leaf).toMatchObject({ jobs: 2, cleanups: 1, avgLeafMins: 25, charged: 25, suggested: 50, cleanupRevenue: 150, undecided: 2 });
-    expect(m.flags.find((f) => f.key === 'leaf').text).toBe('2 leaf charges to decide');
+    expect(m.flags.some((f) => f.key === 'leaf')).toBe(false); // listed on Stats → Leaves instead
   });
 
   it('compares against similar-size lawns when a trend curve is given', () => {
@@ -134,5 +159,55 @@ describe('computeCustomerMetrics', () => {
     // 24 columns; the two quoted cells hold the only commas that aren't separators
     expect(METRICS_CSV_HEADERS).toHaveLength(24);
     expect(row.replace(/"(?:[^"]|"")*"/g, 'x').split(',')).toHaveLength(24);
+  });
+});
+
+describe('job times by type and month', () => {
+  const at = (iso, mins, extra = {}) => ({ id: nextId++, customerId: 1, status: 'completed', division: 'mowing', appliedServices: ['s1'], durationSecs: mins * 60, priceEarned: 40, exitTime: new Date(iso).getTime(), ...extra });
+  const LATE = new Date('2026-10-20T12:00:00').getTime();
+
+  it('keeps each kind of work apart, and names other services', () => {
+    const c = { ...cust, services: [...cust.services, { id: 's2', name: 'Edging/Trimming', price: 15 }] };
+    const visits = [
+      at('2026-06-02T10:00', 20), at('2026-06-09T10:00', 24), at('2026-06-16T10:00', 22),
+      at('2026-10-06T10:00', 40, { conditions: ['leaves'] }),
+      at('2026-10-13T10:00', 90, { appliedServices: ['s4'] }),
+      at('2026-07-01T10:00', 10, { appliedServices: ['s2'] }),
+    ];
+    const m = computeCustomerMetrics(c, visits, { ...opts, now: LATE });
+    const row = (label) => m.timeByKind.find((k) => k.label === label);
+    expect(row('Mowing')).toMatchObject({ visits: 3, usualMins: 22, minMins: 20, maxMins: 24 });
+    expect(row('Mow + leaves')).toMatchObject({ visits: 1, usualMins: 40 });
+    expect(row('Clean-up')).toMatchObject({ visits: 1, usualMins: 90 });
+    expect(row('Edging/Trimming')).toMatchObject({ visits: 1, usualMins: 10 });
+  });
+
+  it('averages each month separately for plain mows and leaf jobs', () => {
+    const visits = [
+      at('2026-06-02T10:00', 26), at('2026-06-09T10:00', 24),
+      at('2026-07-07T10:00', 20), at('2026-07-14T10:00', 18),
+      at('2026-10-06T10:00', 40, { conditions: ['leaves'] }),
+    ];
+    const m = computeCustomerMetrics(cust, visits, { ...opts, now: LATE });
+    expect(m.timeByMonth.mow).toEqual([
+      { month: '2026-06', visits: 2, avgMins: 25 },
+      { month: '2026-07', visits: 2, avgMins: 19 },
+    ]);
+    expect(m.timeByMonth.leaf).toEqual([{ month: '2026-10', visits: 1, avgMins: 40 }]);
+  });
+
+  it('builds the season curve against each lawn own normal', () => {
+    const lawn = (customerId, juneMins, julyMins) => [0, 7, 14].flatMap((d) => [
+      { id: nextId++, customerId, status: 'completed', division: 'mowing', appliedServices: ['s1'], durationSecs: juneMins * 60, exitTime: new Date(2026, 5, 2 + d, 10).getTime() },
+      { id: nextId++, customerId, status: 'completed', division: 'mowing', appliedServices: ['s1'], durationSecs: julyMins * 60, exitTime: new Date(2026, 6, 2 + d, 10).getTime() },
+    ]);
+    // both lawns run 20% slower in June than July, at very different sizes
+    const visits = [...lawn(1, 60, 50), ...lawn(2, 12, 10)];
+    const curve = seasonCurve([{ id: 1 }, { id: 2 }], visits, { now: LATE, mowIds: ['s1'], cleanupIds: ['s4'] });
+    expect(curve.map((m) => m.month)).toEqual(['2026-06', '2026-07']);
+    expect(Math.round(curve[0].pctOfNormal)).toBe(109);
+    expect(Math.round(curve[1].pctOfNormal)).toBe(91);
+    // a lawn with under 6 plain mows is left out
+    expect(seasonCurve([{ id: 3 }], lawn(3, 30, 30).slice(0, 5), { now: LATE, mowIds: ['s1'], cleanupIds: ['s4'] })).toEqual([]);
   });
 });

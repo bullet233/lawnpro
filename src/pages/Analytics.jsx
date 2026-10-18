@@ -3,15 +3,15 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/db';
 import { getSettings } from '../db/settings';
 import { parseLawnSizeToSqFt, calculateTieredMatrix, calculatePowerModel, predictTrendMins } from '../utils/matrix';
-import { isLeafVisit, isCleanupVisit, leafRollup, leafBillingLines } from '../utils/leaves';
-import { setLeafCharge } from '../utils/leafBilling';
+import { isLeafVisit, isCleanupVisit, leafRollup, leafBillingLines, leafLevelStats, LEAF_LEVELS } from '../utils/leaves';
+import { setLeafCharge, setLeafLevel } from '../utils/leafBilling';
 import { trackApiCall } from '../utils/apiTracker';
 import { GOOGLE_MAPS_API_KEY } from '../components/MapProvider';
 import { TrendingUp, Calculator, AlertCircle, Fuel, DollarSign, ArrowUp, ArrowDown, Edit2, Save, X, MapPin, AlertTriangle } from 'lucide-react';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import { useServiceMode } from '../components/ServiceProvider';
 import { toast } from '../utils/toast';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import ClientMetricsTab from '../components/ClientMetricsTab';
 
 // Haversine distance helper
@@ -442,7 +442,9 @@ export default function Analytics() {
     return allVisitsRaw.filter(v => validIds.has(v.customerId) && (!v.division || v.division === 'mowing'));
   }, [allVisitsRaw, allCustomers]);
   const allFuelLogs = useLiveQuery(() => db.fuelLogs.toArray(), []) || [];
-  const [activeTab, setActiveTab] = useState('overview'); // overview, bidding, expenses
+  // Home can open a specific tab (e.g. Leaves) through router state.
+  const location = useLocation();
+  const [activeTab, setActiveTab] = useState(() => location.state?.tab || 'overview'); // overview, clients, leaves, bidding, expenses
   const [pricingModel, setPricingModel] = useState(() => localStorage.getItem('pricing_model') || 'bucket'); // 'bucket' | 'linear'
   const [settings, setSettings] = useState(null);
   const [targetSqFt, setTargetSqFt] = useState('');
@@ -908,6 +910,8 @@ export default function Analytics() {
   // Leaves come up in the same pass as the mow, so leaf time is never clocked
   // on its own: it is each leaf visit's time over that lawn's usual plain mow.
   // Last 6 months, so the card covers the whole fall and clears by summer.
+  // Leaf time by how heavy the leaves were (last 6 months, like the card below).
+  const levelStats = useMemo(() => leafLevelStats(mowVisits.filter(v => v.exitTime >= Date.now() - 180 * 86400000)), [mowVisits]);
   const leafData = useMemo(() => {
     const r = leafRollup(mowVisits, { since: Date.now() - 180 * 86400000 });
     const names = new Map(allCustomers.map(c => [c.id, c.name]));
@@ -1401,6 +1405,22 @@ export default function Analytics() {
                                         : v.leafDecided ? (v.leafCharge > 0 ? `$${v.leafCharge.toFixed(2)} charged` : 'No charge') : 'Not decided'}
                                     </span>
                                   </div>
+                                  {!v.cleanup && (
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap', marginTop: '0.4rem' }}>
+                                      <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#b45309' }}>How heavy?</span>
+                                      {LEAF_LEVELS.map(l => {
+                                        const on = v.leafLevel === l.id;
+                                        return (
+                                          <button key={l.id} aria-pressed={on} onClick={() => setLeafLevel(v.id, on ? null : l.id)}
+                                            style={{ minHeight: '38px', padding: '0.3rem 0.8rem', borderRadius: '999px', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 700,
+                                              border: `1px solid ${on ? '#b45309' : 'var(--color-border)'}`, background: on ? 'rgba(180,83,9,0.14)' : 'var(--color-bg-card)', color: on ? '#b45309' : 'var(--color-text-main)' }}>
+                                            {l.label}
+                                          </button>
+                                        );
+                                      })}
+                                      {v.leafSecsFromLevel && <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>leaf time borrowed from the {v.leafLevel} average</span>}
+                                    </div>
+                                  )}
                                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap', marginTop: '0.4rem' }}>
                                     {editing ? (
                                       <>
@@ -1480,6 +1500,27 @@ export default function Analytics() {
                       {leafData.leafSecs > 0 && leafData.leafRevenue > 0 ? `$${Math.round(leafData.leafRevenue / (leafData.leafSecs / 3600))}/hr` : '—'}
                     </div>
                     <div style={{ fontSize: '0.88rem', color: 'var(--color-text-muted)' }}>what those visits paid, on site time only</div>
+                  </div>
+                </div>
+                {/* Leaf time by level */}
+                <div className="glass-card" style={{ padding: '1rem', marginBottom: '1rem' }}>
+                  <div style={{ fontSize: '0.95rem', fontWeight: 800, color: 'var(--color-text-main)', marginBottom: '0.6rem' }}>Leaf time by how heavy</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '0.6rem' }}>
+                    {LEAF_LEVELS.map(l => {
+                      const s = levelStats[l.id];
+                      return (
+                        <div key={l.id} style={{ background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', padding: '0.7rem 0.8rem' }}>
+                          <div style={{ fontSize: '0.85rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.5px', color: '#b45309' }}>{l.label}</div>
+                          <div style={{ fontSize: '1.4rem', fontWeight: 800, color: 'var(--color-text-main)' }}>{s.avgLeafSecs != null ? `${Math.round(s.avgLeafSecs / 60)} min` : '—'}</div>
+                          <div style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>
+                            {s.jobs} job{s.jobs === 1 ? '' : 's'}{s.avgSuggested ? ` · ~$${s.avgSuggested.toFixed(0)} suggested` : ''}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', marginTop: '0.6rem' }}>
+                    Average leaf time per job at each level. Mark the level on the job-complete card, in Edit Visit, or on each job under Leaf Billing. A lawn with no normal mow to compare borrows its level&apos;s average for the suggestion.
                   </div>
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>

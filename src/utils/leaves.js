@@ -253,3 +253,45 @@ export function leafRollup(allVisits, { since = 0 } = {}) {
     unmeasuredLawns: lawns.length - measured.length,
   };
 }
+
+// ── How heavy the leaves were ─────────────────────────────────────────────
+// A leaf job can be marked Light, Medium or Heavy (visit.leafLevel). Leaf
+// time is reported per level, and a lawn with no plain mow to measure against
+// borrows the average leaf time of other jobs at the same level for its
+// suggestion (leafSecsFromLevel marks a borrowed figure).
+export const LEAF_LEVELS = [
+  { id: 'light', label: 'Light' },
+  { id: 'medium', label: 'Medium' },
+  { id: 'heavy', label: 'Heavy' },
+];
+export const LEAF_LEVEL_MIN_JOBS = 2; // measured jobs needed before a level's average is lent out
+
+export const leafLevelLabel = (id) => LEAF_LEVELS.find((l) => l.id === id)?.label || null;
+
+export function leafLevelStats(visits) {
+  const out = Object.fromEntries(LEAF_LEVELS.map((l) => [l.id, { jobs: 0, measured: 0, leafSecs: 0, suggested: 0, avgLeafSecs: null, avgSuggested: null }]));
+  const ids = mowingServiceIds();
+  (visits || []).forEach((v) => {
+    if (v.status !== 'completed' || !isLeafVisit(v) || isCleanupVisit(v, ids) || !out[v.leafLevel]) return;
+    const s = out[v.leafLevel];
+    s.jobs += 1;
+    if (v.leafSecs != null && !v.leafSecsFromLevel) {
+      s.measured += 1;
+      s.leafSecs += v.leafSecs;
+      s.suggested += v.leafSuggested || 0;
+    }
+  });
+  Object.values(out).forEach((s) => {
+    if (s.measured > 0) {
+      s.avgLeafSecs = Math.round(s.leafSecs / s.measured);
+      s.avgSuggested = Math.round((s.suggested / s.measured) * 100) / 100;
+    }
+  });
+  return out;
+}
+
+// The leaf time a level lends to an unmeasured job, or null.
+export function levelLeafSecs(stats, level) {
+  const s = stats?.[level];
+  return s && s.measured >= LEAF_LEVEL_MIN_JOBS ? s.avgLeafSecs : null;
+}

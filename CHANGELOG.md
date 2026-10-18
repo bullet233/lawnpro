@@ -5,6 +5,83 @@ not yet deployed to the tablet (deploy = `npm run deploy` → gh-pages).
 
 ## [Unreleased]
 
+## [1.4.10] - 2026-10-17
+
+### Leaf jobs: how heavy (2026-10-17)
+- A leaf job can be marked **Light / Medium / Heavy** on the job-complete card,
+  in Edit Visit, or on each job under Stats > Leaves > Leaf Billing (tap again
+  to clear). Saved as visit.leafLevel.
+- Stats > Leaves shows "Leaf time by how heavy": average leaf minutes, jobs and
+  typical suggestion per level (last 6 months).
+- A lawn with no normal mow to compare borrows its level's average leaf time
+  (from 2+ measured jobs) for the suggestion; marked leafSecsFromLevel and
+  shown as "borrowed". Hand-typed leaf times are never recalculated.
+- Level shows on Logs rows ("Heavy leaves"), the client visit log chip and
+  the client scorecard ("2 light - 1 heavy"). Untagging a leaf job clears it.
+
+### Home screen rework (2026-10-17)
+- One **Needs mowing** list replaces "Dropped from route" + the overdue list
+  (12 of 15 names were in both): each lawn once, with tags like "dropped 3d
+  ago", "10 days since last cut", "new client".
+- Tick lawns and **Plan route with N picked** (or all) opens Route Builder
+  with them loaded in drive order; Add still puts one on the current route.
+- Top card changes with the moment: route ready/running (stops done, next
+  stop, Start/Resume), finished for the day (jobs, revenue, mowing, driving,
+  $/hr, Review day), or nothing planned ("15 lawns need mowing" + Plan route).
+  The all-zero Today card and separate Shift Insights card are gone.
+- No scroll boxes inside the page: lists show 5 with "Show all N".
+- Order: top card, things to fix (job times, leaf tags, leaf charges to
+  decide -> opens Stats > Leaves), Needs mowing, This week, notes.
+- Job-times card: double-logged copies get "Delete copy" / "Keep"; short
+  jobs get "Fix time" / OK / Delete; help text matches.
+- Recent job notes only shows notes you typed (not auto "Skipped" /
+  "Simultaneous visit with" notes).
+- This week shows $/hr and opens Logs; bigger rows and 44px buttons.
+
+### Logs: Route view for each day (2026-10-17)
+- Each day in Logs has a **List / Route** switch. Route lays the day out in
+  driving order: when you left and finished, mowing / driving / unaccounted
+  time (tiles + a colour bar), the drive to each stop, "+N min unaccounted"
+  when the time between stops is 5+ min more than the recorded drive, lawns
+  done together as one stop, and skips where they happened ("route ended").
+  Tap a stop to open the client. Uses the whole day, not just filtered rows.
+- New utils/dayRoute.js (tested).
+
+### Client visit log: filters, bigger rows, colour only when off (2026-10-17)
+- Quick filter chips with counts: All, Completed, Skipped, Leaf jobs,
+  Clean-ups, Has notes, Slow jobs (the choice is remembered on the device).
+- Date chips: All time, Last 30 days, This month, This season, Custom.
+- Bigger rows, text and a 44px edit button.
+- Rows are plain unless something is off — slow for that kind of work (30%+
+  and 5+ min over this lawn's usual), under the underpaid $/hr line, a long
+  gap since the last visit, or an undecided leaf / clean-up charge — and then
+  get an amber edge with the reasons spelled out.
+
+### Job times by client and by month (2026-10-17)
+- **Stats → Clients** opens with "Mow time by month · all lawns": each month's
+  plain mows vs each lawn's own season average (above the line = slower),
+  lawns with 6+ cuts only. On the Oct 16 data: Jul −5%, Sep +7%.
+- New **Job times** card on each customer's page (Stats tab, under the
+  scorecard): usual / shortest–longest time and count per kind of work
+  (Mowing, Mow + leaves, Clean-up, Fertilizer, other services by name), and a
+  month-by-month bar chart of that lawn's average time (slowest month in
+  amber, dashed line at its season average; Mow / Mow + leaves toggle).
+- `customerMetrics`: `timeByKind`, `timeByMonth`, `seasonCurve` (tested).
+
+### Double-logged jobs + quieter "Needs a look" (2026-10-17, from the Oct 16 backup)
+- **Fix:** "Slide to finish" could finish a job twice from one swipe (every
+  move past 95% called it again before the reset rendered) — the second call
+  logged the lawn as a 0-second visit at full price (Valvline Aug 10, Gafner
+  Aug 20, Stuber Oct 14). The slider now fires once per swipe, and Done is
+  ignored when no job is running.
+- Home "Check these job times" lists a near-empty visit logged within 10 min
+  of a real one at the same lawn (any age), with Delete, so old copies can
+  be cleaned up.
+- "Needs a look" retuned on real data (41 → 24 of 51 customers): skips only
+  when 2+ in the last 30 days or 2 in a row; missed cuts need 3+ and over 15%
+  of the plan; time swings (real shortest vs longest, nothing trimmed) need
+  15+ minutes apart; undecided leaf charges stay on Stats → Leaves.
+
 ## [1.4.9] - 2026-10-04
 
 ### Customer service metrics (2026-10-04)

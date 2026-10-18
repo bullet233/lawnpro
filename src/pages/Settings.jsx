@@ -483,7 +483,7 @@ export default function Settings() {
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.5rem' }}>
         <SettingsIcon size={24} color="var(--color-primary)" />
         <h1 className="page-title" style={{ margin: 0 }}>Settings</h1>
-        <span style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px', border: '1px solid var(--color-border)', marginLeft: 'auto', fontWeight: 600 }}>v1.4.9</span>
+        <span style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px', border: '1px solid var(--color-border)', marginLeft: 'auto', fontWeight: 600 }}>v1.4.10</span>
       </div>
 
       <div className="tab-bar">
@@ -1069,6 +1069,22 @@ export default function Settings() {
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
             <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-primary)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.4.10</h3>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>October 2026</span>
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '1.2rem', color: 'var(--color-text-main)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <li><strong>No More Double-Logged Jobs:</strong> One swipe of "Slide to finish" could save a job twice (the second time as a 0-minute visit at full price). Fixed. Older copies show on Home under "Check these job times" with a Delete copy button.</li>
+                <li><strong>New Home Screen:</strong> One "Needs mowing" list (no more lawns listed twice), tick lawns and tap Plan route to open Route Builder with them in drive order, a top card that changes with your day, no scroll boxes, and only notes you typed.</li>
+                <li><strong>Route View in Logs:</strong> Switch any day to Route to see stops in the order you drove them, drive time between stops, time the drive doesn't explain, lawns done together, and where skips happened.</li>
+                <li><strong>Client Visit Log:</strong> Filter chips (Completed, Skipped, Leaf jobs, Clean-ups, Has notes, Slow jobs), date ranges, bigger rows, and colour only on visits that need a look — with the reason written on the row.</li>
+                <li><strong>Job Times per Client:</strong> Each client's Stats tab shows usual time for every kind of work and a month-by-month chart. Stats → Clients shows how each month runs compared with normal for all lawns.</li>
+                <li><strong>Leaf Jobs — How Heavy:</strong> Mark a leaf job Light, Medium or Heavy. Stats → Leaves shows leaf time by level, and a lawn with no normal mow uses its level's average for the suggestion.</li>
+                <li><strong>Quieter "Needs a Look":</strong> Only recent or back-to-back skips, 3+ missed cuts, and real time swings get flagged now.</li>
+              </ul>
+            </div>
+
+            <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-border)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
                 <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.4.9</h3>
                 <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>October 2026</span>

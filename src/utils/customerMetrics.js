@@ -20,6 +20,7 @@ const median = (arr) => {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 const rate = (revenue, secs) => (secs >= 60 ? revenue / (secs / 3600) : null);
+const monthKey = (t) => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
 const addOnTotal = (v) => (Array.isArray(v.addOns) ? v.addOns.reduce((s, a) => s + (a.price || 0), 0) : 0);
 
 export const ADDON_REVENUE_KEY = 'Add-ons';
@@ -29,7 +30,12 @@ export const TREND_MIN_MOWS = 5;        // 3 recent + at least 2 before them
 export const TREND_MIN_MINS = 3;        // a change smaller than this is noise…
 export const TREND_MIN_PCT = 0.1;       // …and so is one under 10%
 export const CADENCE_SLACK = 1.3;       // 30% longer between visits than planned
-export const SWING_PCT = 0.6;           // shortest→longest swing vs the usual mow
+export const SWING_PCT = 0.6;           // shortest→longest swing vs the usual mow…
+export const SWING_MIN_MINS = 15;       // …and at least this many minutes apart
+export const SKIP_WINDOW_DAYS = 30;     // skips only count as a problem when recent
+export const SKIP_RECENT_MIN = 2;
+export const MISSED_MIN = 3;            // cuts short of plan: at least 3…
+export const MISSED_PCT = 0.15;         // …and more than 15% of the plan
 export const SLOW_VS_SIMILAR = 1.4;     // same ratio as the slow-lawn flag
 export const MIN_VISITS_FOR_RATE = 3;
 
@@ -149,6 +155,7 @@ export function computeCustomerMetrics(customer, visits, {
 
   // 9 ── Skips ───────────────────────────────────────────────────────────
   const skipCount = season.filter((v) => v.status === 'skipped').length;
+  const recentSkips = season.filter((v) => v.status === 'skipped' && when(v) >= now - SKIP_WINDOW_DAYS * DAY).length;
   let skipStreak = 0;
   for (let i = season.length - 1; i >= 0 && season[i].status === 'skipped'; i--) skipStreak += 1;
 
@@ -160,10 +167,40 @@ export function computeCustomerMetrics(customer, visits, {
     cutsVsExpected = { actual: cuts.length, expected, missed: Math.max(0, expected - cuts.length) };
   }
 
+  // Time by job type: usual, shortest and longest per kind of work. Visits
+  // with other services are split by what was done ("Edging/Trimming").
+  const svcName = (id) => customer.services?.find((x) => x.id === id)?.name || defaultServices.find((x) => x.id === id)?.name || 'Other';
+  const timeGroups = {};
+  done.forEach((v) => {
+    if (!v.durationSecs || v.durationSecs < 60) return;
+    const kind = visitKind(v, mowIds, cleanupIds);
+    const ids = [...(v.appliedServices || [])].sort();
+    const key = kind === 'other' ? `other:${ids.join('+')}` : kind;
+    if (!timeGroups[key]) timeGroups[key] = { key, kind, label: kind === 'other' ? ids.map(svcName).join(' + ') || KIND_LABELS.other : KIND_LABELS[kind], mins: [] };
+    timeGroups[key].mins.push(v.durationSecs / 60);
+  });
+  const timeByKind = Object.values(timeGroups)
+    .map((g) => ({ key: g.key, kind: g.kind, label: g.label, visits: g.mins.length, usualMins: median(g.mins), minMins: Math.min(...g.mins), maxMins: Math.max(...g.mins) }))
+    .sort((a, b) => b.visits - a.visits);
+
+  // Month by month: average job time per calendar month, plain mows and
+  // leaf jobs kept apart.
+  const monthly = {};
+  done.forEach((v) => {
+    if (!v.durationSecs || v.durationSecs < 60) return;
+    const kind = visitKind(v, mowIds, cleanupIds);
+    if (kind !== 'mow' && kind !== 'leaf') return;
+    const month = monthKey(when(v));
+    if (!monthly[kind]) monthly[kind] = {};
+    (monthly[kind][month] = monthly[kind][month] || []).push(v.durationSecs / 60);
+  });
+  const timeByMonth = Object.fromEntries(Object.entries(monthly).map(([kind, months]) => [kind,
+    Object.entries(months).sort(([a], [b]) => a.localeCompare(b)).map(([month, mins]) => ({ month, visits: mins.length, avgMins: avg(mins) }))]));
+
   // 12 ── Leaf history ───────────────────────────────────────────────────
   const leafJobs = done.filter((v) => visitKind(v, mowIds, cleanupIds) === 'leaf');
   const cleanups = done.filter((v) => visitKind(v, mowIds, cleanupIds) === 'cleanup');
-  const leafMinsKnown = leafJobs.filter((v) => v.leafSecs != null).map((v) => v.leafSecs / 60);
+  const leafMinsKnown = leafJobs.filter((v) => v.leafSecs != null && !v.leafSecsFromLevel).map((v) => v.leafSecs / 60);
   const leaf = {
     jobs: leafJobs.length,
     cleanups: cleanups.length,
@@ -172,6 +209,8 @@ export function computeCustomerMetrics(customer, visits, {
     suggested: round2(leafJobs.reduce((s, v) => s + (v.leafSuggested || 0), 0)),
     cleanupRevenue: round2(cleanups.reduce((s, v) => s + (v.priceEarned || 0), 0)),
     undecided: [...leafJobs, ...cleanups].filter((v) => !v.leafDecided).length,
+    // How many leaf jobs were marked light / medium / heavy.
+    byLevel: leafJobs.reduce((o, v) => { if (v.leafLevel) o[v.leafLevel] = (o[v.leafLevel] || 0) + 1; return o; }, {}),
   };
 
   // ── Flags: the reasons this customer needs a look ──────────────────────
@@ -183,30 +222,32 @@ export function computeCustomerMetrics(customer, visits, {
   if (targetRate > 0 && rateWithDrive != null && timed.length >= MIN_VISITS_FOR_RATE && rateWithDrive < targetRate) {
     flags.push({ key: 'rate', text: `${money(rateWithDrive)}/hr with drive time — under your ${money(targetRate)}/hr target` });
   }
+  // A skip now and then (rain, ending a route early) is normal; only recent
+  // or back-to-back skips are worth a look.
   if (skipStreak >= 2) flags.push({ key: 'skips', text: `Skipped ${skipStreak} times in a row` });
-  else if (skipCount >= 3) flags.push({ key: 'skips', text: `${skipCount} skips this season` });
+  else if (recentSkips >= SKIP_RECENT_MIN) flags.push({ key: 'skips', text: `${recentSkips} skips in the last ${SKIP_WINDOW_DAYS} days` });
   if (cadence && cadence.gaps >= 2 && cadence.avgDays > plannedDays * CADENCE_SLACK) {
     flags.push({ key: 'cadence', text: `Cut every ${cadence.avgDays.toFixed(1)} days — planned every ${plannedDays}` });
   }
-  if (cutsVsExpected && cutsVsExpected.missed >= 2) {
+  if (cutsVsExpected && cutsVsExpected.missed >= MISSED_MIN && cutsVsExpected.missed > cutsVsExpected.expected * MISSED_PCT) {
     flags.push({ key: 'missed', text: `${cutsVsExpected.actual} cuts this season — ${cutsVsExpected.expected} planned` });
   }
-  if (consistency && consistency.count >= TREND_MIN_MOWS && consistency.swingPct > SWING_PCT) {
+  if (consistency && consistency.count >= TREND_MIN_MOWS && consistency.swingPct > SWING_PCT &&
+      consistency.maxMins - consistency.minMins >= SWING_MIN_MINS) {
     flags.push({ key: 'swing', text: `Time swings from ${Math.round(consistency.minMins)} to ${Math.round(consistency.maxMins)} min` });
   }
   if (vsSimilar?.ratio >= SLOW_VS_SIMILAR && mowMins.length >= MIN_VISITS_FOR_RATE && !customer.slowMowExpected) {
     flags.push({ key: 'similar', text: `${vsSimilar.ratio.toFixed(1)}× the time of similar-size lawns` });
   }
-  if (leaf.undecided > 0) {
-    flags.push({ key: 'leaf', text: `${leaf.undecided} leaf charge${leaf.undecided === 1 ? '' : 's'} to decide` });
-  }
+  // Undecided leaf charges are listed on Stats → Leaves, not here.
 
   return {
     customerId: customer.id, name: customer.name || 'Unknown',
     visits: done.length, revenue, revenueByService, rateByKind,
     rateWork, rateWithDrive, extrasVisits, extrasRate,
     trend, consistency, vsSimilar, cadence, plannedDays,
-    skipCount, skipStreak, cutsVsExpected, leaf, flags,
+    skipCount, skipStreak, recentSkips, cutsVsExpected, leaf, flags,
+    timeByKind, timeByMonth,
   };
 }
 
@@ -225,6 +266,39 @@ export function buildCustomerMetrics(customers, visits, { now = Date.now(), targ
     .filter((c) => byCustomer.has(c.id))
     .map((c) => computeCustomerMetrics(c, byCustomer.get(c.id), { now, targetRate, defaultServices, model, mowIds, cleanupIds }))
     .filter((m) => m.visits > 0 || m.skipCount > 0);
+}
+
+// Season curve for the whole business: each month's plain mows against each
+// lawn's own season average, so big and small lawns count the same. Only
+// lawns with SEASON_MIN_MOWS+ plain mows this season — a new customer's first
+// few cuts would skew a month.
+export const SEASON_MIN_MOWS = 6;
+export function seasonCurve(customers, visits, { now = Date.now(), mowIds = mowingServiceIds(), cleanupIds = cleanupServiceIds() } = {}) {
+  const seasonStart = new Date(new Date(now).getFullYear(), 0, 1).getTime();
+  const ids = new Set(customers.map((c) => c.id));
+  const per = new Map();
+  visits.forEach((v) => {
+    const t = v.exitTime || v.entryTime;
+    if (!ids.has(v.customerId) || v.status !== 'completed' || !(v.durationSecs >= 60) || !t || t < seasonStart || t > now) return;
+    if (visitKind(v, mowIds, cleanupIds) !== 'mow') return;
+    if (!per.has(v.customerId)) per.set(v.customerId, []);
+    per.get(v.customerId).push(v);
+  });
+  const months = {};
+  per.forEach((vs) => {
+    if (vs.length < SEASON_MIN_MOWS) return;
+    const lawnAvg = vs.reduce((s, v) => s + v.durationSecs, 0) / vs.length;
+    vs.forEach((v) => {
+      const month = monthKey(v.exitTime || v.entryTime);
+      if (!months[month]) months[month] = { month, visits: 0, mins: 0, index: 0 };
+      months[month].visits += 1;
+      months[month].mins += v.durationSecs / 60;
+      months[month].index += v.durationSecs / lawnAvg;
+    });
+  });
+  return Object.values(months)
+    .sort((a, b) => a.month.localeCompare(b.month))
+    .map((m) => ({ month: m.month, visits: m.visits, avgMins: m.mins / m.visits, pctOfNormal: (m.index / m.visits) * 100 }));
 }
 
 // One row per customer for a spreadsheet.

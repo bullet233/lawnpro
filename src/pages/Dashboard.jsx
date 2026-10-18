@@ -6,14 +6,14 @@ import DayReviewModal from '../components/DayReviewModal';
 import { getBusinessDayStart, getDaysSince } from '../utils/dateUtils';
 import { getVisitRevenueBreakdown, calculateServiceTotals } from '../utils/revenueUtils';
 import { getSettings } from '../db/settings';
-import { findPossibleLeafVisits, leafToolsVisible } from '../utils/leaves';
+import { findPossibleLeafVisits, leafToolsVisible, isLeafVisit, isCleanupVisit } from '../utils/leaves';
 import { setLeafTag } from '../utils/leafBilling';
 import { useServiceMode } from '../components/ServiceProvider';
 import { classifyTreatment } from '../db/treatments';
 import { defaultServicesForMode, isScheduleAnchor, findSuspectVisits } from '../utils/scheduler';
 import VisitEditModal from '../components/VisitEditModal';
 import AppDialog from '../components/AppDialog';
-import { Plus, Sunrise, Sun, Moon, Settings as SettingsIcon, Map as MapIcon, Route as RouteIcon, ClipboardList, Thermometer, CloudSun, CloudRain, Cloud, Users, AlertTriangle, TrendingUp, CheckCircle, Droplets, ChevronRight } from 'lucide-react';
+import { Plus, Sunrise, Sun, Moon, Settings as SettingsIcon, Map as MapIcon, ClipboardList, Thermometer, CloudSun, CloudRain, Cloud, AlertTriangle, TrendingUp, CheckCircle, Droplets, ChevronRight } from 'lucide-react';
 
 const formatDur = (secs) => {
   if (!secs) return '0m';
@@ -304,7 +304,7 @@ export default function Dashboard() {
   }, [activeRoute, routeVisits]);
 
   // Due / Overdue customers (>= their specific service interval)
-  const { mowingDue, fertilizerDue } = useMemo(() => {
+  const { mowingDue } = useMemo(() => {
     if (allCustomers.length === 0) return { mowingDue: [], fertilizerDue: [] };
     const mDue = [];
     const fDue = [];
@@ -462,13 +462,6 @@ export default function Dashboard() {
     setFixingSuspect(null);
   };
 
-  const activeDueList = activeMode === 'mowing' ? mowingDue : fertilizerDue;
-  const overdueCount = activeMode === 'mowing' ? mowingDue.filter(c => !c.isNew).length : treatmentAttention.length;
-  // Never-mowed active clients are "new", not "overdue". Kept as a separate count
-  // so the tab badge can match the "X overdue" mini-stat exactly instead of
-  // silently folding new clients into the overdue number.
-  const mowingNewCount = mowingDue.filter(c => c.isNew).length;
-
   const handleAddToRoute = async (customer) => {
     const defaultIds = defaultServicesForMode(customer, activeMode).map(s => s.id);
 
@@ -496,6 +489,72 @@ export default function Dashboard() {
       });
     }
   };
+
+  // ── Needs mowing: overdue, new and dropped-from-route lawns, each once ──
+  // Dropped and overdue used to be two lists with mostly the same people.
+  const needsList = useMemo(() => {
+    const map = new Map();
+    droppedStops.forEach(c => map.set(c.id, { cust: c, droppedDaysAgo: c.droppedDaysAgo }));
+    if (activeMode === 'mowing') {
+      mowingDue.forEach(c => {
+        const row = map.get(c.id) || { cust: c };
+        row.isNew = c.isNew;
+        row.daysSince = c.isNew ? null : c.daysSince;
+        row.intervalDays = c.intervalDays;
+        map.set(c.id, row);
+      });
+    }
+    const rank = (r) => (r.droppedDaysAgo != null ? 0 : r.isNew ? 2 : 1);
+    return [...map.values()].sort((a, b) =>
+      rank(a) - rank(b) ||
+      (b.droppedDaysAgo ?? 0) - (a.droppedDaysAgo ?? 0) ||
+      ((b.daysSince ?? 0) - (b.intervalDays ?? 0)) - ((a.daysSince ?? 0) - (a.intervalDays ?? 0)));
+  }, [droppedStops, mowingDue, activeMode]);
+
+  const [picked, setPicked] = useState([]);           // lawns ticked for a route
+  const [showAllNeeds, setShowAllNeeds] = useState(false);
+  const [showAllSuspects, setShowAllSuspects] = useState(false);
+  const [showAllLeafAsk, setShowAllLeafAsk] = useState(false);
+  const [showAllTreat, setShowAllTreat] = useState(false);
+  const togglePick = (id) => setPicked(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  const isOnRoute = (id) => !!activeRoute && activeRoute.stops.some(s => (typeof s === 'object' ? s.customerId : s) === id);
+  // Hand the lawns to Route Builder, which loads them in drive order.
+  const planRoute = (ids) => navigate('/routes', { state: { preloadIds: ids } });
+
+  // Leaf / clean-up charges still to decide (this month), for the problems area.
+  const leafUndecided = useMemo(() => {
+    if (activeMode !== 'mowing') return 0;
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    return filteredAllVisits.filter(v => v.status === 'completed' && v.exitTime >= monthStart &&
+      (isLeafVisit(v) || isCleanupVisit(v)) && !v.leafDecided).length;
+  }, [filteredAllVisits, activeMode]);
+
+  // This week's $/hr on job + drive time, next to the week's total.
+  const weekRate = useMemo(() => {
+    const today = getBusinessDayStart();
+    const weekStart = new Date(today);
+    weekStart.setDate(today.getDate() - ((today.getDay() + 6) % 7));
+    const wk = filteredAllVisits.filter(v => v.status === 'completed' && v.exitTime >= weekStart.getTime());
+    const secs = wk.reduce((s, v) => s + (v.durationSecs || 0) + (v.driveTimeSecs || 0), 0);
+    return secs >= 60 ? weekTotal / (secs / 3600) : null;
+  }, [filteredAllVisits, weekTotal]);
+
+  // Notes the driver typed — not the ones the app writes itself on skips and
+  // time splits ("Skipped", "Skipped when ending route — Rain", "Simultaneous
+  // visit with …").
+  const typedNotes = recentNotes.filter(v => {
+    const n = (v.note || '').trim();
+    if (/^Simultaneous visit with /i.test(n) || /Forcibly skipped/i.test(n)) return false;
+    if (v.status === 'skipped' && /^Skipped( when ending route)?( — .*)?$/i.test(n)) return false;
+    return true;
+  });
+
+  const todayRate = stats.duration + stats.driveTime >= 60 ? stats.revenue / ((stats.duration + stats.driveTime) / 3600) : null;
+  const routeProgress = activeRoute?.expandedStops ? {
+    done: activeRoute.expandedStops.filter(c => routeVisits.some(v => v.customerId === c.id && (v.status === 'completed' || v.status === 'skipped'))).length,
+    total: activeRoute.expandedStops.length,
+  } : null;
 
   // Weather icon helper
   const getWeatherIcon = (code) => {
@@ -576,430 +635,328 @@ export default function Dashboard() {
         </Link>
       </div>
 
-      {/* Contextual Action Bar */}
-      <div className="glass-card" style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.8rem 1rem', border: activeRoute ? '1px solid var(--color-primary)' : '1px solid var(--color-border)', background: activeRoute ? 'rgba(16,185,129,0.05)' : 'var(--color-bg-card)' }}>
+      {/* Top card — changes with the moment: route running, finished for the
+          day, or nothing planned yet */}
+      <div className="glass-card" style={{ marginBottom: '1.5rem', padding: '1.1rem 1.2rem', border: activeRoute ? '2px solid var(--color-primary)' : '1px solid var(--color-border)', background: activeRoute ? 'rgba(16,185,129,0.05)' : 'var(--color-bg-card)' }}>
         {activeRoute ? (
-          <>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-              <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--color-primary)', boxShadow: '0 0 8px var(--color-primary)' }} />
-              <div>
-                <div style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--color-text-main)' }}>
-                  {activeRoute.status === 'pending' ? 'Route Pending' : 'Route Active'}
-                </div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>
-                  {activeRoute.status === 'pending' ? 'Ready to begin' : (nextCustomer ? `Next: ${nextCustomer.name}` : 'All stops visited')}
-                </div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: '0.85rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--color-primary)' }}>
+                {activeRoute.status === 'pending' ? 'Route ready' : 'Route running'}
+              </div>
+              <div style={{ fontSize: '1.35rem', fontWeight: 800, color: 'var(--color-text-main)' }}>
+                {routeProgress ? `${routeProgress.done} of ${routeProgress.total} stops done` : activeRoute.name}
+              </div>
+              <div style={{ fontSize: '1rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>
+                {nextCustomer ? `Next: ${nextCustomer.name}` : 'All stops visited'}
+                {stats.visits > 0 && ` · today ${stats.visits} job${stats.visits === 1 ? '' : 's'}, $${stats.revenue.toFixed(0)}`}
               </div>
             </div>
-            <Link to="/live" className="btn btn-primary" style={{ padding: '0.4rem 1rem', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.3rem', textDecoration: 'none' }}>
-              {activeRoute.status === 'pending' ? 'Start' : 'Resume'} <MapIcon size={14} />
+            <Link to="/live" className="btn btn-primary" style={{ padding: '0.7rem 1.4rem', minHeight: '48px', fontSize: '1rem', display: 'flex', alignItems: 'center', gap: '0.4rem', textDecoration: 'none' }}>
+              {activeRoute.status === 'pending' ? 'Start' : 'Resume'} <MapIcon size={18} />
             </Link>
-          </>
+          </div>
         ) : stats.visits > 0 ? (
-          <>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-              <CheckCircle size={16} color="var(--color-primary)" />
-              <div>
-                <div style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--color-text-main)' }}>Route Complete</div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>Great job today!</div>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap', marginBottom: '0.8rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.2rem', fontWeight: 800, color: 'var(--color-text-main)' }}>
+                <CheckCircle size={22} color="var(--color-primary)" /> Today
+                {stats.firstEntry && (
+                  <span style={{ fontSize: '0.95rem', fontWeight: 600, color: 'var(--color-text-muted)' }}>
+                    · {new Date(stats.firstEntry).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}–{new Date(stats.lastExit).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                  </span>
+                )}
               </div>
+              <button className="btn btn-secondary" onClick={() => setShowDayReview(true)} style={{ padding: '0.6rem 1.1rem', minHeight: '44px', fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                Review day <ClipboardList size={16} />
+              </button>
             </div>
-            <button className="btn btn-secondary" onClick={() => setShowDayReview(true)} style={{ padding: '0.4rem 1rem', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-              Review <ClipboardList size={14} />
-            </button>
-          </>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '0.6rem' }}>
+              {[['Jobs', stats.visits], ['Revenue', `$${stats.revenue.toFixed(0)}`], ['Mowing', formatDur(stats.duration)], ['Driving', formatDur(stats.driveTime)], ['$/hr', todayRate != null ? `$${todayRate.toFixed(0)}` : '—']].map(([label, value]) => (
+                <div key={label} style={{ background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', padding: '0.6rem 0.8rem' }}>
+                  <div style={{ fontSize: '0.8rem', textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--color-text-muted)', fontWeight: 700 }}>{label}</div>
+                  <div style={{ fontSize: '1.4rem', fontWeight: 800, color: label === 'Revenue' ? 'var(--color-primary)' : 'var(--color-text-main)' }}>{value}</div>
+                </div>
+              ))}
+            </div>
+          </div>
         ) : (
-          <>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-              <RouteIcon size={16} color="var(--color-text-muted)" />
-              <div>
-                <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--color-text-main)' }}>No Route Planned</div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
+            <div>
+              <div style={{ fontSize: '0.85rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--color-text-muted)' }}>No route planned</div>
+              <div style={{ fontSize: '1.35rem', fontWeight: 800, color: 'var(--color-text-main)' }}>
+                {activeMode === 'mowing'
+                  ? (needsList.length > 0 ? `${needsList.length} lawn${needsList.length === 1 ? '' : 's'} need mowing` : 'Everyone is mowed up')
+                  : (treatmentAttention.length > 0 ? `${treatmentAttention.length} treatment${treatmentAttention.length === 1 ? '' : 's'} due` : 'No treatments due')}
               </div>
             </div>
-            <Link to="/routes" className="btn btn-primary" style={{ padding: '0.4rem 1rem', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.3rem', textDecoration: 'none' }}>
-              Build Route
-            </Link>
-          </>
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              {needsList.length > 0 && (
+                <button className="btn btn-primary" onClick={() => planRoute(needsList.map(r => r.cust.id))} style={{ padding: '0.7rem 1.2rem', minHeight: '48px', fontSize: '1rem' }}>
+                  Plan route with all {needsList.length}
+                </button>
+              )}
+              <Link to="/routes" className="btn btn-secondary" style={{ padding: '0.7rem 1.2rem', minHeight: '48px', fontSize: '1rem', display: 'flex', alignItems: 'center', textDecoration: 'none' }}>
+                Route Builder
+              </Link>
+            </div>
+          </div>
         )}
       </div>
 
-      {/* Mini-Stats Row */}
-      <h3 style={{ margin: '0 0 0.8rem 0', color: 'var(--color-text-main)', fontSize: '1rem', fontWeight: 600 }}>Today's Overview</h3>
-      <div className="glass-card" style={{ display: 'flex', justifyContent: 'space-between', padding: '1rem', marginBottom: '1.5rem' }}>
-        <div style={{ textAlign: 'center', flex: 1 }}>
-          <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px', marginBottom: '0.2rem' }}>Total Revenue</div>
-          <div style={{ fontWeight: 700, fontSize: '1.1rem', color: 'var(--color-primary)', marginBottom: '0.4rem' }}>${stats.revenue.toFixed(0)}</div>
-          
-          {Object.keys(stats.serviceBreakdown || {}).length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', alignItems: 'center' }}>
-              {Object.entries(stats.serviceBreakdown).sort((a, b) => b[1] - a[1]).map(([sId, amt]) => {
-                const sName = stats.settings?.defaultServices?.find(s => s.id === sId)?.name || sId;
-                return (
-                  <div key={sId} style={{ fontSize: '0.75rem', display: 'flex', justifyContent: 'space-between', width: '100%', maxWidth: '120px' }}>
-                    <span style={{ color: 'var(--color-text-muted)' }}>{sName}</span>
-                    <span style={{ color: 'var(--color-text-main)', fontWeight: 600 }}>${amt.toFixed(0)}</span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-        <div style={{ width: '1px', background: 'var(--color-border)', margin: '0 0.5rem' }} />
-        <div style={{ textAlign: 'center', flex: 1 }}>
-          <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px', marginBottom: '0.2rem' }}>Visits</div>
-          <div style={{ fontWeight: 700, fontSize: '1.1rem', color: 'var(--color-text-main)' }}>{stats.visits}</div>
-        </div>
-        <div style={{ width: '1px', background: 'var(--color-border)', margin: '0 0.5rem' }} />
-        <div style={{ textAlign: 'center', flex: 1 }}>
-          <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px', marginBottom: '0.2rem' }}>Time</div>
-          <div style={{ fontWeight: 700, fontSize: '1.1rem', color: 'var(--color-text-main)' }}>{formatDur(stats.duration)}</div>
-        </div>
-        <div style={{ width: '1px', background: 'var(--color-border)', margin: '0 0.5rem' }} />
-        <div style={{ textAlign: 'center', flex: 1 }}>
-          <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', letterSpacing: '0.5px', marginBottom: '0.2rem', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.2rem' }}>
-            <Users size={10} /> Clients
-          </div>
-          <div style={{ fontWeight: 700, fontSize: '1.1rem', color: 'var(--color-text-main)' }}>
-            {allCustomers.length}
-            {overdueCount > 0 && (
-              <div style={{ fontSize: '0.6rem', color: '#ef4444', fontWeight: 600, marginTop: '2px' }}>
-                {overdueCount} overdue
-              </div>
-            )}
-          </div>
-        </div>
-        </div>
-  
-        {/* Working Time Insights */}
-        {(stats.visits > 0 && stats.firstEntry) && (
-          <div style={{ marginTop: '1.5rem' }}>
-            <h3 style={{ margin: '0 0 0.8rem 0', color: 'var(--color-text-main)', fontSize: '1.1rem' }}>Shift Insights</h3>
-            <div className="glass-card" style={{ padding: '1rem', display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.6rem' }}>
-                <span style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)' }}>Clock In & Out</span>
-                <span style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--color-text-main)' }}>
-                  {new Date(stats.firstEntry).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} - {new Date(stats.lastExit).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
-                </span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.6rem' }}>
-                <span style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)' }}>Billable vs Drive Time</span>
-                <div style={{ textAlign: 'right' }}>
-                  <span style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--color-text-main)' }}>{formatDur(stats.duration)}</span>
-                  <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginLeft: '0.4rem' }}>({formatDur(stats.driveTime)} drive)</span>
-                </div>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)' }}>True Hourly Rate</span>
-                <span style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--color-text-main)' }}>
-                  ${stats.totalShiftSecs > 0 ? (stats.revenue / (stats.totalShiftSecs / 3600)).toFixed(2) : '0.00'}/hr
-                </span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '-0.3rem' }}>
-                <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>Billable Hourly Rate</span>
-                <span style={{ fontSize: '0.8rem', fontWeight: 500, color: 'var(--color-text-muted)' }}>
-                  ${stats.duration > 0 ? (stats.revenue / (stats.duration / 3600)).toFixed(2) : '0.00'}/hr
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
+      {/* ── Things to fix ─────────────────────────────────────────────── */}
 
-        {/* Forgotten leaf tags — fall mows that ran well over the lawn's usual
-            time and weren't marked as leaf jobs. One tap either way. */}
-        {activeMode === 'mowing' && possibleLeafVisits.length > 0 && (
-          <div style={{ marginTop: '1.5rem' }}>
-            <div style={{ fontSize: '1rem', fontWeight: 600, padding: '0.4rem 0.8rem', color: '#b45309', display: 'flex', alignItems: 'center', gap: '0.4rem', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.9rem', marginBottom: '1rem' }}>
-              🍂 Were these leaf jobs?
-              <span style={{ fontSize: '0.7rem', background: '#b45309', color: 'white', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>{possibleLeafVisits.length}</span>
-            </div>
-            <div className="glass-card" style={{ padding: 0, maxHeight: '240px', overflowY: 'auto', border: '1px solid rgba(180,83,9,0.35)' }}>
-              {possibleLeafVisits.map(f => {
-                const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
-                const dayWord = f.visit.exitTime >= startOfToday.getTime() ? 'today'
-                  : f.visit.exitTime >= startOfToday.getTime() - 86400000 ? 'yesterday'
-                  : new Date(f.visit.exitTime).toLocaleDateString([], { weekday: 'short' });
-                return (
-                  <div key={f.visit.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', padding: '0.7rem 0.8rem', borderBottom: '1px solid var(--color-border)' }}>
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--color-text-main)' }}>{f.customer.name}</div>
-                      <div style={{ fontSize: '0.78rem', marginTop: '0.1rem', color: '#b45309', fontWeight: 500 }}>
-                        Took {Math.round(f.visit.durationSecs / 60)} min {dayWord} — usually {Math.round(f.avgSecs / 60)} min
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', gap: '0.4rem', flexShrink: 0 }}>
-                      <button
-                        className="btn btn-primary"
-                        style={{ padding: '0.45rem 0.8rem', fontSize: '0.8rem', background: '#b45309', borderColor: '#b45309' }}
-                        onClick={() => handleLeafAnswer(f.visit, true)}
-                      >
-                        🍂 Yes, leaves
-                      </button>
-                      <button
-                        className="btn btn-secondary"
-                        style={{ padding: '0.45rem 0.8rem', fontSize: '0.8rem', background: 'transparent', border: '1px solid var(--color-border)' }}
-                        onClick={() => handleLeafAnswer(f.visit, false)}
-                      >
-                        No
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            <p style={{ fontSize: '0.72rem', color: 'var(--color-text-muted)', margin: '0.5rem 0.2rem 0' }}>
-              These mows ran much longer than usual. Tap Yes if you picked up leaves — the extra time is then counted as leaf time, not as a slow mow.
-            </p>
-          </div>
-        )}
-
-        {/* Possible mis-counted jobs — completed visits way under the lawn's usual time */}
-        {suspectVisits.length > 0 && (
-          <div style={{ marginTop: '1.5rem' }}>
-            <div style={{ fontSize: '1rem', fontWeight: 600, padding: '0.4rem 0.8rem', color: '#b91c1c', display: 'flex', alignItems: 'center', gap: '0.4rem', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.9rem', marginBottom: '1rem' }}>
-              <AlertTriangle size={16} /> Check these job times
-              <span style={{ fontSize: '0.7rem', background: '#ef4444', color: 'white', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>{suspectVisits.length}</span>
-            </div>
-            <div className="glass-card" style={{ padding: 0, maxHeight: '240px', overflowY: 'auto', border: '1px solid rgba(239,68,68,0.35)' }}>
-              {suspectVisits.map(f => {
+      {/* Possible mis-counted jobs and double-logged copies */}
+      {suspectVisits.length > 0 && (() => {
+        const dupes = suspectVisits.filter(f => f.duplicateOf).length;
+        const shown = showAllSuspects ? suspectVisits : suspectVisits.slice(0, 5);
+        return (
+          <div style={{ marginBottom: '1.5rem' }}>
+            <h3 style={sectionTitle('#b91c1c')}>
+              <AlertTriangle size={18} /> Check these job times
+              <span style={countBadge('#ef4444')}>{suspectVisits.length}</span>
+            </h3>
+            <div className="glass-card" style={{ padding: 0, border: '1px solid rgba(239,68,68,0.35)' }}>
+              {shown.map(f => {
                 const mins = Math.max(1, Math.round(f.visit.durationSecs / 60));
                 const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
                 const dayWord = f.visit.exitTime >= startOfToday.getTime() ? 'today'
                   : f.visit.exitTime >= startOfToday.getTime() - 86400000 ? 'yesterday'
-                  : new Date(f.visit.exitTime).toLocaleDateString([], { weekday: 'short' });
+                  : f.visit.exitTime >= startOfToday.getTime() - 6 * 86400000
+                    ? new Date(f.visit.exitTime).toLocaleDateString([], { weekday: 'short' })
+                    : new Date(f.visit.exitTime).toLocaleDateString([], { month: 'short', day: 'numeric' });
                 const timeStr = new Date(f.visit.exitTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-                const why = f.belowAvg
-                  ? `usually ~${Math.round(f.avgSecs / 60)} min (${f.priorCount} visits)`
-                  : 'under 2 min';
+                const why = f.duplicateOf
+                  ? `double-logged copy of the ${Math.round(f.duplicateOf.durationSecs / 60)}-min visit`
+                  : f.belowAvg ? `usually ~${Math.round(f.avgSecs / 60)} min (${f.priorCount} visits)` : 'under 2 min';
                 return (
-                  <div key={f.visit.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', padding: '0.6rem 0.8rem', borderBottom: '1px solid var(--color-border)' }}>
+                  <div key={f.visit.id} style={rowStyle}>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--color-text-main)' }}>{f.customer.name}</div>
-                      <div style={{ fontSize: '0.75rem', marginTop: '0.1rem', color: '#b91c1c', fontWeight: 500 }}>
-                        Logged {mins} min — {why} · {dayWord} {timeStr} · ${(f.visit.priceEarned || 0).toFixed(0)}
-                      </div>
+                      <div style={rowName}>{f.customer.name}</div>
+                      <div style={{ ...rowSub, color: '#b91c1c' }}>Logged {mins} min — {why} · {dayWord} {timeStr} · ${(f.visit.priceEarned || 0).toFixed(0)}</div>
                     </div>
-                    <div style={{ display: 'flex', gap: '0.4rem', flexShrink: 0 }}>
-                      <button
-                        className="btn btn-secondary"
-                        style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem', background: 'transparent', border: '1px solid var(--color-border)' }}
-                        onClick={() => setFixingSuspect(f)}
-                      >
-                        Fix
-                      </button>
-                      <button
-                        className="btn btn-secondary"
-                        style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem', background: 'transparent', border: '1px solid var(--color-border)', color: 'var(--color-primary)' }}
-                        onClick={() => handleSuspectOk(f.visit.id)}
-                      >
-                        ✓ OK
-                      </button>
-                      <button
-                        className="btn btn-secondary"
-                        aria-label={`Delete this visit to ${f.customer.name}`}
-                        style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem', background: 'transparent', border: '1px solid var(--color-border)', color: '#b91c1c' }}
-                        onClick={() => handleSuspectDelete(f)}
-                      >
-                        Delete
-                      </button>
+                    <div style={{ display: 'flex', gap: '0.4rem', flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                      {f.duplicateOf ? (
+                        <>
+                          <button className="btn btn-primary" style={{ ...bigBtn, background: '#b91c1c', borderColor: '#b91c1c' }} onClick={() => handleSuspectDelete(f)} aria-label={`Delete the copy for ${f.customer.name}`}>Delete copy</button>
+                          <button className="btn btn-secondary" style={bigBtn} onClick={() => handleSuspectOk(f.visit.id)}>Keep</button>
+                        </>
+                      ) : (
+                        <>
+                          <button className="btn btn-primary" style={bigBtn} onClick={() => setFixingSuspect(f)}>Fix time</button>
+                          <button className="btn btn-secondary" style={bigBtn} onClick={() => handleSuspectOk(f.visit.id)}>✓ OK</button>
+                          <button className="btn btn-secondary" style={{ ...bigBtn, color: '#b91c1c' }} onClick={() => handleSuspectDelete(f)} aria-label={`Delete this visit to ${f.customer.name}`}>Delete</button>
+                        </>
+                      )}
                     </div>
                   </div>
                 );
               })}
+              {suspectVisits.length > 5 && <ShowAll open={showAllSuspects} onClick={() => setShowAllSuspects(s => !s)} count={suspectVisits.length} />}
             </div>
-            <p style={{ fontSize: '0.72rem', color: 'var(--color-text-muted)', margin: '0.5rem 0.2rem 0' }}>
-              These finished far quicker than this lawn's usual time. Fix the time if the timer mis-counted, ✓ OK if it's right, or Delete if you only drove past.
+            <p style={helpText}>
+              {dupes > 0 && 'A double-logged copy is the same job saved twice — delete the copy. '}
+              {dupes < suspectVisits.length && 'For a short job: Fix time if the timer mis-counted, ✓ OK if it was right, or Delete if you only drove past.'}
             </p>
           </div>
-        )}
+        );
+      })()}
 
-        {/* Dropped from route — force-skipped and not serviced since */}
-        {droppedStops.length > 0 && (
-          <div style={{ marginTop: '1.5rem' }}>
-            <div style={{ fontSize: '1rem', fontWeight: 600, padding: '0.4rem 0.8rem', color: '#b45309', display: 'flex', alignItems: 'center', gap: '0.4rem', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.9rem', marginBottom: '1rem' }}>
-              <AlertTriangle size={16} /> Dropped from route
-              <span style={{ fontSize: '0.7rem', background: '#f59e0b', color: 'white', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>{droppedStops.length}</span>
+      {/* Forgotten leaf tags — fall mows that ran well over the lawn's usual time */}
+      {activeMode === 'mowing' && possibleLeafVisits.length > 0 && (
+        <div style={{ marginBottom: '1.5rem' }}>
+          <h3 style={sectionTitle('#b45309')}>
+            🍂 Were these leaf jobs?
+            <span style={countBadge('#b45309')}>{possibleLeafVisits.length}</span>
+          </h3>
+          <div className="glass-card" style={{ padding: 0, border: '1px solid rgba(180,83,9,0.35)' }}>
+            {(showAllLeafAsk ? possibleLeafVisits : possibleLeafVisits.slice(0, 5)).map(f => {
+              const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+              const dayWord = f.visit.exitTime >= startOfToday.getTime() ? 'today'
+                : f.visit.exitTime >= startOfToday.getTime() - 86400000 ? 'yesterday'
+                : new Date(f.visit.exitTime).toLocaleDateString([], { weekday: 'short' });
+              return (
+                <div key={f.visit.id} style={rowStyle}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={rowName}>{f.customer.name}</div>
+                    <div style={{ ...rowSub, color: '#b45309' }}>Took {Math.round(f.visit.durationSecs / 60)} min {dayWord} — usually {Math.round(f.avgSecs / 60)} min</div>
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.4rem', flexShrink: 0 }}>
+                    <button className="btn btn-primary" style={{ ...bigBtn, background: '#b45309', borderColor: '#b45309' }} onClick={() => handleLeafAnswer(f.visit, true)}>🍂 Yes, leaves</button>
+                    <button className="btn btn-secondary" style={bigBtn} onClick={() => handleLeafAnswer(f.visit, false)}>No</button>
+                  </div>
+                </div>
+              );
+            })}
+            {possibleLeafVisits.length > 5 && <ShowAll open={showAllLeafAsk} onClick={() => setShowAllLeafAsk(s => !s)} count={possibleLeafVisits.length} />}
+          </div>
+          <p style={helpText}>These mows ran much longer than usual. Tap Yes if you picked up leaves — the extra time is then counted as leaf time, not as a slow mow.</p>
+        </div>
+      )}
+
+      {/* Leaf / clean-up charges still open this month */}
+      {leafUndecided > 0 && (
+        <button className="glass-card" onClick={() => navigate('/analytics', { state: { tab: 'leaves' } })}
+          style={{ width: '100%', marginBottom: '1.5rem', padding: '1rem 1.2rem', borderLeft: '4px solid #b45309', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', cursor: 'pointer', textAlign: 'left', fontSize: '1.05rem', fontWeight: 700, color: '#b45309' }}>
+          <span>🍂 {leafUndecided} leaf charge{leafUndecided === 1 ? '' : 's'} still to decide this month</span>
+          <span style={{ whiteSpace: 'nowrap', display: 'flex', alignItems: 'center' }}>Open <ChevronRight size={18} /></span>
+        </button>
+      )}
+
+      {/* ── Who needs service ─────────────────────────────────────────── */}
+      {(activeMode === 'mowing' || needsList.length > 0) && (
+        <div style={{ marginBottom: '1.5rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.8rem', flexWrap: 'wrap', marginBottom: '0.8rem' }}>
+            <h3 style={{ ...sectionTitle('var(--color-text-main)'), margin: 0 }}>
+              {activeMode === 'mowing' ? '🌾 Needs mowing' : 'Dropped from route'}
+              {needsList.length > 0 && <span style={countBadge('#ef4444')}>{needsList.length}</span>}
+            </h3>
+            {needsList.length > 0 && (
+              <button className="btn btn-primary" style={bigBtn} onClick={() => planRoute(picked.length > 0 ? picked : needsList.map(r => r.cust.id))}>
+                {picked.length > 0 ? `Plan route with ${picked.length} picked` : `Plan route with all ${needsList.length}`}
+              </button>
+            )}
+          </div>
+          {needsList.length === 0 ? (
+            <div style={{ padding: '1.5rem', textAlign: 'center', color: 'var(--color-text-muted)', background: 'var(--color-bg-card)', borderRadius: 'var(--radius-md)', border: '1px dashed var(--color-border)', fontSize: '1rem' }}>
+              No one needs mowing right now.
             </div>
-            <div className="glass-card" style={{ padding: 0, maxHeight: '220px', overflowY: 'auto', border: '1px solid rgba(245,158,11,0.35)' }}>
-              {droppedStops.map(cust => {
-                const isInActiveRoute = activeRoute && activeRoute.stops.some(s => {
-                  const id = typeof s === 'object' ? s.customerId : s;
-                  return id === cust.id;
-                });
+          ) : (
+            <div className="glass-card" style={{ padding: 0 }}>
+              {(showAllNeeds ? needsList : needsList.slice(0, 5)).map(r => {
+                const on = picked.includes(r.cust.id);
+                const late = r.daysSince != null && r.intervalDays != null && r.daysSince > r.intervalDays + 2;
+                const tags = [];
+                if (r.droppedDaysAgo != null) tags.push({ text: `dropped ${r.droppedDaysAgo === 0 ? 'today' : `${r.droppedDaysAgo}d ago`}`, color: '#b45309' });
+                if (r.daysSince != null) tags.push({ text: `${r.daysSince} days since last cut`, color: late ? '#b91c1c' : '#b45309' });
+                if (r.isNew) tags.push({ text: 'new client', color: 'var(--color-primary)' });
                 return (
-                  <div key={cust.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.6rem 0.8rem', borderBottom: '1px solid var(--color-border)' }}>
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--color-text-main)' }}>{cust.name}</div>
-                      <div style={{ fontSize: '0.75rem', marginTop: '0.1rem', color: '#b45309', fontWeight: 500 }}>
-                        Skipped, still needs service · {cust.droppedDaysAgo === 0 ? 'today' : `${cust.droppedDaysAgo}d ago`}
+                  <div key={r.cust.id} style={rowStyle}>
+                    <button onClick={() => togglePick(r.cust.id)} aria-pressed={on} aria-label={`${on ? 'Untick' : 'Tick'} ${r.cust.name} for the route`}
+                      style={{ width: '44px', height: '44px', flexShrink: 0, borderRadius: '10px', cursor: 'pointer', border: `2px solid ${on ? 'var(--color-primary)' : 'var(--color-border)'}`, background: on ? 'var(--color-primary)' : 'transparent', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      {on && <CheckCircle size={22} />}
+                    </button>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={rowName}>{r.cust.name}</div>
+                      <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginTop: '0.2rem' }}>
+                        {tags.map(t => (
+                          <span key={t.text} style={{ fontSize: '0.85rem', fontWeight: 700, color: t.color, background: 'var(--color-bg-main)', border: '1px solid var(--color-border)', padding: '0.1rem 0.5rem', borderRadius: '999px' }}>{t.text}</span>
+                        ))}
                       </div>
                     </div>
-                    {isInActiveRoute ? (
-                      <span style={{ fontSize: '0.75rem', color: 'var(--color-primary)', fontWeight: 600 }}>Added ✓</span>
+                    {isOnRoute(r.cust.id) ? (
+                      <span style={{ fontSize: '0.95rem', color: 'var(--color-primary)', fontWeight: 700, flexShrink: 0 }}>On route ✓</span>
                     ) : (
-                      <button
-                        className="btn btn-secondary"
-                        style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.2rem', background: 'transparent', border: '1px solid var(--color-border)' }}
-                        onClick={() => handleAddToRoute(cust)}
-                      >
-                        <Plus size={12} /> Add
+                      <button className="btn btn-secondary" style={{ ...bigBtn, display: 'flex', alignItems: 'center', gap: '0.3rem', flexShrink: 0 }} onClick={() => handleAddToRoute(r.cust)}>
+                        <Plus size={16} /> Add
                       </button>
                     )}
                   </div>
                 );
               })}
+              {needsList.length > 5 && <ShowAll open={showAllNeeds} onClick={() => setShowAllNeeds(s => !s)} count={needsList.length} />}
             </div>
-          </div>
-        )}
-
-        {/* Needs Attention / Due This Week */}
-      <div style={{ marginTop: '1.5rem' }}>
-        <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.5rem', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div
-            style={{
-              background: 'transparent', border: 'none', fontSize: '1rem', fontWeight: 600, padding: '0.4rem 0.8rem', position: 'relative',
-              color: 'var(--color-primary)'
-            }}
-          >
-            {activeMode === 'mowing' ? '🌾 Mowing' : '🧪 Treatments Due'}
-            {activeMode === 'mowing' ? (
-              <>
-                {overdueCount > 0 && <span style={{ marginLeft: '0.4rem', fontSize: '0.7rem', background: '#ef4444', color: 'white', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>{overdueCount} overdue</span>}
-                {mowingNewCount > 0 && <span style={{ marginLeft: '0.35rem', fontSize: '0.7rem', background: 'var(--color-primary)', color: 'white', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>+{mowingNewCount} new</span>}
-              </>
-            ) : (
-              treatmentAttention.length > 0 && <span style={{ marginLeft: '0.4rem', fontSize: '0.7rem', background: '#ef4444', color: 'white', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>{treatmentAttention.length}</span>
-            )}
-            <div style={{ position: 'absolute', bottom: '-0.5rem', left: 0, right: 0, height: '3px', background: 'var(--color-primary)', borderRadius: '3px' }} />
-          </div>
-          {activeMode === 'fertilizer' && (
-            <Link to="/treatments" style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--color-primary)', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
-              Manage <ChevronRight size={14} />
-            </Link>
           )}
-        </div>
-
-        {activeMode === 'mowing' ? (
-          activeDueList.length > 0 ? (
-            <div className="glass-card" style={{ padding: '0', maxHeight: '280px', overflowY: 'auto' }}>
-              <div style={{ display: 'flex', flexDirection: 'column' }}>
-                {activeDueList.map(cust => {
-                  const isInActiveRoute = activeRoute && activeRoute.stops.some(s => {
-                    const id = typeof s === 'object' ? s.customerId : s;
-                    return id === cust.id;
-                  });
-
-                  return (
-                    <div key={cust.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.6rem 0.8rem', borderBottom: '1px solid var(--color-border)' }}>
-                      <div>
-                        <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--color-text-main)' }}>{cust.name}</div>
-                        <div style={{ fontSize: '0.75rem', marginTop: '0.1rem', color: cust.isNew ? 'var(--color-primary)' : (cust.daysSince > cust.intervalDays + 2 ? '#ef4444' : '#f59e0b'), fontWeight: 500 }}>
-                          {cust.isNew ? '✨ New Client' : `⏳ ${cust.daysSince} days ago`}
-                        </div>
-                      </div>
-                      {isInActiveRoute ? (
-                        <span style={{ fontSize: '0.75rem', color: 'var(--color-primary)', fontWeight: 600 }}>Added ✓</span>
-                      ) : (
-                        <button
-                          className="btn btn-secondary"
-                          style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.2rem', background: 'transparent', border: '1px solid var(--color-border)' }}
-                          onClick={() => handleAddToRoute(cust)}
-                        >
-                          <Plus size={12} /> Add
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ) : (
-            <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--color-text-muted)', background: 'var(--color-bg-card)', borderRadius: 'var(--radius-md)', border: '1px dashed var(--color-border)' }}>
-              No one is currently due for mowing.
-            </div>
-          )
-        ) : (
-          treatmentAttention.length > 0 ? (
-            <div className="glass-card" style={{ padding: '0', maxHeight: '300px', overflowY: 'auto' }}>
-              <div style={{ display: 'flex', flexDirection: 'column' }}>
-                {treatmentAttention.slice(0, 6).map(t => (
-                  <Link key={t.id} to="/treatments" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.6rem 0.8rem', borderBottom: '1px solid var(--color-border)', textDecoration: 'none' }}>
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--color-text-main)' }}>{t.customer.name}</div>
-                      <div style={{ fontSize: '0.75rem', marginTop: '0.1rem', color: 'var(--color-text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {t.stepName}
-                      </div>
-                    </div>
-                    <span style={{ flexShrink: 0, marginLeft: '0.6rem', fontSize: '0.7rem', fontWeight: 700, color: t.state === 'overdue' ? '#ef4444' : '#f59e0b', background: t.state === 'overdue' ? 'rgba(239,68,68,0.1)' : 'rgba(245,158,11,0.12)', padding: '0.15rem 0.5rem', borderRadius: '10px' }}>
-                      {t.state === 'overdue' ? 'Overdue' : 'Due Now'}
-                    </span>
-                  </Link>
-                ))}
-                {treatmentAttention.length > 6 && (
-                  <Link to="/treatments" style={{ padding: '0.6rem 0.8rem', textAlign: 'center', fontSize: '0.8rem', fontWeight: 600, color: 'var(--color-primary)', textDecoration: 'none' }}>
-                    View all {treatmentAttention.length} →
-                  </Link>
-                )}
-              </div>
-            </div>
-          ) : (
-            <Link to="/treatments" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem', padding: '2rem', textAlign: 'center', color: 'var(--color-text-muted)', background: 'var(--color-bg-card)', borderRadius: 'var(--radius-md)', border: '1px dashed var(--color-border)', textDecoration: 'none' }}>
-              <Droplets size={16} /> No treatments due — tap to manage programs
-            </Link>
-          )
-        )}
-      </div>
-
-      {/* Recent Notes Alert */}
-      {recentNotes.length > 0 && (
-        <div style={{ marginTop: '1.5rem' }}>
-          <h3 style={{ margin: '0 0 1rem 0', color: 'var(--color-text-main)', fontSize: '1.1rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            <ClipboardList size={18} color="#f59e0b" /> Recent Job Notes
-          </h3>
-          <div className="glass-card" style={{ padding: '0.5rem', background: 'rgba(245,158,11,0.05)', border: '1px solid rgba(245,158,11,0.2)' }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
-              {recentNotes.map((visit, i) => {
-                const cust = allCustomers.find(c => c.id === visit.customerId);
-                return (
-                  <div key={i} style={{ padding: '0.8rem', background: 'var(--color-bg-card)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
-                      <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--color-text-main)' }}>{cust?.name || 'Unknown Client'}</div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                        <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>
-                          {new Date(visit.exitTime).toLocaleDateString([], { month: 'short', day: 'numeric' })}
-                        </div>
-                        <button 
-                          style={{ background: 'none', border: 'none', color: '#10b981', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center' }}
-                          onClick={() => db.visits.update(visit.id, { note: '' })}
-                          title="Dismiss Note"
-                        >
-                          <CheckCircle size={16} />
-                        </button>
-                      </div>
-                    </div>
-                    <div style={{ fontSize: '0.85rem', color: 'var(--color-text-main)', fontStyle: 'italic', background: 'var(--color-bg-main)', padding: '0.6rem', borderRadius: '4px', borderLeft: '3px solid #f59e0b' }}>
-                      "{visit.note}"
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+          {needsList.length > 0 && (
+            <p style={helpText}>Tick lawns and tap Plan route to open Route Builder with them in drive order, or Add to put one straight on {activeRoute ? 'the current' : "today's"} route.</p>
+          )}
         </div>
       )}
 
-      {/* Weekly Earnings */}
-      <div style={{ marginTop: '1.5rem' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem' }}>
-          <h3 style={{ margin: 0, color: 'var(--color-text-main)', fontSize: '1.1rem' }}>This Week</h3>
-          <span style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--color-primary)' }}>${weekTotal.toFixed(2)}</span>
+      {/* Fertilizer: program treatments due */}
+      {activeMode === 'fertilizer' && (
+        <div style={{ marginBottom: '1.5rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem' }}>
+            <h3 style={{ ...sectionTitle('var(--color-text-main)'), margin: 0 }}>
+              🧪 Treatments due
+              {treatmentAttention.length > 0 && <span style={countBadge('#ef4444')}>{treatmentAttention.length}</span>}
+            </h3>
+            <Link to="/treatments" style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--color-primary)', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
+              Manage <ChevronRight size={16} />
+            </Link>
+          </div>
+          {treatmentAttention.length > 0 ? (
+            <div className="glass-card" style={{ padding: 0 }}>
+              {(showAllTreat ? treatmentAttention : treatmentAttention.slice(0, 5)).map(t => (
+                <Link key={t.id} to="/treatments" style={{ ...rowStyle, textDecoration: 'none' }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={rowName}>{t.customer.name}</div>
+                    <div style={{ ...rowSub, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.stepName}</div>
+                  </div>
+                  <span style={{ flexShrink: 0, marginLeft: '0.6rem', fontSize: '0.85rem', fontWeight: 700, color: t.state === 'overdue' ? '#b91c1c' : '#b45309', background: t.state === 'overdue' ? 'rgba(239,68,68,0.1)' : 'rgba(245,158,11,0.12)', padding: '0.2rem 0.6rem', borderRadius: '999px' }}>
+                    {t.state === 'overdue' ? 'Overdue' : 'Due now'}
+                  </span>
+                </Link>
+              ))}
+              {treatmentAttention.length > 5 && <ShowAll open={showAllTreat} onClick={() => setShowAllTreat(s => !s)} count={treatmentAttention.length} />}
+            </div>
+          ) : (
+            <Link to="/treatments" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem', padding: '1.5rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-card)', borderRadius: 'var(--radius-md)', border: '1px dashed var(--color-border)', textDecoration: 'none', fontSize: '1rem' }}>
+              <Droplets size={18} /> No treatments due — tap to manage programs
+            </Link>
+          )}
         </div>
-        <div className="glass-card" style={{ padding: '1rem 0.8rem 0.5rem' }}>
-          <WeeklyChart data={weeklyData} />
+      )}
+
+      {/* ── This week ─────────────────────────────────────────────────── */}
+      <button onClick={() => navigate('/history')} className="glass-card" style={{ width: '100%', marginBottom: '1.5rem', padding: '1rem 1rem 0.6rem', cursor: 'pointer', textAlign: 'left', display: 'block' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '1rem', marginBottom: '0.6rem' }}>
+          <span style={{ fontSize: '1.15rem', fontWeight: 800, color: 'var(--color-text-main)' }}>This week</span>
+          <span style={{ display: 'flex', alignItems: 'baseline', gap: '0.6rem' }}>
+            <span style={{ fontSize: '1.4rem', fontWeight: 800, color: 'var(--color-primary)' }}>${weekTotal.toFixed(0)}</span>
+            {weekRate != null && <span style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--color-text-muted)' }}>${weekRate.toFixed(0)}/hr</span>}
+            <ChevronRight size={18} color="var(--color-text-muted)" />
+          </span>
         </div>
-      </div>
-      
+        <WeeklyChart data={weeklyData} />
+      </button>
 
-
+      {/* ── Notes you typed in the last two days ──────────────────────── */}
+      {typedNotes.length > 0 && (
+        <div style={{ marginBottom: '1.5rem' }}>
+          <h3 style={sectionTitle('var(--color-text-main)')}>
+            <ClipboardList size={18} color="#b45309" /> Recent job notes
+          </h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            {typedNotes.map(visit => {
+              const cust = allCustomers.find(c => c.id === visit.customerId);
+              return (
+                <div key={visit.id} className="glass-card" style={{ padding: '0.9rem 1rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.8rem', marginBottom: '0.4rem' }}>
+                    <div style={rowName}>{cust?.name || 'Unknown client'}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                      <span style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)' }}>{new Date(visit.exitTime).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
+                      <button className="btn btn-secondary" style={{ ...bigBtn, color: 'var(--color-primary)' }} onClick={() => db.visits.update(visit.id, { note: '' })} title="Dismiss note">
+                        <CheckCircle size={18} /> Done
+                      </button>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: '1rem', color: 'var(--color-text-main)', fontStyle: 'italic', background: 'var(--color-bg-main)', padding: '0.6rem 0.8rem', borderRadius: '4px', borderLeft: '3px solid #f59e0b' }}>
+                    “{visit.note}”
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+// Shared bits for the Home cards.
+const sectionTitle = (color) => ({ margin: '0 0 0.8rem 0', color, fontSize: '1.15rem', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '0.5rem' });
+const countBadge = (bg) => ({ fontSize: '0.8rem', background: bg, color: 'white', padding: '0.15rem 0.55rem', borderRadius: '999px', fontWeight: 700 });
+const rowStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.7rem', padding: '0.8rem 1rem', borderBottom: '1px solid var(--color-border)' };
+const rowName = { fontWeight: 700, fontSize: '1.05rem', color: 'var(--color-text-main)' };
+const rowSub = { fontSize: '0.9rem', marginTop: '0.15rem', color: 'var(--color-text-muted)', fontWeight: 600 };
+const bigBtn = { padding: '0.5rem 0.9rem', minHeight: '44px', fontSize: '0.95rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '0.3rem' };
+const helpText = { fontSize: '0.88rem', color: 'var(--color-text-muted)', margin: '0.5rem 0.2rem 0' };
+
+function ShowAll({ open, onClick, count }) {
+  return (
+    <button onClick={onClick} style={{ width: '100%', minHeight: '48px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '1rem', fontWeight: 700, color: 'var(--color-primary)' }}>
+      {open ? 'Show fewer' : `Show all ${count}`}
+    </button>
   );
 }

@@ -89,6 +89,7 @@ export const SUSPECT_ABS_FLOOR_SECS = 120;   // no real mow/fert job is under 2 
 export const SUSPECT_RATIO = 0.4;            // <40% of the lawn's own average
 export const SUSPECT_MIN_HISTORY = 3;        // need a believable average to compare
 export const SUSPECT_WINDOW_DAYS = 2;        // look back today + 2 prior days
+export const SUSPECT_TWIN_MS = 10 * 60000;   // a near-empty copy within 10 min of a real visit
 
 export function findSuspectVisits(allVisits, mode, now = Date.now()) {
   const d = new Date(now);
@@ -96,10 +97,20 @@ export function findSuspectVisits(allVisits, mode, now = Date.now()) {
   const windowStart = d.getTime() - SUSPECT_WINDOW_DAYS * 86400000;
   const inMode = (v) => !v.division || v.division === mode;
   const mowIds = mowingServiceIds();
-  return (allVisits || [])
-    .filter((v) => v.status === 'completed' && inMode(v) && !v.reviewedOk &&
-      v.exitTime >= windowStart && v.durationSecs > 0)
+  const done = (allVisits || []).filter((v) => v.status === 'completed' && inMode(v));
+  // A double-logged job: a near-empty visit (0s included) right next to a
+  // real visit at the same lawn. Flagged however old it is, so earlier
+  // copies can be cleaned up too.
+  const twinOf = (v) => (v.durationSecs || 0) < SUSPECT_ABS_FLOOR_SECS
+    ? done.find((o) => o.id !== v.id && o.customerId === v.customerId &&
+        (o.durationSecs || 0) >= SUSPECT_ABS_FLOOR_SECS &&
+        Math.abs((o.exitTime || 0) - (v.exitTime || 0)) <= SUSPECT_TWIN_MS) || null
+    : null;
+  return done
+    .filter((v) => !v.reviewedOk && ((v.exitTime >= windowStart && v.durationSecs > 0) || twinOf(v)))
     .map((v) => {
+      const twin = twinOf(v);
+      if (twin) return { visit: v, avgSecs: null, priorCount: 0, belowFloor: true, belowAvg: false, duplicateOf: twin };
       // Like against like: a leaf visit is judged by the lawn's leaf visits
       // (plain mows until it has some), and leaf visits never raise the bar a
       // plain mow is held to.

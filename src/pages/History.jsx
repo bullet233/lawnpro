@@ -6,8 +6,9 @@ import DayReviewModal from '../components/DayReviewModal';
 import VisitEditModal from '../components/VisitEditModal';
 import AppDialog from '../components/AppDialog';
 import ComplianceLogModal from '../components/ComplianceLogModal';
+import DayRouteView from '../components/DayRouteView';
 import { getSettings } from '../db/settings';
-import { isCleanupVisit, isLeafVisit, LEAF_REVENUE_KEY } from '../utils/leaves';
+import { isCleanupVisit, isLeafVisit, LEAF_REVENUE_KEY, leafLevelLabel } from '../utils/leaves';
 import { changeVisitServices } from '../utils/leafBilling';
 import { getBusinessDateString, parseLocalDate } from '../utils/dateUtils';
 import { calculateServiceTotals, getVisitRevenueBreakdown } from '../utils/revenueUtils';
@@ -79,6 +80,7 @@ export default function History() {
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
   const [search, setSearch] = useState('');           // customer name / address
   const [collapsedDays, setCollapsedDays] = useState([]); // day keys folded shut
+  const [routeDays, setRouteDays] = useState([]);         // day keys shown as a route
 
   useEffect(() => {
     setSettings(getSettings());
@@ -386,8 +388,10 @@ export default function History() {
         : { open: true, text: `Clean-up price: not decided${hint}` };
     }
     if (!isLeafVisit(job)) return null;
-    if (!job.leafDecided) return { open: true, text: `🍂 Leaf charge: not decided${hint}` };
-    return { open: false, text: job.leafCharge > 0 ? `🍂 +${money(job.leafCharge)} leaves` : '🍂 Leaves: no charge' };
+    const lvl = leafLevelLabel(job.leafLevel);
+    const tag = lvl ? `🍂 ${lvl} leaves` : '🍂';
+    if (!job.leafDecided) return { open: true, text: `${tag} · charge not decided${hint}` };
+    return { open: false, text: job.leafCharge > 0 ? `${tag} · +${money(job.leafCharge)}` : `${tag} · no charge` };
   };
 
   const handleCalendarDayClick = (dateStr) => {
@@ -682,6 +686,7 @@ export default function History() {
               const daySecs    = jobs.reduce((s, j) => s + (j.durationSecs || 0) + (j.driveTimeSecs || 0), 0);
               const dayRate    = daySecs >= 60 ? dayRevenue / (daySecs / 3600) : null;
               const collapsed  = collapsedDays.includes(dateStr);
+              const asRoute    = routeDays.includes(dateStr);
 
               return (
                 <div key={dateStr} style={{ marginBottom: collapsed ? '0.5rem' : '2.5rem' }}>
@@ -718,8 +723,29 @@ export default function History() {
                     </span>
                   </div>
 
+                  {/* List or Route for this day */}
+                  {!collapsed && (
+                    <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '0.8rem' }}>
+                      {[[false, 'List'], [true, 'Route']].map(([route, label]) => (
+                        <button key={label} aria-pressed={asRoute === route}
+                          onClick={() => setRouteDays(prev => route ? [...prev.filter(d => d !== dateStr), dateStr] : prev.filter(d => d !== dateStr))}
+                          style={{ ...pillStyle(asRoute === route), minWidth: '84px' }}>
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {!collapsed && asRoute && (
+                    <DayRouteView
+                      customers={allCustomers}
+                      // The whole day (not just what the filters show), so drive
+                      // times and gaps line up stop to stop.
+                      visits={allVisits.filter(v => (!v.division || v.division === activeMode) && v.exitTime && getBusinessDateString(new Date(v.exitTime)) === dateStr)}
+                    />
+                  )}
+
                   {/* Job Tickets List */}
-                  <div style={{ display: collapsed ? 'none' : 'flex', flexDirection: 'column', gap: '0.8rem' }}>
+                  <div style={{ display: collapsed || asRoute ? 'none' : 'flex', flexDirection: 'column', gap: '0.8rem' }}>
                     {jobs.map(job => {
                       const colors       = STATUS_COLORS[job.status] || STATUS_COLORS.completed;
                       const serviceNames = getServiceNames(job);
