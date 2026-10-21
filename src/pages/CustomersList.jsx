@@ -5,7 +5,9 @@ import { Plus, ChevronRight, Upload, CheckCircle, AlertTriangle, Search, ArrowUp
 import { Link, useNavigate } from 'react-router-dom';
 import AppDialog from '../components/AppDialog';
 import { trackApiCall } from '../utils/apiTracker';
-import { getDaysSince } from '../utils/dateUtils';
+
+import { serviceDue, isLate } from '../utils/dueStatus';
+import { seasonFromSettings } from '../utils/mowSeason';
 import { parseLawnSizeToSqFt } from '../utils/parseLawnSize';
 import { getSettings } from '../db/settings';
 import { classifyTreatment } from '../db/treatments';
@@ -174,6 +176,7 @@ export default function CustomersList() {
     if (!customers) return [];
     const now = Date.now();
     const settings = getSettings();
+    const season = seasonFromSettings(settings, now);
     const defaultServices = settings.defaultServices || [];
     const mowIds = defaultServices.filter(s => s.category === 'Mowing' || s.id === 's1').map(s => s.id);
     const fertIds = defaultServices.filter(s => s.category === 'Fertilizer' || s.id === 's3').map(s => s.id);
@@ -205,32 +208,24 @@ export default function CustomersList() {
 
       // visitStats is already scoped to the active division, so lastExit is the
       // last visit in the current mode.
-      const daysSinceVisit = stats?.lastExit ? getDaysSince(stats.lastExit) : null;
+      // The shared due check (utils/dueStatus) — same answer as Home and the scheduler.
+      const due = serviceDue(c, allVisits || [], { division: activeMode, now, season, mowIds, fertIds });
+      const applyDue = () => {
+        primaryDaysSince = due.daysSince;
+        if (due.daysSince != null) maxOverdueDays = due.daysSince - due.intervalDays;
+        if (due.status === 'overdue') { overdueLevel = isLate(due) ? 2 : 1; dueText = `${due.overdueDays}d overdue`; }
+        else if (due.status === 'dueToday') { overdueLevel = 1; dueText = 'due today'; }
+        else if (due.status === 'firstCut') { overdueLevel = 1; dueText = 'first cut'; }
+      };
       if (activeMode === 'mowing') {
-        const mInt = c.mowingInterval || c.serviceInterval || 7;
-        if (daysSinceVisit !== null) {
-          if (daysSinceVisit > mInt + 3) overdueLevel = 2;
-          else if (daysSinceVisit >= mInt) overdueLevel = 1;
-          maxOverdueDays = daysSinceVisit - mInt;
-          primaryDaysSince = daysSinceVisit;
-          if (overdueLevel === 2) dueText = `${daysSinceVisit}d overdue`;
-          else if (overdueLevel === 1) dueText = `${daysSinceVisit}d ago`;
-        }
+        applyDue();
       } else if (activeMode === 'fertilizer') {
         if (c.treatmentProgramId) {
           const st = treatStateByCust[c.id];
           if (st === 'overdue') { overdueLevel = 2; maxOverdueDays = 999; dueText = 'Treatment overdue'; }
           else if (st === 'due') { overdueLevel = 1; maxOverdueDays = 1; dueText = 'Treatment due'; }
         } else {
-          const fInt = c.fertilizerInterval || 30;
-          if (daysSinceVisit !== null) {
-            if (daysSinceVisit > fInt + 7) overdueLevel = 2;
-            else if (daysSinceVisit >= fInt) overdueLevel = 1;
-            maxOverdueDays = daysSinceVisit - fInt;
-            primaryDaysSince = daysSinceVisit;
-            if (overdueLevel === 2) dueText = `${daysSinceVisit}d overdue`;
-            else if (overdueLevel === 1) dueText = `${daysSinceVisit}d ago`;
-          }
+          applyDue();
         }
       }
 

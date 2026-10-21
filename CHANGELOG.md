@@ -5,6 +5,89 @@ not yet deployed to the tablet (deploy = `npm run deploy` → gh-pages).
 
 ## [Unreleased]
 
+## [1.4.11] - 2026-10-20
+
+### Bidding matrix lawn counts (2026-10-20)
+- Each size tier in the Smart Bidding Matrix shows how many active mowing
+  lawns you service in it ("18 lawns"); the top tier also counts anything
+  bigger. Expanded tiers show the count on each size row too (lawns from the
+  row above up to that size), and the rows add up to the tier's count.
+- The tier "Graph" (a sq-ft-per-minute dot line with unnamed dots) is replaced
+  by a **Lawns** button: one card per lawn in the tier with its usual time vs
+  what its size predicts (+/- min), what it pays and earns per hour, and its
+  fastest/slowest mow; worst $/hr first, coloured against the $100 target and
+  underpaid line; tap a card to open the client.
+
+### Who's due and when they were last done (2026-10-20)
+- One shared due check (`utils/dueStatus.js`, tested) now drives Home, the
+  Clients list, the Weekly Scheduler, the Live nearby prompt and the route
+  list, so every screen agrees. It follows the mowing season and snoozes,
+  counts cycle skips as done (not catch-up skips), and ignores 1-59 second
+  drive-past/double-log visits.
+- Route list rows and the Up next cards show when each lawn was last done
+  ("cut 8d ago"), in red when it's more than 2 days late.
+- Today summary: the first time Home opens each day, one card shows how many
+  lawns are overdue, due today, dropped yesterday (and first cuts / older
+  drops), with Plan route and Got it. Shows once per day.
+
+### Routing walkthrough fixes (2026-10-20)
+- Route panel counts skips apart: "1 of 5 done - 1 skipped", with a grey
+  segment for skips in the progress bar (skips used to count as "done").
+- Force End Route sits below the opened stop list (outside its scroll), so
+  it is always fully visible.
+- Pending-route, Next Job and job-complete cards restyled to match the new
+  job card: white card, status pill, big name, big green buttons (the
+  job-complete Done button was black), bigger stat tiles and chips, leaf
+  button with the same icon as the job card.
+- Job details close when the card moves on to a different lawn; they stay
+  open from Next Job into the running job at the same lawn.
+
+### Est. finish fixes (2026-10-20)
+- The job in progress now counts: its usual time minus the time already on
+  the clock (never below zero). It used to be left out, so the finish time
+  read about one job early.
+- The finish time is re-worked every minute (it froze until a job started or
+  ended).
+- The stop being driven to only counts the part of the drive still ahead.
+- Visits under 1 minute (drive-pasts, double-logged copies) no longer drag a
+  lawn's usual time down. One shared, tested helper (utils/routeEta) feeds
+  both Est. finish and the Up next cards.
+
+### Live screen redesign (2026-10-20)
+- Job card is white with dark text: "MOWING - NOW" badge, big name (tap for
+  details), address, big timer and a 60px round pause button, Note and Leaf
+  job as equal buttons, a light "Slide to finish job" bar, Details / Cancel.
+- Colours: timer + badge amber while a job runs; paused turns the badge,
+  timer, pause/play button and slider red. Buttons follow the division
+  (green mowing, blue fertilizer).
+- Job details drawer (job card and Next Job card): Scheduled + price, last
+  visit, usual time (plain + with leaves), interval, property notes, Open
+  client page. **Fix:** property notes now show (the drawer read a `notes`
+  field nothing saves; the client page saves `propertyNotes`).
+- Route panel floats as a card: name - N of M done with a progress bar,
+  Est. finish with a clock icon, and an "Up next" row with the next two stops.
+  Opening it closes the job details and vice versa.
+- The red location / GPS banners became small amber chips (top right) that
+  explain themselves when tapped. The paused-and-left banner stays.
+- Satellite / Recenter map buttons sit under the cards (they were hidden
+  behind the taller job card). To-do pins are green like Up next; done pins
+  pale green. Job card and route panel span the full
+  screen width.
+- Up next shows each of the next two stops as its own card with its drive and
+  usual job time ("Sheffer · 5m drive · ~20m job").
+
+### Needs mowing: season, snooze, due today (2026-10-20)
+- **Mowing season** (Settings > General, default Apr 15 - Nov 15, same days
+  every year; new utils/mowSeason, tested). Outside it nothing shows as due
+  or overdue and Home says "Mowing season is over - starts again Apr 15".
+  In season, a lawn not cut since the season started shows as "first cut of
+  the season" instead of months overdue. Home has "Done for the year? End it
+  now" (keeps the old end date; "Undo - I'm still mowing" for 30 days) and
+  "Start the season today" when out of season.
+- Snoozed lawns no longer show in Needs mowing (matches the Weekly Scheduler).
+- Tags say "due today - cut 7d ago" vs "3 days overdue - cut 10d ago"; the
+  top card splits the count ("25 overdue - 4 due today").
+
 ## [1.4.10] - 2026-10-17
 
 ### Leaf jobs: how heavy (2026-10-17)

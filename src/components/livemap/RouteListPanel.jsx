@@ -1,7 +1,8 @@
-import { CheckCircle, SkipForward, Navigation, ChevronUp, ChevronDown } from 'lucide-react';
-import { parseLawnSizeToSqFt } from '../../utils/parseLawnSize';
+import { CheckCircle, SkipForward, Navigation, ChevronUp, ChevronDown, Clock } from 'lucide-react';
 import { getSettings } from '../../db/settings';
-import { comparableVisits } from '../../utils/leaves';
+import { estimateJobSecs } from '../../utils/routeEta';
+import { serviceDue, isLate, lastDoneLabel } from '../../utils/dueStatus';
+import { seasonFromSettings } from '../../utils/mowSeason';
 import { useServiceMode } from '../ServiceProvider';
 
 export default function RouteListPanel({
@@ -21,48 +22,85 @@ export default function RouteListPanel({
   jobActive = false, // a job is running (possibly at a lawn that isn't on this route)
 }) {
   const { activeMode } = useServiceMode();
+  // Drive (from the route plan) and usual job time for a stop: this lawn's own
+  // history for the planned kind of work, else its size at the overall pace.
+  const estimateFor = (stop) => {
+    const normalizedStop = activeRoute?.normalizedStops?.find(n => n.customerId === stop.id);
+    const estMins = Math.round(estimateJobSecs({
+      customer: stop,
+      plannedIds: normalizedStop?.plannedServiceIds || [],
+      allVisits: allVisits || [],
+      defaultServices: getSettings().defaultServices || [],
+      globalPace,
+      isLeafJob: leafJobIds.includes(stop.id),
+    }) / 60);
+    const driveMins = normalizedStop?.plannedDriveTimeSecs ? Math.round(normalizedStop.plannedDriveTimeSecs / 60) : null;
+    // When it was last done, before today (the shared due check).
+    const settings = getSettings();
+    const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+    const due = serviceDue(stop, allVisits || [], { division: activeMode, season: seasonFromSettings(settings), beforeTs: startOfToday.getTime() });
+    const lastDone = lastDoneLabel(due, activeMode === 'mowing' ? 'cut' : 'done');
+    return { driveMins, estMins, lastDone, lastLate: isLate(due) };
+  };
+  const lastDoneSpan = (lastDone, lastLate) => (
+    <span style={{ color: lastLate ? '#b91c1c' : 'inherit', fontWeight: lastLate ? 700 : 'inherit' }}> · {lastDone}</span>
+  );
   const jobRunning = !!activeRoute?.expandedStops?.some((s) => getStopStatus(s.id) === 'active') || jobActive;
   return (
-    <div className="glass-card" style={{ position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 10, padding: 0, overflow: 'hidden', borderRadius: '1.5rem 1.5rem 0 0', borderBottom: 'none', boxShadow: '0 -10px 25px rgba(0,0,0,0.08)' }}>
+    <div style={{ position: 'absolute', bottom: '0.6rem', left: '0.6rem', right: '0.6rem', zIndex: 10, padding: 0, overflow: 'hidden', borderRadius: '1.25rem', background: '#ffffff', border: '1px solid var(--color-border)', boxShadow: '0 6px 24px rgba(0,0,0,0.12)' }}>
 
-      {/* Progress Bar & Header */}
-      {progressInfo && (
-        <div style={{ padding: isRouteListOpen ? '0.5rem 1rem' : '0.5rem 1rem 1.5rem 1rem', cursor: 'pointer', background: isRouteListOpen ? 'var(--color-bg-card)' : 'var(--glass-bg)', backdropFilter: isRouteListOpen ? 'none' : 'blur(12px)' }} onClick={() => setIsRouteListOpen(!isRouteListOpen)}>
-
-          {/* Grab Handle */}
-          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1rem', paddingTop: '0.5rem' }}>
-            <div style={{ width: '40px', height: '5px', borderRadius: '3px', background: 'var(--color-border)' }} />
+      {/* Header: route, progress, finish time — tap to open the stop list */}
+      {progressInfo && (() => {
+        const upNext = (activeRoute?.expandedStops || []).filter(s => getStopStatus(s.id) === 'pending').slice(0, 2);
+        const numberOf = (id) => (activeRoute?.expandedStops || []).findIndex(s => s.id === id) + 1;
+        return (
+          <div style={{ padding: '0.8rem 1rem 0.9rem', cursor: 'pointer', background: '#ffffff' }} onClick={() => setIsRouteListOpen(!isRouteListOpen)} role="button" aria-expanded={isRouteListOpen} aria-label="Route list">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.8rem' }}>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', minWidth: 0 }}>
+                  <strong style={{ fontSize: '1.15rem', color: 'var(--color-text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {activeRoute?.name ? `${activeRoute.name} · ` : ''}{progressInfo.doneStops ?? progressInfo.completedStops} of {progressInfo.totalStops} done
+                    {progressInfo.skippedStops > 0 && <span style={{ color: 'var(--color-text-muted)', fontWeight: 600 }}> · {progressInfo.skippedStops} skipped</span>}
+                  </strong>
+                  {isRouteListOpen ? <ChevronDown size={20} color="var(--color-text-muted)" style={{ flexShrink: 0 }} /> : <ChevronUp size={20} color="var(--color-text-muted)" style={{ flexShrink: 0 }} />}
+                </div>
+                <div style={{ width: '100%', maxWidth: '260px', height: '7px', background: 'var(--color-border)', borderRadius: '4px', overflow: 'hidden', marginTop: '0.45rem' }}>
+                  <div style={{ display: 'flex', height: '100%' }}>
+                    <div style={{ height: '100%', background: 'var(--color-primary)', width: `${((progressInfo.doneStops ?? progressInfo.completedStops) / progressInfo.totalStops) * 100}%`, transition: 'width 0.5s ease' }} />
+                    <div style={{ height: '100%', background: '#9ca3af', width: `${((progressInfo.skippedStops || 0) / progressInfo.totalStops) * 100}%`, transition: 'width 0.5s ease' }} />
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexShrink: 0 }}>
+                <Clock size={22} color="var(--color-primary)" />
+                <div style={{ lineHeight: 1.2 }}>
+                  <div style={{ fontSize: '0.78rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>{progressInfo.finishString ? 'Est. finish' : 'Est. time'}</div>
+                  <strong style={{ fontSize: '1.3rem', color: 'var(--color-text-main)', whiteSpace: 'nowrap' }}>{progressInfo.finishString || progressInfo.etaString}</strong>
+                </div>
+              </div>
+            </div>
+            {!isRouteListOpen && upNext.length > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.7rem' }}>
+                <span style={{ fontSize: '0.75rem', fontWeight: 800, letterSpacing: '1px', color: 'var(--color-text-muted)', flexShrink: 0 }}>UP NEXT</span>
+                {upNext.map(s => {
+                  const { driveMins, estMins, lastDone, lastLate } = estimateFor(s);
+                  return (
+                    <div key={s.id} style={{ flex: 1, minWidth: 0, maxWidth: '320px', display: 'flex', alignItems: 'center', gap: '0.6rem', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: '14px', padding: '0.55rem 0.7rem', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}>
+                      <span style={{ width: '30px', height: '30px', borderRadius: '50%', background: 'var(--color-primary)', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.9rem', fontWeight: 800, flexShrink: 0 }}>{numberOf(s.id)}</span>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--color-text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</div>
+                        <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--color-text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {driveMins ? `${driveMins}m drive · ` : ''}~{estMins}m job{lastDoneSpan(lastDone, lastLate)}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
-
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.8rem', marginBottom: '0.8rem' }}>
-           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', minWidth: 0 }}>
-               {/* One line: route name · how far along */}
-               <strong style={{ fontSize: '1.15rem', color: 'var(--color-text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                 {activeRoute?.name ? `${activeRoute.name} · ` : ''}{progressInfo.completedStops} of {progressInfo.totalStops} done
-               </strong>
-               {isRouteListOpen ? <ChevronDown size={20} color="var(--color-text-muted)" style={{ flexShrink: 0 }} /> : <ChevronUp size={20} color="var(--color-text-muted)" style={{ flexShrink: 0 }} />}
-             </div>
-             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', flexShrink: 0 }}>
-               <strong style={{ fontSize: '1.5rem', lineHeight: 1.1, color: 'var(--color-primary)', whiteSpace: 'nowrap' }}>{progressInfo.finishString || progressInfo.etaString}</strong>
-               <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>
-                 {progressInfo.finishString ? `finish · ${progressInfo.etaString}` : 'est. time'}
-               </span>
-             </div>
-          </div>
-
-          {/* Actual Visual Progress Bar */}
-          <div style={{ width: '100%', height: '5px', background: 'var(--color-border)', borderRadius: '3px', overflow: 'hidden' }}>
-            <div
-              style={{
-                height: '100%',
-                background: 'var(--color-primary)',
-                width: `${(progressInfo.completedStops / progressInfo.totalStops) * 100}%`,
-                transition: 'width 0.5s ease'
-              }}
-            />
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Collapsible Route List */}
       {isRouteListOpen && activeRoute && (
@@ -97,30 +135,10 @@ export default function RouteListPanel({
                     <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', display: 'flex', justifyContent: 'space-between', marginTop: '0.2rem' }}>
                       <span>{stop.address}</span>
                       {status === 'pending' && (() => {
-                         let estMins = 15;
-                         const normalizedStop = activeRoute.normalizedStops?.find(n => n.customerId === stop.id);
-                         const plannedIds = normalizedStop?.plannedServiceIds || [];
-                         
-                         const settings = getSettings();
-                         const defaultServices = settings.defaultServices || [];
-                         const isPlannedMow = plannedIds.length === 0 || plannedIds.some(id => defaultServices.find(s => s.id === id)?.category === 'Mowing' || id === 's1');
-
-                         const histVisits = comparableVisits(allVisits.filter(v => {
-                           if (v.customerId !== stop.id || v.status !== 'completed' || !v.durationSecs) return false;
-                           const isHistMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => defaultServices.find(s => s.id === id)?.category === 'Mowing' || id === 's1');
-                           return isPlannedMow === isHistMow;
-                         }), isPlannedMow && leafJobIds.includes(stop.id));
-
-                         if (histVisits.length > 0) {
-                           estMins = Math.round((histVisits.reduce((acc, v) => acc + v.durationSecs, 0) / histVisits.length) / 60);
-                         } else if (stop.lawnSize) {
-                           const sqft = parseLawnSizeToSqFt(stop.lawnSize);
-                           if (sqft) estMins = Math.max(isPlannedMow ? 10 : 5, Math.round(sqft / globalPace));
-                         }
-                         const driveMins = normalizedStop?.plannedDriveTimeSecs ? Math.round(normalizedStop.plannedDriveTimeSecs / 60) : null;
+                         const { driveMins, estMins, lastDone, lastLate } = estimateFor(stop);
                          return (
                            <span style={{ fontWeight: 600, color: 'var(--color-primary)', whiteSpace: 'nowrap' }}>
-                             {driveMins !== null && driveMins > 0 ? `${driveMins}m drive · ` : ''}~{estMins}m job
+                             {driveMins !== null && driveMins > 0 ? `${driveMins}m drive · ` : ''}~{estMins}m job{lastDoneSpan(lastDone, lastLate)}
                            </span>
                          );
                       })()}
@@ -187,18 +205,21 @@ export default function RouteListPanel({
             >
               + Add Unplanned Stop
             </button>
-            {/* Ending the route early sits at the very bottom, away from the
-                handle and the first stop, so it isn't hit by accident. */}
-            {progressInfo && progressInfo.completedStops < progressInfo.totalStops && (
-              <button
-                className="btn btn-secondary"
-                style={{ marginTop: '1.5rem', padding: '0.6rem', color: '#ef4444', borderColor: '#ef4444', background: 'rgba(239,68,68,0.05)' }}
-                onClick={onForceEndRoute}
-              >
-                Force End Route
-              </button>
-            )}
           </div>
+        </div>
+      )}
+      {/* Ending the route early: below the list (not inside its scroll), so
+          it's always in view while the list is open — and still well away
+          from the handle and the first stop. */}
+      {isRouteListOpen && activeRoute && progressInfo && progressInfo.completedStops < progressInfo.totalStops && (
+        <div style={{ padding: '0.6rem 1rem 0.8rem', borderTop: '1px solid var(--color-border)', background: '#ffffff' }}>
+          <button
+            className="btn btn-secondary"
+            style={{ width: '100%', minHeight: '46px', padding: '0.6rem', fontWeight: 700, color: '#b91c1c', borderColor: '#ef4444', background: 'rgba(239,68,68,0.05)' }}
+            onClick={onForceEndRoute}
+          >
+            Force End Route
+          </button>
         </div>
       )}
     </div>

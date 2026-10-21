@@ -1,9 +1,10 @@
 import { useState, useMemo } from 'react';
-import { ChevronDown, ChevronUp, RefreshCcw, FileText } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { ChevronDown, ChevronUp, ClipboardList, User } from 'lucide-react';
 import { getDaysSince } from '../../utils/dateUtils';
 import { getSettings } from '../../db/settings';
 import { parseLawnSizeToSqFt } from '../../utils/parseLawnSize';
-import { comparableVisits, isMowVisit } from '../../utils/leaves';
+import { comparableVisits, isMowVisit, isLeafVisit } from '../../utils/leaves';
 import { useServiceMode } from '../ServiceProvider';
 
 // Does a service belong to the currently active division? Mirrors the
@@ -16,181 +17,107 @@ function serviceMatchesMode(svc, mode) {
   return svc.id === 's1' || n.includes('mow') || n.includes('cut') || n.includes('yard');
 }
 
-function FieldLabel({ color, children }) {
-  return (
-    <div style={{ fontSize: '0.68rem', fontWeight: 700, letterSpacing: '0.5px', textTransform: 'uppercase', color, marginBottom: '0.15rem' }}>
-      {children}
-    </div>
-  );
-}
+const avgMins = (visits) => (visits.length ? Math.round(visits.reduce((s, v) => s + v.durationSecs, 0) / visits.length / 60) : null);
 
-export default function CustomerDetailsDropdown({ customer, allVisits, globalPace, darkTheme = false, isLeafJob = false }) {
-  const [isExpanded, setIsExpanded] = useState(false);
+// The job's details: what's scheduled, the last visit, usual times, how often,
+// and the property notes. Controlled (open / onToggle) when the Live page
+// needs to keep it and the route list from being open together; otherwise it
+// keeps its own open state and shows a "Details" toggle.
+export default function CustomerDetailsDropdown({ customer, allVisits, globalPace, open, onToggle, showToggle = true }) {
+  const [ownOpen, setOwnOpen] = useState(false);
+  const isOpen = open ?? ownOpen;
+  const toggle = onToggle || (() => setOwnOpen(v => !v));
+  const navigate = useNavigate();
   const { activeMode } = useServiceMode();
 
-  const { lastVisitDate, daysSinceStr, paceStr, scheduledStr, jobPrice, crossServiceStr, notes } = useMemo(() => {
-    if (!customer) return {};
-
-    // 1. Last Visit & Pace (average duration of past visits)
-    let lastDate = null;
-    let avgDuration = null;
-    if (allVisits) {
-      const custVisits = allVisits.filter(v => v.customerId === customer.id && v.status === 'completed');
-      if (custVisits.length > 0) {
-        custVisits.sort((a, b) => b.exitTime - a.exitTime);
-        lastDate = custVisits[0].exitTime;
-        // Leaf visits only count toward the usual time for a job marked as a leaf job.
-        const validDurations = comparableVisits(
-          custVisits.filter(v => v.durationSecs && v.durationSecs >= 60 && (activeMode !== 'mowing' || isMowVisit(v))),
-          activeMode === 'mowing' && isLeafJob
-        ).map(v => v.durationSecs);
-        if (validDurations.length > 0) {
-          avgDuration = validDurations.reduce((a, b) => a + b, 0) / validDurations.length;
-        }
-      }
-    }
-    // Pace fallback from lawn size + global pace when there's no history.
-    if (!avgDuration && customer.lawnSize && globalPace) {
-      const sqft = parseLawnSizeToSqFt(customer.lawnSize);
-      if (sqft) avgDuration = Math.max(300, Math.round((sqft / globalPace) * 60));
-    }
-    const paceStr = avgDuration ? `~${Math.round(avgDuration / 60)} min` : 'No data';
-
-    // 2. Days since string
-    let daysSinceStr = 'Never';
-    if (lastDate) {
-      const days = getDaysSince(lastDate);
-      daysSinceStr = days === 0 ? 'Today' : days === 1 ? 'Yesterday' : `${days} days ago`;
-    }
-
-    // 3. Scheduled service(s) + revenue — only the active division's service(s).
+  const info = useMemo(() => {
+    if (!customer) return null;
     const settings = getSettings();
     const defaultServices = settings?.defaultServices || [];
-    const activeServices = customer.services?.filter(s => s.active) || [];
-    let scheduled = activeServices.filter(s => serviceMatchesMode(s, activeMode));
-    if (scheduled.length === 0) scheduled = activeServices; // safety net
-    const scheduledStr = scheduled
-      .map(s => s.name || defaultServices.find(d => d.id === s.id)?.name || 'Service')
-      .join(', ') || 'Service';
-    const jobPrice = scheduled.reduce((sum, s) => sum + (Number(s.price) || 0), 0);
+    const mine = (allVisits || []).filter(v => v.customerId === customer.id && v.status === 'completed' &&
+      (!v.division || v.division === activeMode)).sort((a, b) => b.exitTime - a.exitTime);
+    const timed = mine.filter(v => v.durationSecs >= 60 && (activeMode !== 'mowing' || isMowVisit(v)));
 
-    // 4. Cross-service history (the *other* division's last visit).
-    let crossServiceStr = null;
-    if (allVisits) {
-      const crossMode = activeMode === 'mowing' ? 'fertilizer' : 'mowing';
-      const custVisits = allVisits.filter(v => v.customerId === customer.id && v.status === 'completed');
-      const crossVisits = custVisits.filter(v => {
-        if (v.division) return v.division === crossMode;
-        const svcIds = v.appliedServices || [];
-        if (crossMode === 'mowing') {
-          const mowIds = defaultServices.filter(s => s.category === 'Mowing' || s.id === 's1').map(s => s.id);
-          return svcIds.length === 0 || svcIds.some(id => mowIds.includes(id));
-        }
-        const fertIds = defaultServices.filter(s => s.category === 'Fertilizer' || s.id === 's3').map(s => s.id);
-        return svcIds.some(id => fertIds.includes(id));
-      });
-      const verb = crossMode === 'mowing' ? 'Mowed' : 'Fertilized';
-      if (crossVisits.length > 0) {
-        crossVisits.sort((a, b) => b.exitTime - a.exitTime);
-        const d = getDaysSince(crossVisits[0].exitTime);
-        const t = d === 0 ? 'today' : d === 1 ? 'yesterday' : `${d} days ago`;
-        crossServiceStr = `Last ${verb.toLowerCase()} ${t}`;
-      } else {
-        crossServiceStr = `Never ${verb.toLowerCase()}`;
-      }
+    // Usual time — like with like: plain mows, and leaf jobs on their own.
+    let usual = avgMins(comparableVisits(timed, false));
+    const usualLeaf = activeMode === 'mowing' && timed.some(isLeafVisit) ? avgMins(comparableVisits(timed, true)) : null;
+    let usualFromSize = false;
+    if (usual == null && customer.lawnSize && globalPace) {
+      const sqft = parseLawnSizeToSqFt(customer.lawnSize);
+      if (sqft) { usual = Math.max(5, Math.round(sqft / globalPace)); usualFromSize = true; }
     }
 
+    const last = mine[0] || null;
+    const days = last ? getDaysSince(last.exitTime) : null;
+    const daysStr = days == null ? 'never' : days === 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`;
+
+    // Scheduled service(s) + price — only the active division's.
+    const activeServices = customer.services?.filter(s => s.active) || [];
+    let scheduled = activeServices.filter(s => serviceMatchesMode(s, activeMode));
+    if (scheduled.length === 0) scheduled = activeServices;
+    const scheduledStr = scheduled.map(s => s.name || defaultServices.find(d => d.id === s.id)?.name || 'Service').join(', ') || 'Service';
+    const price = scheduled.reduce((sum, s) => sum + (Number(s.price) || 0), 0);
+
+    const every = activeMode === 'fertilizer'
+      ? (customer.fertilizerInterval || 30)
+      : (customer.mowingInterval || customer.serviceInterval || 7);
+
     return {
-      lastVisitDate: lastDate,
-      daysSinceStr,
-      paceStr,
-      scheduledStr,
-      jobPrice,
-      crossServiceStr,
-      notes: customer.notes || ''
+      scheduledStr, price, last, daysStr, usual, usualLeaf, usualFromSize, every,
+      // Property notes live in propertyNotes (the client page's field);
+      // `notes` is an older name some records may still carry.
+      notes: (customer.propertyNotes || customer.notes || '').trim(),
     };
-  }, [customer, allVisits, globalPace, activeMode, isLeafJob]);
+  }, [customer, allVisits, globalPace, activeMode]);
 
-  if (!customer) return null;
+  if (!customer || !info) return null;
 
-  // darkTheme=true → light surface, dark text (Next Job card).
-  // darkTheme=false → dark/translucent surface, light text (Live timer panel).
-  const textColor = darkTheme ? 'var(--color-text-main)' : 'rgba(255,255,255,0.95)';
-  const mutedColor = darkTheme ? 'var(--color-text-muted)' : 'rgba(255,255,255,0.6)';
-  const labelColor = darkTheme ? 'var(--color-text-muted)' : 'rgba(255,255,255,0.55)';
-  const accentColor = darkTheme ? 'var(--color-primary)' : '#fff';
-  const bgColor = darkTheme ? 'var(--color-bg-main)' : 'rgba(0,0,0,0.18)';
-  const dividerColor = darkTheme ? 'var(--color-border)' : 'rgba(255,255,255,0.12)';
-  const noteBg = darkTheme ? 'rgba(245,158,11,0.12)' : 'rgba(0,0,0,0.2)';
-  const noteBorder = darkTheme ? 'rgba(245,158,11,0.35)' : 'rgba(252,211,77,0.3)';
-  const noteText = darkTheme ? '#b45309' : '#fcd34d';
-
-  const handleColor = darkTheme ? 'var(--color-border)' : 'rgba(255,255,255,0.45)';
+  const tile = (label, value, sub, subColor) => (
+    <div style={{ background: 'var(--color-bg-main)', borderRadius: '10px', padding: '0.55rem 0.7rem', minWidth: 0 }}>
+      <div style={{ fontSize: '0.72rem', fontWeight: 700, letterSpacing: '0.5px', textTransform: 'uppercase', color: 'var(--color-text-muted)' }}>{label}</div>
+      <div style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--color-text-main)', lineHeight: 1.25 }}>{value}</div>
+      {sub && <div style={{ fontSize: '0.78rem', color: subColor || 'var(--color-text-muted)', fontWeight: 600 }}>{sub}</div>}
+    </div>
+  );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column' }}>
-      {/* Drawer content — revealed above the handle when pulled open */}
-      {isExpanded && (
-        <div className="animate-fade-in" style={{ background: bgColor, borderRadius: 'var(--radius-md)', padding: '0.9rem', marginBottom: '0.4rem', display: 'flex', flexDirection: 'column', gap: '0.9rem', color: textColor }}>
-
-          {/* Headline: scheduled service + its revenue */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: '0.75rem' }}>
-            <div style={{ minWidth: 0 }}>
-              <FieldLabel color={labelColor}>Scheduled</FieldLabel>
-              <div style={{ fontSize: '1.05rem', fontWeight: 700, lineHeight: 1.2 }}>{scheduledStr}</div>
-            </div>
-            <div style={{ textAlign: 'right', flexShrink: 0 }}>
-              <FieldLabel color={labelColor}>Revenue</FieldLabel>
-              <div style={{ fontSize: '1.3rem', fontWeight: 800, color: accentColor, lineHeight: 1 }}>${jobPrice.toFixed(2)}</div>
-            </div>
+      {isOpen && (
+        <div className="animate-fade-in" style={{ borderTop: '1px solid var(--color-border)', paddingTop: '0.7rem', marginBottom: '0.6rem' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+            {tile('Scheduled', `${info.scheduledStr} · $${info.price.toFixed(0)}`)}
+            {tile('Last visit',
+              info.last ? `${new Date(info.last.exitTime).toLocaleDateString([], { month: 'short', day: 'numeric' })} · ${Math.round((info.last.durationSecs || 0) / 60)} min` : 'None yet',
+              info.last && isLeafVisit(info.last) ? 'leaf job' : null, '#b45309')}
+            {tile('Usual time',
+              info.usual != null ? `~${info.usual} min${info.usualFromSize ? ' (by size)' : ''}` : 'No data yet',
+              info.usualLeaf != null ? `~${info.usualLeaf} min with leaves` : null)}
+            {tile('Every', `${info.every} days`, info.last ? `last ${info.daysStr}` : null)}
           </div>
-
-          <div style={{ height: 1, background: dividerColor }} />
-
-          {/* Last visit + average time, side by side */}
-          <div style={{ display: 'flex', gap: '2rem' }}>
-            <div>
-              <FieldLabel color={labelColor}>Last Visit</FieldLabel>
-              <div style={{ fontSize: '1rem', fontWeight: 600, lineHeight: 1.2 }}>{daysSinceStr}</div>
-              {lastVisitDate && (
-                <div style={{ fontSize: '0.75rem', color: mutedColor }}>
-                  {new Date(lastVisitDate).toLocaleDateString([], { month: 'short', day: 'numeric' })}
-                </div>
-              )}
-            </div>
-            <div>
-              <FieldLabel color={labelColor}>Avg Time</FieldLabel>
-              <div style={{ fontSize: '1rem', fontWeight: 600, lineHeight: 1.2 }}>{paceStr}</div>
-            </div>
+          <div style={{ marginTop: '0.5rem', borderRadius: '10px', padding: '0.55rem 0.7rem', fontSize: '0.9rem', display: 'flex', gap: '0.45rem', alignItems: 'flex-start',
+            background: info.notes ? 'rgba(245,158,11,0.12)' : 'var(--color-bg-main)', color: info.notes ? '#92400e' : 'var(--color-text-muted)' }}>
+            <ClipboardList size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+            <span>{info.notes ? info.notes : 'No property notes saved — add them on the client page.'}</span>
           </div>
-
-          {crossServiceStr && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontSize: '0.82rem', color: mutedColor }}>
-              <RefreshCcw size={13} style={{ flexShrink: 0 }} />
-              {crossServiceStr}
-            </div>
-          )}
-
-          {notes && (
-            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', padding: '0.6rem 0.7rem', borderRadius: 'var(--radius-sm)', background: noteBg, border: `1px solid ${noteBorder}` }}>
-              <FileText size={14} style={{ marginTop: '2px', flexShrink: 0, color: noteText }} />
-              <div style={{ fontSize: '0.85rem', lineHeight: 1.4, color: noteText }}>{notes}</div>
-            </div>
-          )}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.4rem' }}>
+            <button onClick={() => navigate(`/customers/${customer.id}`)}
+              style={{ background: 'none', border: 'none', padding: '0.5rem 0', minHeight: '40px', cursor: 'pointer', color: 'var(--color-primary)', fontWeight: 700, fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+              <User size={15} /> Open client page ›
+            </button>
+            {showToggle && (
+              <button onClick={toggle} style={{ background: 'none', border: 'none', padding: '0.5rem 0', minHeight: '40px', cursor: 'pointer', color: 'var(--color-text-muted)', fontWeight: 700, fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                Hide details <ChevronUp size={15} />
+              </button>
+            )}
+          </div>
         </div>
       )}
-
-      {/* Grab handle at the card's bottom edge — pull down to reveal */}
-      <button
-        onClick={(e) => { e.stopPropagation(); setIsExpanded(v => !v); }}
-        aria-label={isExpanded ? 'Hide customer details' : 'Show customer details'}
-        style={{ width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.25rem', background: 'transparent', border: 'none', cursor: 'pointer', padding: '0.5rem 0 0.1rem', color: mutedColor }}
-      >
-        <span style={{ width: '40px', height: '5px', borderRadius: '3px', background: handleColor }} />
-        <span style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.75rem', fontWeight: 700, letterSpacing: '0.3px' }}>
-          {isExpanded ? <>Hide details <ChevronUp size={13} /></> : <>Pull for details <ChevronDown size={13} /></>}
-        </span>
-      </button>
+      {!isOpen && showToggle && (
+        <button onClick={(e) => { e.stopPropagation(); toggle(); }} aria-label="Show job details"
+          style={{ alignSelf: 'flex-start', background: 'none', border: 'none', cursor: 'pointer', padding: '0.4rem 0', minHeight: '40px', color: 'var(--color-text-muted)', fontWeight: 700, fontSize: '0.88rem', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+          Details <ChevronDown size={15} />
+        </button>
+      )}
     </div>
   );
 }

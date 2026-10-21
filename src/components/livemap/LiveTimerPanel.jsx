@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Play, Pause, FileText, Sun, CloudSun, Cloud, CloudDrizzle, CloudSnow, CloudLightning, CloudRain } from 'lucide-react';
+import { X, Play, Pause, FileText, BarChart3, ChevronDown, ChevronUp, Info, Leaf, Sun, CloudSun, Cloud, CloudDrizzle, CloudSnow, CloudLightning, CloudRain } from 'lucide-react';
 import { formatLiveTimer } from '../../utils/dateUtils';
 import SlideToFinish from '../SlideToFinish';
 import CustomerDetailsDropdown from './CustomerDetailsDropdown';
@@ -8,11 +8,16 @@ import { comparableVisits, isLeafVisit, isMowVisit } from '../../utils/leaves';
 import TodaysMixModal from './TodaysMixModal';
 import { getTodaysMix, peekStopMix, setStopMix, clearStopMix } from '../../utils/todaysMix';
 
-const HERO = {
-  mowing:     { bg: '#047857', soft: '#a7f3d0' },
-  fertilizer: { bg: '#1d4ed8', soft: '#bfdbfe' }
+// Buttons and the slider use the division colour (green mowing, blue
+// fertilizer); paused turns everything red. The timer and the status badge are
+// amber while a job runs, red when paused. The card stays white with dark text
+// so it reads in the sun.
+const THEME = {
+  mowing:     { accent: '#047857', tint: '#E1F5EE', ink: '#065f46' },
+  fertilizer: { accent: '#1d4ed8', tint: '#E6F1FB', ink: '#0C447C' },
+  paused:     { accent: '#b91c1c', tint: '#FCEBEB', ink: '#991b1b' },
 };
-const PAUSED = { bg: '#b45309', soft: '#fde68a' };
+const AMBER = '#b45309';
 
 function WeatherIcon({ code, size = 14 }) {
   let Icon = CloudRain;
@@ -22,7 +27,7 @@ function WeatherIcon({ code, size = 14 }) {
   else if (code <= 55) Icon = CloudDrizzle;
   else if (code <= 77 || code <= 86) Icon = CloudSnow;
   else if (code <= 99) Icon = CloudLightning;
-  return <Icon size={size} color="rgba(255,255,255,0.9)" />;
+  return <Icon size={size} />;
 }
 
 export default function LiveTimerPanel({
@@ -40,18 +45,27 @@ export default function LiveTimerPanel({
   globalPace,
   isLeafJob = false,
   onToggleLeafJob,
+  detailsOpen,
+  onToggleDetails,
 }) {
   const { activeMode } = useServiceMode();
   // Per-lawn product pick: set while still on the property so even a geofence
   // auto-exit files the right EPA log for THIS lawn (overrides the day mix).
   const [stopMix, setStopMixState] = useState(() => activeGeofence ? peekStopMix(activeGeofence.id) : null);
   const [showStopMixModal, setShowStopMixModal] = useState(false);
+  const [ownDetails, setOwnDetails] = useState(false);
   const custId = activeGeofence?.id;
   useEffect(() => { setStopMixState(custId != null ? peekStopMix(custId) : null); }, [custId]);
   if (!activeGeofence) return null;
 
+  const showDetails = detailsOpen ?? ownDetails;
+  const toggleDetails = onToggleDetails || (() => setOwnDetails(v => !v));
+
   const isPaused = timerState === 'paused';
-  const theme = isPaused ? PAUSED : (HERO[activeMode] || HERO.mowing);
+  const theme = isPaused ? THEME.paused : (THEME[activeMode] || THEME.mowing);
+  const status = isPaused
+    ? { ink: THEME.paused.ink, tint: THEME.paused.tint, clock: '#b91c1c' }
+    : { ink: '#854F0B', tint: '#FAEEDA', clock: '#b45309' };
 
   // Pace cue: compare the running clock to this customer's average duration.
   // A job marked as a leaf job is compared with this lawn's leaf visits once
@@ -70,11 +84,11 @@ export default function LiveTimerPanel({
       const avgMin = Math.round(avg / 60);
       const over = liveDuration > avg + 60;
       const label = leafJob && isLeafVisit(compared[0]) ? 'leaf avg' : leafJob ? 'mow avg' : 'avg';
-      // Neutral "avg ~Xm" until the clock actually passes the average — being
+      // Neutral "avg ~X min" until the clock actually passes the average — being
       // "ahead" 30 seconds into a job is noise, not information.
       paceCue = over
-        ? { text: `over ~${avgMin}m ${label}`, color: PAUSED.soft }
-        : { text: `${label} ~${avgMin}m`, color: 'rgba(255,255,255,0.75)' };
+        ? { text: `over ~${avgMin} min ${label}`, color: AMBER }
+        : { text: `${label} ~${avgMin} min`, color: 'var(--color-text-muted)' };
     }
   }
 
@@ -88,86 +102,74 @@ export default function LiveTimerPanel({
     });
   };
 
+  const sideBtn = { display: 'flex', alignItems: 'center', gap: '0.35rem', minHeight: '44px', padding: '0.5rem 0.85rem', borderRadius: '12px', cursor: 'pointer', fontSize: '0.92rem', fontWeight: 700, border: '1px solid var(--color-border)', background: 'var(--color-bg-main)', color: 'var(--color-text-main)', whiteSpace: 'nowrap' };
+
   return (
     <div className="animate-fade-in" style={{
-      padding: '1rem 1rem 1.1rem',
-      background: theme.bg,
-      borderRadius: '1.5rem',
-      color: 'white',
-      border: 'none',
-      boxShadow: `0 10px 32px ${theme.bg}59`,
-      transition: 'background 0.3s ease'
+      padding: '0.9rem 1rem 0.6rem',
+      background: '#ffffff',
+      borderRadius: '1.25rem',
+      color: 'var(--color-text-main)',
+      border: '1px solid var(--color-border)',
+      boxShadow: '0 6px 24px rgba(0,0,0,0.12)',
     }}>
-      {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+      {/* Who and the clock */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.8rem' }}>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: '0.7rem', letterSpacing: '1.2px', fontWeight: 800, color: 'rgba(255,255,255,0.8)', textTransform: 'uppercase' }}>
-            {activeMode} · Now
-          </div>
-          <strong style={{ fontSize: '1.4rem', display: 'block', lineHeight: 1.1 }}>{activeGeofence.name}</strong>
-          <div style={{ fontSize: '0.8rem', color: 'rgba(255,255,255,0.8)' }}>{activeGeofence.address}</div>
+          <span style={{ fontSize: '0.72rem', letterSpacing: '1px', fontWeight: 800, textTransform: 'uppercase', color: status.ink, background: status.tint, padding: '0.2rem 0.6rem', borderRadius: '999px' }}>
+            {isPaused ? 'Paused' : `${activeMode} · now`}{leafJob ? ' · leaves' : ''}
+          </span>
+          <button onClick={toggleDetails} aria-expanded={showDetails} aria-label={`${activeGeofence.name} — ${showDetails ? 'hide' : 'show'} job details`}
+            style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', background: 'none', border: 'none', padding: 0, marginTop: '0.3rem', cursor: 'pointer', color: 'var(--color-text-main)', textAlign: 'left' }}>
+            <strong style={{ fontSize: '1.6rem', lineHeight: 1.1 }}>{activeGeofence.name}</strong>
+            {showDetails ? <ChevronUp size={20} color="var(--color-text-muted)" /> : <ChevronDown size={20} color="var(--color-text-muted)" />}
+          </button>
+          <div style={{ fontSize: '0.88rem', color: 'var(--color-text-muted)' }}>{activeGeofence.address}</div>
           {weather && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', marginTop: '0.35rem', color: 'rgba(255,255,255,0.9)', fontSize: '0.8rem', fontWeight: 600 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', marginTop: '0.2rem', color: 'var(--color-text-muted)', fontSize: '0.82rem', fontWeight: 600 }}>
               <WeatherIcon code={weather.code ?? 0} />
               <span>{weather.temp}°F · {weather.wind} mph</span>
             </div>
           )}
         </div>
-        <div style={{ display: 'flex', gap: '0.1rem', flexShrink: 0 }}>
-          <button onClick={() => setShowLiveNoteModal(true)} aria-label="Add note"
-            style={{ background: 'rgba(255,255,255,0.18)', border: 'none', borderRadius: '999px', color: '#fff', cursor: 'pointer', padding: '0.5rem 0.9rem', minHeight: '40px', fontSize: '0.85rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-            <FileText size={18} /> Note
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.7rem', flexShrink: 0 }}>
+          <div style={{ fontSize: '2.2rem', fontWeight: 800, fontFamily: 'monospace', fontVariantNumeric: 'tabular-nums', lineHeight: 1, color: status.clock }}>
+            {formatLiveTimer(liveDuration)}
+          </div>
+          <button onClick={togglePause} aria-label={isPaused ? 'Resume timer' : 'Pause timer'}
+            style={{ width: '60px', height: '60px', borderRadius: '50%', background: theme.accent, border: 'none', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            {isPaused ? <Play size={26} fill="white" /> : <Pause size={26} fill="white" />}
           </button>
+        </div>
+      </div>
+
+      {/* Status + quick buttons */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.6rem', margin: '0.8rem 0', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--color-text-muted)' }}>
+          <BarChart3 size={20} />
+          <div style={{ lineHeight: 1.3 }}>
+            <div style={{ fontSize: '0.72rem', letterSpacing: '1px', fontWeight: 800 }}>{isPaused ? 'TIMER PAUSED' : 'JOB RUNNING'}</div>
+            {paceCue && <div style={{ fontSize: '0.9rem', fontWeight: 700, color: paceCue.color }}>{paceCue.text}</div>}
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: '0.4rem' }}>
+          <button onClick={() => setShowLiveNoteModal(true)} aria-label="Add note" style={sideBtn}>
+            <FileText size={17} /> Note
+          </button>
+          {activeMode === 'mowing' && onToggleLeafJob && (
+            <button onClick={onToggleLeafJob} aria-pressed={isLeafJob} title={isLeafJob ? 'Leaf job — tap to undo' : 'Mark as a leaf job'}
+              style={{ ...sideBtn, ...(isLeafJob ? { background: 'rgba(180,83,9,0.12)', border: `2px solid ${AMBER}`, color: AMBER } : {}) }}>
+              <Leaf size={17} color={isLeafJob ? AMBER : '#3B6D11'} /> {isLeafJob ? 'Leaf job ✓' : 'Leaf job'}
+            </button>
+          )}
         </div>
       </div>
 
       {liveNote && (
-        <div style={{ fontSize: '0.8rem', color: '#fff', marginTop: '0.5rem', fontWeight: 500, display: 'flex', alignItems: 'flex-start', gap: '0.35rem', background: 'rgba(255,255,255,0.15)', padding: '0.45rem 0.6rem', borderRadius: 'var(--radius-sm)' }}>
-          <FileText size={14} style={{ marginTop: '2px', flexShrink: 0 }} />
+        <div style={{ fontSize: '0.92rem', marginBottom: '0.7rem', display: 'flex', alignItems: 'flex-start', gap: '0.4rem', background: 'var(--color-bg-main)', padding: '0.5rem 0.7rem', borderRadius: '10px' }}>
+          <FileText size={15} style={{ marginTop: '2px', flexShrink: 0, color: 'var(--color-text-muted)' }} />
           <span style={{ fontStyle: 'italic' }}>{liveNote}</span>
         </div>
-      )}
-
-      {/* Compact timer bar — status + pace on the left, time + pause on the right */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.6rem', background: 'rgba(0,0,0,0.18)', borderRadius: 'var(--radius-md)', padding: '0.6rem 0.9rem', margin: '0.9rem 0' }}>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.72rem', letterSpacing: '1px', fontWeight: 800, color: 'rgba(255,255,255,0.9)' }}>
-            <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: isPaused ? PAUSED.soft : theme.soft, display: 'inline-block' }} />
-            {isPaused ? 'TIMER PAUSED' : leafJob ? 'JOB RUNNING · 🍂 LEAVES' : 'JOB RUNNING'}
-          </div>
-          {paceCue && <div style={{ fontSize: '0.75rem', color: paceCue.color, fontWeight: 700, marginTop: '2px' }}>{paceCue.text}</div>}
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexShrink: 0 }}>
-          <button onClick={togglePause} aria-label={isPaused ? 'Resume timer' : 'Pause timer'}
-            style={{ width: '38px', height: '38px', borderRadius: '50%', background: 'rgba(255,255,255,0.25)', border: 'none', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-            {isPaused ? <Play size={18} fill="white" /> : <Pause size={18} fill="white" />}
-          </button>
-          <div style={{ fontSize: '2rem', fontWeight: 800, fontFamily: 'monospace', fontVariantNumeric: 'tabular-nums', lineHeight: 1, color: 'white' }}>
-            {formatLiveTimer(liveDuration)}
-          </div>
-        </div>
-      </div>
-
-      {/* Leaf job toggle (mowing): one tap any time during the job. The whole
-          job is then logged as a leaf visit, kept out of normal mow times. */}
-      {activeMode === 'mowing' && onToggleLeafJob && (
-        <button
-          onClick={onToggleLeafJob}
-          aria-pressed={isLeafJob}
-          style={{
-            width: '100%', minHeight: '46px', marginBottom: '0.9rem', padding: '0.6rem 0.9rem', cursor: 'pointer',
-            borderRadius: 'var(--radius-md)', textAlign: 'left', fontSize: '0.9rem', fontWeight: 700,
-            display: 'flex', alignItems: 'center', gap: '0.5rem',
-            border: isLeafJob ? '2px solid #fff' : '1px dashed rgba(255,255,255,0.6)',
-            background: isLeafJob ? '#fff' : 'rgba(255,255,255,0.12)',
-            color: isLeafJob ? '#b45309' : '#fff'
-          }}
-        >
-          <span style={{ fontSize: '1.1rem' }}>🍂</span>
-          {isLeafJob
-            ? <span>Leaf job ✓ <span style={{ fontWeight: 500 }}>— tap to undo</span></span>
-            : <span>Picking up leaves? <span style={{ fontWeight: 500 }}>Tap to mark as a leaf job</span></span>}
-        </button>
       )}
 
       {/* Per-lawn products (fert mode): what will file on exit — this lawn's
@@ -178,9 +180,9 @@ export default function LiveTimerPanel({
           <button
             onClick={() => setShowStopMixModal(true)}
             style={{
-              width: '100%', marginBottom: '0.9rem', padding: '0.6rem 0.9rem', cursor: 'pointer',
-              borderRadius: 'var(--radius-md)', border: 'none', textAlign: 'left',
-              background: 'rgba(255,255,255,0.15)', color: '#fff', fontSize: '0.8rem', fontWeight: 600,
+              width: '100%', marginBottom: '0.7rem', padding: '0.6rem 0.9rem', minHeight: '44px', cursor: 'pointer',
+              borderRadius: '12px', border: '1px solid var(--color-border)', textAlign: 'left',
+              background: THEME.fertilizer.tint, color: THEME.fertilizer.ink, fontSize: '0.88rem', fontWeight: 700,
               display: 'flex', alignItems: 'center', gap: '0.4rem'
             }}
           >
@@ -214,16 +216,22 @@ export default function LiveTimerPanel({
         />
       )}
 
-      <CustomerDetailsDropdown customer={activeGeofence} allVisits={allVisits} globalPace={globalPace} darkTheme={false} isLeafJob={leafJob} />
+      {/* Job details — opened from the name or the Details button */}
+      {showDetails && (
+        <CustomerDetailsDropdown customer={activeGeofence} allVisits={allVisits} globalPace={globalPace} isLeafJob={leafJob}
+          open onToggle={toggleDetails} showToggle={false} />
+      )}
 
-      <div style={{ marginTop: '0.9rem' }}>
-        <SlideToFinish onComplete={handleManualDone} />
-      </div>
+      <SlideToFinish onComplete={handleManualDone} accent={theme.accent} tint={theme.tint} ink={theme.ink} />
 
-      {/* Cancel lives down here on its own, well away from Note and Pause. */}
-      <div style={{ display: 'flex', justifyContent: 'center', marginTop: '0.5rem' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid var(--color-border)', marginTop: '0.6rem' }}>
+        <button onClick={toggleDetails} aria-expanded={showDetails}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.5rem 0.2rem', minHeight: '44px', fontSize: '0.88rem', fontWeight: 700, color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+          <Info size={16} /> {showDetails ? 'Hide details' : 'Details'}
+        </button>
+        {/* Cancel lives down here on its own, well away from Note and Pause. */}
         <button onClick={handleCancel} aria-label="Cancel job"
-          style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.8)', cursor: 'pointer', padding: '0.5rem 1rem', minHeight: '40px', fontSize: '0.8rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+          style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.5rem 0.2rem', minHeight: '44px', fontSize: '0.85rem', fontWeight: 600, color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
           <X size={15} /> Cancel job (don't save)
         </button>
       </div>

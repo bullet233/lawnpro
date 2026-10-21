@@ -7,6 +7,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { API_PRICES } from '../utils/apiTracker';
 import { toast } from '../utils/toast';
 import { leafToolsVisible } from '../utils/leaves';
+import { mowSeasonState } from '../utils/mowSeason';
 
 export default function Settings() {
   const [settings, setSettings] = useState(null);
@@ -43,6 +44,8 @@ export default function Settings() {
   const [newChemCategory, setNewChemCategory] = useState('Fertilizer');
   const [activeTab, setActiveTab] = useState('pricing');
   const [leafButtons, setLeafButtons] = useState(() => getSettings().leafButtons || 'auto');
+  const [seasonStart, setSeasonStart] = useState(() => getSettings().mowSeasonStart || '04-15');
+  const [seasonEnd, setSeasonEnd] = useState(() => getSettings().mowSeasonEnd || '11-15');
   const [leafRate, setLeafRate] = useState(() => (getSettings().leafHourlyRate ? String(getSettings().leafHourlyRate) : ''));
   const [editingServiceId, setEditingServiceId] = useState(null);
   const [editingChemId, setEditingChemId] = useState(null);
@@ -322,6 +325,8 @@ export default function Settings() {
               setMinStopFee((s.minStopFee ?? 30).toString());
               setDrivebySecs((s.drivebyThresholdSecs || 45).toString());
               setLeafButtons(s.leafButtons || 'auto');
+              setSeasonStart(s.mowSeasonStart || '04-15');
+              setSeasonEnd(s.mowSeasonEnd || '11-15');
               setLeafRate(s.leafHourlyRate ? String(s.leafHourlyRate) : '');
               setCostOfGas((s.costOfGas || 3.50).toString());
               setTruckMpg((s.truckMpg || 7).toString());
@@ -483,7 +488,7 @@ export default function Settings() {
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.5rem' }}>
         <SettingsIcon size={24} color="var(--color-primary)" />
         <h1 className="page-title" style={{ margin: 0 }}>Settings</h1>
-        <span style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px', border: '1px solid var(--color-border)', marginLeft: 'auto', fontWeight: 600 }}>v1.4.10</span>
+        <span style={{ fontSize: '0.65rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px', border: '1px solid var(--color-border)', marginLeft: 'auto', fontWeight: 600 }}>v1.4.11</span>
       </div>
 
       <div className="tab-bar">
@@ -848,6 +853,36 @@ export default function Settings() {
           </div>
         </div>
 
+        {/* Mowing season — saves as you change it */}
+        {(() => {
+          const year = new Date().getFullYear();
+          const asDate = (md) => `${year}-${md}`;
+          const fromDate = (v) => (v ? v.slice(5) : null);
+          const st = mowSeasonState(Date.now(), { start: seasonStart, end: seasonEnd });
+          const day = (t) => new Date(t).toLocaleDateString([], { month: 'long', day: 'numeric' });
+          return (
+            <div className="glass-card" style={{ padding: '1.5rem', marginBottom: '1.2rem' }}>
+              <h2 style={{ fontSize: '1.1rem', marginBottom: '0.5rem' }}>🌾 Mowing Season</h2>
+              <p style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', marginTop: 0 }}>
+                Outside these dates nothing shows as due or overdue on Home. When the season starts, lawns not cut yet show as waiting on their first cut instead of months overdue. The year doesn&apos;t matter — the same days repeat every year.
+              </p>
+              <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem', fontWeight: 600 }}>Starts
+                  <input type="date" className="input-field" value={asDate(seasonStart)} style={{ minHeight: '44px' }}
+                    onChange={e => { const md = fromDate(e.target.value); if (md) { setSeasonStart(md); saveSettings({ mowSeasonStart: md }); } }} />
+                </label>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem', fontWeight: 600 }}>Ends
+                  <input type="date" className="input-field" value={asDate(seasonEnd)} style={{ minHeight: '44px' }}
+                    onChange={e => { const md = fromDate(e.target.value); if (md) { setSeasonEnd(md); saveSettings({ mowSeasonEnd: md }); } }} />
+                </label>
+              </div>
+              <div style={{ fontSize: '0.9rem', marginTop: '0.8rem' }}>
+                Right now: <strong>{st.inSeason ? `in season (ends ${day(st.seasonEnd)})` : `out of season (starts ${day(st.nextStart)})`}</strong>
+              </div>
+            </div>
+          );
+        })()}
+
         {/* Leaf buttons — saves on tap, no Save button needed */}
         <div className="glass-card" style={{ padding: '1.5rem', marginBottom: '1.2rem' }}>
           <h2 style={{ fontSize: '1.1rem', marginBottom: '0.5rem' }}>🍂 Leaf Jobs</h2>
@@ -1069,6 +1104,23 @@ export default function Settings() {
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
             <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-primary)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.4.11</h3>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>October 2026</span>
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '1.2rem', color: 'var(--color-text-main)', fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                <li><strong>New Live Screen:</strong> White cards that fill the whole tablet, a bigger Next Job card with Start job / Skip, an amber timer while mowing and red when paused, tap the name for details, and Up next cards in the route panel.</li>
+                <li><strong>Better Finish Time:</strong> Est. finish uses each lawn’s own usual time and the drive between stops, and updates while you mow and drive.</li>
+                <li><strong>Route Fixes:</strong> The route panel counts skips apart ("1 of 5 done · 1 skipped"), Force End Route is always visible, and details close when you move to the next lawn.</li>
+                <li><strong>Mowing Season:</strong> Set the season in Settings → General. Off season nothing shows as overdue; lawns not cut yet this season show as "first cut". End or start the season from Home (with an undo).</li>
+                <li><strong>Everyone Agrees on Who’s Due:</strong> Home, Clients, the Weekly Scheduler, the Live nearby prompt and the route list all use one due check now, with "due today" shown separately from overdue.</li>
+                <li><strong>Last Cut on Every Stop:</strong> Route list rows and Up next cards show "cut 8d ago", in red when the lawn is late.</li>
+                <li><strong>Today Summary:</strong> The first time Home opens each day, one card shows how many lawns are overdue, due today and dropped yesterday, with Plan route.</li>
+                <li><strong>Bidding Matrix:</strong> Each size tier and size row shows how many lawns you service at that size. The tier Graph is now Lawns: a card per lawn with its usual time vs its size, what it pays and earns per hour, worst first.</li>
+              </ul>
+            </div>
+
+            <div style={{ paddingLeft: '1rem', borderLeft: '2px solid var(--color-border)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginBottom: '0.5rem' }}>
                 <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>v1.4.10</h3>
                 <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', padding: '2px 8px', borderRadius: '12px' }}>October 2026</span>

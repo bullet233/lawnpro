@@ -8,9 +8,11 @@ import { useServiceMode } from './ServiceProvider';
 import { Search, ChevronDown, Calendar, GripVertical, Plus, X, Moon } from 'lucide-react';
 import {
   DAY_NAMES, DAY_LETTERS, LONG_DAY_MINS, todayName, isSnoozed, eligibleForMode,
-  estimateJobMins, orderDayStops, dayTotalMins, cheapestInsertIndex, intervalStatus,
+  estimateJobMins, orderDayStops, dayTotalMins, cheapestInsertIndex,
   isScheduleAnchor,
 } from '../utils/scheduler';
+import { serviceDue } from '../utils/dueStatus';
+import { seasonFromSettings } from '../utils/mowSeason';
 
 /* Direction 5b — sunlight-legible palette. Accent = pressable, red/amber = status.
    Text is black/near-black for outdoor contrast; the accent follows the active
@@ -128,10 +130,19 @@ export default function WeeklyScheduler({ customers, tieredMatrixData, settings,
       else if (states.includes('due')) status = { kind: 'due', excess: 0 };
       else status = { kind: lastDays == null ? 'new' : 'ok', excess: 0 };
     } else {
-      const interval = activeMode === 'fertilizer'
-        ? (cust.fertilizerInterval || 30)
-        : (cust.mowingInterval || cust.serviceInterval || 7);
-      status = intervalStatus(lastDays, interval);
+      // The shared due check (utils/dueStatus): same season, skip and
+      // short-visit rules as Home. Off season nothing is late.
+      const defs = settings?.defaultServices || [];
+      const d = serviceDue(cust, allVisits || [], {
+        division: activeMode, now,
+        season: seasonFromSettings(settings, now),
+        mowIds: defs.filter((s) => s.category === 'Mowing' || s.id === 's1').map((s) => s.id),
+        fertIds: defs.filter((s) => s.category === 'Fertilizer' || s.id === 's3').map((s) => s.id),
+      });
+      status = d.status === 'overdue' ? { kind: 'late', excess: d.overdueDays }
+        : d.status === 'dueToday' || d.status === 'firstCut' ? { kind: 'due', excess: 0 }
+        : d.status === 'new' ? { kind: 'new', excess: 0 }
+        : { kind: 'ok', excess: 0 };
     }
     return { lastDate, lastDays, lastWasSkip, status };
   }, [allVisits, allTreatments, activeMode, settings, now]);

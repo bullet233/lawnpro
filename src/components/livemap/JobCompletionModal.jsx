@@ -200,7 +200,7 @@ export default function JobCompletionModal({
   return (
     <div
       className="completion-panel"
-      style={{ position: 'absolute', top: '1rem', left: '1rem', right: '1rem', zIndex: 2000, background: 'var(--color-bg-card)', borderRadius: '1.5rem', border: '1px solid var(--color-border)', boxShadow: '0 12px 40px rgba(0,0,0,0.18)', padding: '0.7rem 1rem 1rem' }}
+      style={{ position: 'absolute', top: '0.8rem', left: '0.8rem', right: '0.8rem', zIndex: 2000, background: '#ffffff', borderRadius: '1.25rem', border: '1px solid var(--color-border)', boxShadow: '0 12px 40px rgba(0,0,0,0.18)', padding: '0.7rem 1rem 1rem' }}
       onPointerDownCapture={() => onUserActivity?.()}
       onTouchStart={e => { panelTouchRef.current = e.touches[0].clientY; }}
       onTouchEnd={e => {
@@ -218,34 +218,34 @@ export default function JobCompletionModal({
 
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.9rem' }}>
-        <div style={{ width: '38px', height: '38px', borderRadius: '50%', background: 'var(--color-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-          <CheckCircle size={22} color="#fff" />
+        <div style={{ width: '46px', height: '46px', borderRadius: '50%', background: '#047857', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+          <CheckCircle size={26} color="#fff" />
         </div>
         <div>
-          <div style={{ fontSize: '0.68rem', letterSpacing: '1px', fontWeight: 800, textTransform: 'uppercase', color: 'var(--color-primary)' }}>Completed</div>
-          <strong style={{ fontSize: '1.3rem', lineHeight: 1 }}>{completionPanel.custName}</strong>
+          <span style={{ fontSize: '0.72rem', letterSpacing: '1px', fontWeight: 800, textTransform: 'uppercase', color: '#065f46', background: '#E1F5EE', padding: '0.2rem 0.6rem', borderRadius: '999px' }}>Completed</span>
+          <strong style={{ display: 'block', fontSize: '1.6rem', lineHeight: 1.1, marginTop: '0.25rem' }}>{completionPanel.custName}</strong>
         </div>
       </div>
 
       {/* Stat tiles */}
       <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
-        <div style={{ flex: 1, background: 'var(--color-bg-main)', borderRadius: '14px', padding: '0.55rem 0.7rem' }}>
-          <div style={{ fontSize: '0.62rem', letterSpacing: '0.5px', fontWeight: 700, color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>Time</div>
-          <div style={{ fontSize: '1.05rem', fontWeight: 800 }}>{formatLiveTimer(completionPanel.durationSecs)}</div>
+        <div style={{ flex: 1, background: 'var(--color-bg-main)', borderRadius: '14px', padding: '0.7rem 0.85rem' }}>
+          <div style={{ fontSize: '0.75rem', letterSpacing: '0.5px', fontWeight: 800, color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>Time</div>
+          <div style={{ fontSize: '1.5rem', fontWeight: 800, lineHeight: 1.15 }}>{formatLiveTimer(completionPanel.durationSecs)}</div>
           {renderPaceComparison()}
         </div>
-        <div style={{ flex: 1, background: 'var(--color-bg-main)', borderRadius: '14px', padding: '0.55rem 0.7rem' }}>
-          <div style={{ fontSize: '0.62rem', letterSpacing: '0.5px', fontWeight: 700, color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>Pay</div>
-          <div style={{ fontSize: '1.05rem', fontWeight: 800 }}>${totalPay.toFixed(2)}</div>
+        <div style={{ flex: 1, background: 'var(--color-bg-main)', borderRadius: '14px', padding: '0.7rem 0.85rem' }}>
+          <div style={{ fontSize: '0.75rem', letterSpacing: '0.5px', fontWeight: 800, color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>Pay</div>
+          <div style={{ fontSize: '1.5rem', fontWeight: 800, lineHeight: 1.15 }}>${totalPay.toFixed(2)}</div>
           {chargedLeaves > 0 && (
             <span style={{ fontSize: '0.8rem', color: '#b45309', fontWeight: 500 }}>
               ${servicePrice.toFixed(0)} mow + ${chargedLeaves.toFixed(2)} leaves
             </span>
           )}
         </div>
-        <div style={{ flex: 1, background: `${rateColor}1a`, borderRadius: '14px', padding: '0.55rem 0.7rem' }}>
-          <div style={{ fontSize: '0.62rem', letterSpacing: '0.5px', fontWeight: 700, color: rateColor, textTransform: 'uppercase' }}>Rate</div>
-          <div style={{ fontSize: '1.05rem', fontWeight: 800, color: rateColor }}>${hourlyRate.toFixed(0)}/hr</div>
+        <div style={{ flex: 1, background: `${rateColor}1a`, borderRadius: '14px', padding: '0.7rem 0.85rem' }}>
+          <div style={{ fontSize: '0.75rem', letterSpacing: '0.5px', fontWeight: 800, color: rateColor, textTransform: 'uppercase' }}>Rate</div>
+          <div style={{ fontSize: '1.5rem', fontWeight: 800, lineHeight: 1.15, color: rateColor }}>${hourlyRate.toFixed(0)}/hr</div>
         </div>
       </div>
 
@@ -283,9 +283,10 @@ export default function JobCompletionModal({
                 key={s.id}
                 onClick={() => toggleService(s.id)}
                 style={{
-                  padding: '0.3rem 0.6rem',
+                  padding: '0.5rem 0.9rem',
+                  minHeight: '42px',
                   borderRadius: 'var(--radius-full)',
-                  fontSize: '0.8rem',
+                  fontSize: '0.92rem',
                   fontWeight: 600,
                   display: 'flex',
                   alignItems: 'center',
@@ -320,9 +321,10 @@ export default function JobCompletionModal({
               key={c.id}
               onClick={() => toggleCondition(c.id)}
               style={{
-                padding: '0.4rem 0.8rem',
-                borderRadius: 'var(--radius-sm)',
-                fontSize: '0.8rem',
+                padding: '0.5rem 0.9rem',
+                minHeight: '42px',
+                borderRadius: '12px',
+                fontSize: '0.92rem',
                 fontWeight: 600,
                 display: 'flex',
                 alignItems: 'center',
@@ -570,7 +572,7 @@ export default function JobCompletionModal({
         </div>
       )}
       <button
-        style={{ width: '100%', height: '52px', border: 'none', borderRadius: '16px', background: 'var(--color-text-main)', color: 'var(--color-bg-card)', fontSize: '1rem', fontWeight: 700, cursor: 'pointer', marginBottom: '0.5rem' }}
+        style={{ width: '100%', height: '56px', border: 'none', borderRadius: '28px', background: '#047857', color: '#ffffff', fontSize: '1.1rem', fontWeight: 700, cursor: 'pointer', marginBottom: '0.5rem' }}
         onClick={() => handleSaveCompletion({ note: panelNote, conditions: savedConditions, appliedServices: selectedServices })}
       >
         Done

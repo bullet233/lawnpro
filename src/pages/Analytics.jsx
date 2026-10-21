@@ -12,6 +12,7 @@ import AddressAutocomplete from '../components/AddressAutocomplete';
 import { useServiceMode } from '../components/ServiceProvider';
 import { toast } from '../utils/toast';
 import { useNavigate, useLocation } from 'react-router-dom';
+import { createPortal } from 'react-dom';
 import ClientMetricsTab from '../components/ClientMetricsTab';
 
 // Haversine distance helper
@@ -272,151 +273,110 @@ function LineChart({ data, averagePace = 0, width = 340, height = 250 }) {
   );
 }
 
-function BucketHistoryModal({ bucket, minSqft, allVisits, allCustomers, onClose, width }) {
-  const { customerStats, slowest, fastest, maxPace } = useMemo(() => {
-    const custMap = new Map();
+// One card per lawn in a size tier: usual time vs what its size predicts,
+// what it pays and what that earns an hour, worst earner first.
+function BucketHistoryModal({ bucket, minSqft, allVisits, allCustomers, onClose, expectedMinsFor, targetRate, underpaidRate, onOpenCustomer }) {
+  const lawns = useMemo(() => {
+    const median = (arr) => {
+      const a = [...arr].sort((x, y) => x - y);
+      const m = Math.floor(a.length / 2);
+      return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+    };
+    const mowingServiceIds = (getSettings().defaultServices || []).filter(sv => sv.category === 'Mowing' || sv.id === 's1').map(sv => sv.id);
+    const inTier = new Map();
     allCustomers.forEach(c => {
-       const sqft = parseLawnSizeToSqFt(c.lawnSize);
-       if (sqft > minSqft && sqft <= bucket.maxSqft) {
-          custMap.set(c.id, { c, sqft, totalSecs: 0, count: 0 });
-       }
+      const sqft = parseLawnSizeToSqFt(c.lawnSize);
+      if (sqft > minSqft && sqft <= bucket.maxSqft) inTier.set(c.id, { c, sqft, visits: [] });
     });
-
-    const settings = getSettings();
-    const defaultServices = settings.defaultServices || [];
-    const mowingServiceIds = defaultServices.filter(s => s.category === 'Mowing' || s.id === 's1').map(s => s.id);
-
     allVisits.forEach(v => {
-       const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id));
-       if (v.status === 'completed' && v.durationSecs >= 60 && custMap.has(v.customerId) && isMow && !isLeafVisit(v)) {
-          const stats = custMap.get(v.customerId);
-          stats.totalSecs += v.durationSecs;
-          stats.count += 1;
-       }
+      const row = inTier.get(v.customerId);
+      if (!row || v.status !== 'completed' || !(v.durationSecs >= 60)) return;
+      const isMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id));
+      if (!isMow || isLeafVisit(v) || isCleanupVisit(v)) return;
+      row.visits.push(v);
     });
 
-    const statsArr = [];
-    custMap.forEach(stats => {
-       if (stats.count > 0) {
-          const avgMins = stats.totalSecs / stats.count / 60;
-          const pace = Math.round(stats.sqft / avgMins);
-          statsArr.push({ 
-            id: stats.c.id, 
-            name: stats.c.name, 
-            avgMins, 
-            pace, 
-            sqft: stats.sqft,
-            count: stats.count 
-          });
-       }
+    const out = [];
+    inTier.forEach(({ c, sqft, visits }) => {
+      if (visits.length === 0) return;
+      const mins = visits.map(v => v.durationSecs / 60);
+      const usual = median(mins);
+      const expected = expectedMinsFor(sqft);
+      const paid = visits.filter(v => v.priceEarned > 0);
+      const latestPaid = paid.length ? paid.reduce((a, b) => ((b.exitTime || 0) > (a.exitTime || 0) ? b : a)) : null;
+      const paidSecs = paid.reduce((t, v) => t + v.durationSecs, 0);
+      const rate = paidSecs > 0 ? paid.reduce((t, v) => t + v.priceEarned, 0) / (paidSecs / 3600) : null;
+      out.push({
+        id: c.id, name: c.name, sqft, cuts: visits.length,
+        usual, expected, extra: expected > 0 ? usual - expected : null,
+        fastest: Math.min(...mins), slowest: Math.max(...mins),
+        price: latestPaid ? latestPaid.priceEarned : null, rate,
+      });
     });
+    // Worst earner first; lawns with no price at the bottom.
+    return out.sort((a, b) => (a.rate ?? Infinity) - (b.rate ?? Infinity));
+  }, [bucket, minSqft, allVisits, allCustomers, expectedMinsFor]);
 
-    // Sort by pace (lower pace = slower/worse, higher pace = faster/better)
-    statsArr.sort((a, b) => a.pace - b.pace);
-    
-    const slowest = statsArr.slice(0, 3);
-    const fastest = [...statsArr].sort((a, b) => b.pace - a.pace).slice(0, 3);
-    
-    let maxP = bucket.pace * 1.5;
-    if (statsArr.length > 0) {
-      maxP = Math.max(maxP, ...statsArr.map(s => s.pace));
-    }
+  const tone = (raw) => {
+    const rate = raw == null ? null : Math.round(raw);
+    if (rate == null) return { color: 'var(--color-text-muted)', bg: 'var(--color-bg-main)', border: 'var(--color-border)' };
+    if (underpaidRate && rate < underpaidRate) return { color: '#b91c1c', bg: 'rgba(185,28,28,0.06)', border: 'rgba(185,28,28,0.35)' };
+    if (targetRate && rate < targetRate) return { color: '#b45309', bg: 'rgba(180,83,9,0.06)', border: 'rgba(180,83,9,0.35)' };
+    return { color: '#047857', bg: 'rgba(4,120,87,0.06)', border: 'rgba(4,120,87,0.35)' };
+  };
+  const m = (x) => Math.round(x);
+  const underTarget = lawns.filter(l => l.rate != null && targetRate && Math.round(l.rate) < targetRate).length;
+  const rangeText = `${minSqft.toLocaleString()} – ${bucket.maxSqft === Infinity ? 'up' : bucket.maxSqft.toLocaleString()} sq ft`;
 
-    return { customerStats: statsArr, slowest, fastest, maxPace: maxP };
-  }, [bucket, minSqft, allVisits, allCustomers]);
+  return createPortal(
+    <div style={{ position: 'fixed', inset: 0, zIndex: 3000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)', padding: '1rem' }} onClick={onClose}>
+      <div className="glass-card animate-scale-up" style={{ width: '100%', maxWidth: '640px', maxHeight: '90vh', overflowY: 'auto', padding: '1.4rem', position: 'relative', background: 'var(--color-bg-card)' }} onClick={e => e.stopPropagation()}>
+        <button className="btn-icon" onClick={onClose} aria-label="Close" style={{ position: 'absolute', top: '10px', right: '10px' }}><X size={22} /></button>
 
-  return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)', padding: '1rem' }} onClick={onClose}>
-       <div className="glass-card animate-scale-up" style={{ width: '100%', maxWidth: '600px', maxHeight: '90vh', overflowY: 'auto', padding: '1.5rem', position: 'relative' }} onClick={e => e.stopPropagation()}>
-          <button className="btn-icon" onClick={onClose} style={{ position: 'absolute', top: '10px', right: '10px' }}><X size={20} /></button>
-          
-          <h3 style={{ margin: '0 0 0.5rem 0' }}>{bucket.label} Action Report</h3>
-          <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', marginBottom: '1.5rem' }}>
-             Performance for lawns between {minSqft.toLocaleString()} and {bucket.maxSqft === Infinity ? 'Infinity' : bucket.maxSqft.toLocaleString()} sq ft.
-          </p>
+        <h3 style={{ margin: '0 2.5rem 0.3rem 0', fontSize: '1.3rem' }}>{bucket.label} lawns</h3>
+        <p style={{ fontSize: '0.95rem', color: 'var(--color-text-muted)', margin: '0 0 1rem 0' }}>
+          {rangeText} · {lawns.length} lawn{lawns.length === 1 ? '' : 's'} with mowing times
+          {targetRate > 0 && lawns.length > 0 && ` · ${underTarget} under $${targetRate}/hr`}
+        </p>
 
-          {customerStats.length > 0 ? (
-             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-               
-               {/* Dot Plot */}
-               <div style={{ padding: '1.5rem 1rem', background: 'var(--color-bg-main)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
-                 <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--color-text-muted)', marginBottom: '1rem', textAlign: 'center', textTransform: 'uppercase' }}>
-                   Speed Spread (SqFt per Minute)
-                 </div>
-                 <div style={{ position: 'relative', height: '60px', borderBottom: '2px solid var(--color-border)', margin: '0 10px' }}>
-                   {/* Target Pace Line */}
-                   <div style={{ position: 'absolute', left: `${(bucket.pace / maxPace) * 100}%`, top: 0, bottom: '-20px', width: '2px', background: 'var(--color-primary)', zIndex: 1 }} />
-                   <div style={{ position: 'absolute', left: `${(bucket.pace / maxPace) * 100}%`, bottom: '-35px', transform: 'translateX(-50%)', fontSize: '0.75rem', fontWeight: 700, color: 'var(--color-primary)' }}>
-                     Target: {Math.round(bucket.pace)}
-                   </div>
-                   
-                   {/* Client Dots */}
-                   {customerStats.map(s => {
-                     const left = `${(s.pace / maxPace) * 100}%`;
-                     const isSlow = s.pace < bucket.pace * 0.8;
-                     return (
-                       <div key={s.id} title={`${s.name} (${Math.round(s.avgMins)} mins)`} style={{
-                         position: 'absolute',
-                         left,
-                         top: '50%',
-                         transform: 'translate(-50%, -50%)',
-                         width: '12px',
-                         height: '12px',
-                         borderRadius: '50%',
-                         background: isSlow ? '#ef4444' : 'var(--color-text-main)',
-                         border: '2px solid var(--color-bg-main)',
-                         boxShadow: 'var(--shadow-sm)',
-                         cursor: 'help',
-                         zIndex: 2,
-                         opacity: 0.8
-                       }} />
-                     );
-                   })}
-                 </div>
-                 <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '25px', fontSize: '0.7rem', color: 'var(--color-text-muted)' }}>
-                   <span>Slower</span>
-                   <span>Faster</span>
-                 </div>
-               </div>
-
-               {/* Leaderboards */}
-               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                 <div style={{ background: 'rgba(239,68,68,0.05)', borderRadius: 'var(--radius-sm)', padding: '1rem', border: '1px solid rgba(239,68,68,0.2)' }}>
-                   <h4 style={{ margin: '0 0 0.8rem 0', color: '#ef4444', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                     <AlertTriangle size={14} /> Action Needed
-                   </h4>
-                   {slowest.map(s => (
-                     <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.4rem 0', borderBottom: '1px solid rgba(239,68,68,0.1)', fontSize: '0.85rem' }}>
-                       <span style={{ fontWeight: 600 }}>{s.name}</span>
-                       <span style={{ color: '#ef4444', fontWeight: 700 }}>{Math.round(s.avgMins)}m</span>
-                     </div>
-                   ))}
-                   <p style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginTop: '0.5rem', fontStyle: 'italic', lineHeight: 1.4 }}>
-                     These clients take the longest. Consider raising prices to hit your hourly target.
-                   </p>
-                 </div>
-                 
-                 <div style={{ background: 'rgba(16,185,129,0.05)', borderRadius: 'var(--radius-sm)', padding: '1rem', border: '1px solid rgba(16,185,129,0.2)' }}>
-                   <h4 style={{ margin: '0 0 0.8rem 0', color: '#10b981', fontSize: '0.9rem' }}>
-                     Top Performers
-                   </h4>
-                   {fastest.map(s => (
-                     <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.4rem 0', borderBottom: '1px solid rgba(16,185,129,0.1)', fontSize: '0.85rem' }}>
-                       <span style={{ fontWeight: 600 }}>{s.name}</span>
-                       <span style={{ color: '#10b981', fontWeight: 700 }}>{Math.round(s.avgMins)}m</span>
-                     </div>
-                   ))}
-                 </div>
-               </div>
-
-             </div>
-          ) : (
-             <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>
-                No historical visits found for this size bucket.
-             </div>
-          )}
-       </div>
-    </div>
+        {lawns.length === 0 ? (
+          <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>No mowing times yet for lawns this size.</div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.7rem' }}>
+            {lawns.map(l => {
+              const t = tone(l.rate);
+              const extra = l.extra == null ? null : m(l.extra);
+              return (
+                <button key={l.id} onClick={() => onOpenCustomer(l.id)} style={{ textAlign: 'left', cursor: 'pointer', width: '100%', background: t.bg, border: `1px solid ${t.border}`, borderLeft: `5px solid ${t.color}`, borderRadius: 'var(--radius-md)', padding: '0.85rem 1rem', color: 'var(--color-text-main)', font: 'inherit' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '0.8rem', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: '1.1rem', fontWeight: 800 }}>{l.name}</span>
+                    <span style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>{l.sqft.toLocaleString()} sq ft · {l.cuts} cut{l.cuts === 1 ? '' : 's'}</span>
+                  </div>
+                  <div style={{ fontSize: '1rem', marginTop: '0.35rem' }}>
+                    Usual <b>{m(l.usual)} min</b>
+                    {extra != null && (
+                      <span style={{ color: 'var(--color-text-muted)' }}>
+                        {' '}(expected {m(l.expected)} for its size, <b style={{ color: extra >= 3 ? '#b91c1c' : extra <= -3 ? '#047857' : 'var(--color-text-main)' }}>{extra > 0 ? '+' : ''}{extra} min</b>)
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: '1rem', marginTop: '0.2rem' }}>
+                    {l.price != null
+                      ? <>Pays <b>${l.price.toFixed(0)}</b> → earns <b style={{ color: t.color }}>${m(l.rate)}/hr</b></>
+                      : <span style={{ color: 'var(--color-text-muted)' }}>No price on its visits</span>}
+                    <span style={{ color: 'var(--color-text-muted)' }}> · fastest {m(l.fastest)} min, slowest {m(l.slowest)} min</span>
+                  </div>
+                </button>
+              );
+            })}
+            <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', margin: '0.2rem 0 0' }}>
+              Usual = middle mowing time (leaf and clean-up visits left out). Expected = what the matrix prices for that size. $/hr is job time only. Tap a lawn to open it.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body
   );
 }
 
@@ -602,8 +562,29 @@ export default function Analytics() {
       }
       currentGroup.rows.push(sqft);
     });
+    // How many active mowing lawns you service in each tier (the last tier
+    // also takes anything bigger than its top size).
+    const mowIds = (getSettings().defaultServices || []).filter(sv => sv.category === 'Mowing' || sv.id === 's1').map(sv => sv.id);
+    const mowLawnSizes = allCustomersRaw
+      .filter(c => c.status !== 'inactive' && (c.services || []).some(sv => sv.active && (sv.category === 'Mowing' || mowIds.includes(sv.id))))
+      .map(c => parseLawnSizeToSqFt(c.lawnSize))
+      .filter(sq => sq > 0);
+    groups.forEach((g, i) => {
+      const last = i === groups.length - 1;
+      g.lawnCount = mowLawnSizes.filter(sq => sq > g.minSqft && (last || sq <= g.bucket.maxSqft)).length;
+      // Per expanded row: lawns above the row before it (or the tier's start)
+      // up to this size; a tier's last row runs to the tier's top, so the rows
+      // add up to the tier's count.
+      g.rowCounts = {};
+      g.rows.forEach((sqft, j) => {
+        const lower = j === 0 ? g.minSqft : g.rows[j - 1];
+        const lastRow = j === g.rows.length - 1;
+        const upper = lastRow ? (last ? Infinity : g.bucket.maxSqft) : sqft;
+        g.rowCounts[sqft] = mowLawnSizes.filter(sq => sq > lower && sq <= upper).length;
+      });
+    });
     return groups;
-  }, [tieredMatrixData]);
+  }, [tieredMatrixData, allCustomersRaw]);
 
   // Autocomplete Handlers
   const onAutocompleteLoad = (autoC) => {
@@ -1903,6 +1884,9 @@ export default function Analytics() {
                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                               <span style={{ fontWeight: 700, color: 'var(--color-text-muted)', width: '1rem' }}>{open ? '▾' : '▸'}</span>
                               <span style={{ fontWeight: 700, color: 'var(--color-text-main)' }}>{group.label}</span>
+                              <span style={{ fontSize: '0.8rem', fontWeight: 700, color: group.lawnCount ? group.color : 'var(--color-text-muted)', background: `${group.color}1a`, border: `1px solid ${group.color}40`, padding: '0.15rem 0.55rem', borderRadius: 'var(--radius-full)', whiteSpace: 'nowrap' }}>
+                                {group.lawnCount} lawn{group.lawnCount === 1 ? '' : 's'}
+                              </span>
                               {!usingTrend && (
                                 <span style={{ fontWeight: 400, fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
                                   ({Math.round(group.pace)} sqft/m){!group.rawHasData && '*'}
@@ -1913,7 +1897,7 @@ export default function Analytics() {
                                 style={{ padding: '0.3rem 0.7rem', minHeight: '36px', fontSize: '0.8rem' }}
                                 onClick={(e) => { e.stopPropagation(); setSelectedBucket({ bucket: group.bucket, minSqft: group.minSqft }); }}
                               >
-                                Graph
+                                Lawns
                               </button>
                             </div>
                           </td>
@@ -1931,7 +1915,16 @@ export default function Analytics() {
 
                           return (
                             <tr key={sqft} style={{ borderBottom: '1px solid var(--color-border)', background: 'var(--color-bg-card)' }}>
-                              <td style={{ padding: '0.6rem 0.8rem 0.6rem 2.2rem', fontWeight: 600, borderLeft: `4px solid ${group.color}` }}>{sqft.toLocaleString()}</td>
+                              <td style={{ padding: '0.6rem 0.8rem 0.6rem 2.2rem', fontWeight: 600, borderLeft: `4px solid ${group.color}` }}>
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                  {sqft.toLocaleString()}
+                                  {group.rowCounts?.[sqft] > 0 && (
+                                    <span style={{ fontSize: '0.75rem', fontWeight: 700, color: group.color, background: `${group.color}1a`, border: `1px solid ${group.color}40`, padding: '0.1rem 0.5rem', borderRadius: 'var(--radius-full)', whiteSpace: 'nowrap' }}>
+                                      {group.rowCounts[sqft]} lawn{group.rowCounts[sqft] === 1 ? '' : 's'}
+                                    </span>
+                                  )}
+                                </span>
+                              </td>
                               <td style={{ padding: '0.6rem 0.8rem' }}>{Math.round(mins)} min</td>
                               <td style={{ padding: '0.6rem 0.8rem', fontWeight: 700, color: 'var(--color-primary)' }}>${price.toFixed(2)}</td>
                             </tr>
@@ -1944,8 +1937,8 @@ export default function Analytics() {
                 </table>
                 <div style={{ padding: '0.6rem 0.8rem', fontSize: '0.75rem', color: 'var(--color-text-muted)', background: 'var(--color-bg-main)', position: 'sticky', bottom: 0, borderTop: '1px solid var(--color-border)' }}>
                   {usingTrend
-                    ? `Prices from the trend curve model. Minimum stop fee: $${settings?.minStopFee ?? 30}. Tap a tier to list every size in it; Graph shows that tier's history.`
-                    : `* Denotes estimated pace borrowed from nearest bucket. Minimum stop fee: $${settings?.minStopFee ?? 30}. Tap a tier to list every size in it; Graph shows that tier's history.`}
+                    ? `Prices from the trend curve model. Minimum stop fee: $${settings?.minStopFee ?? 30}. Tap a tier to list every size in it; Lawns shows each lawn in it.`
+                    : `* Denotes estimated pace borrowed from nearest bucket. Minimum stop fee: $${settings?.minStopFee ?? 30}. Tap a tier to list every size in it; Lawns shows each lawn in it.`}
                 </div>
               </div>
             ) : (
@@ -1964,8 +1957,11 @@ export default function Analytics() {
           minSqft={selectedBucket.minSqft}
           allVisits={mowVisits}
           allCustomers={allCustomers}
-          width={chartWidth}
-          onClose={() => setSelectedBucket(null)} 
+          expectedMinsFor={getBaseMins}
+          targetRate={settings?.targetHourlyRate || 0}
+          underpaidRate={settings?.rateUnderpaidThreshold || 0}
+          onOpenCustomer={(id) => navigate(`/customers/${id}`)}
+          onClose={() => setSelectedBucket(null)}
         />
       )}
     </div>

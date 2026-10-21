@@ -5,7 +5,9 @@ import { Link, useNavigate } from 'react-router-dom';
 import DayReviewModal from '../components/DayReviewModal';
 import { getBusinessDayStart, getDaysSince } from '../utils/dateUtils';
 import { getVisitRevenueBreakdown, calculateServiceTotals } from '../utils/revenueUtils';
-import { getSettings } from '../db/settings';
+import { getSettings, saveSettings } from '../db/settings';
+import { mowSeasonState, toMD } from '../utils/mowSeason';
+import { serviceDue } from '../utils/dueStatus';
 import { findPossibleLeafVisits, leafToolsVisible, isLeafVisit, isCleanupVisit } from '../utils/leaves';
 import { setLeafTag } from '../utils/leafBilling';
 import { useServiceMode } from '../components/ServiceProvider';
@@ -304,8 +306,12 @@ export default function Dashboard() {
   }, [activeRoute, routeVisits]);
 
   // Due / Overdue customers (>= their specific service interval)
-  const { mowingDue } = useMemo(() => {
-    if (allCustomers.length === 0) return { mowingDue: [], fertilizerDue: [] };
+  // Bumped when the season is started or ended from Home, so the lists redo.
+  const [seasonTick, setSeasonTick] = useState(0);
+  const { mowingDue, season } = useMemo(() => {
+    const st = getSettings();
+    const season = mowSeasonState(Date.now(), { start: st.mowSeasonStart, end: st.mowSeasonEnd });
+    if (allCustomers.length === 0) return { mowingDue: [], fertilizerDue: [], season };
     const mDue = [];
     const fDue = [];
     
@@ -324,23 +330,13 @@ export default function Dashboard() {
       // on-purpose skip doesn't resurface the client as overdue next week.
       const custVisits = allVisits.filter(v => v.customerId === cust.id && isScheduleAnchor(v));
       
-      // Mowing
+      // Mowing — snoozed lawns stay off (same as the Weekly Scheduler), and
+      // nothing is due outside the mowing season.
       if (isMowingCust) {
-        const mInterval = cust.mowingInterval || cust.serviceInterval || 7;
-        const mowVisits = custVisits.filter(v => 
-          v.division === 'mowing' || 
-          (!v.division && (!v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => mowingServiceIds.includes(id))))
-        );
-        
-        if (mowVisits.length === 0) {
-          mDue.push({ ...cust, daysSince: 999, isNew: true, intervalDays: mInterval });
-        } else {
-          const lastMow = Math.max(...mowVisits.map(v => v.exitTime));
-          const daysSince = getDaysSince(lastMow);
-          if (daysSince >= mInterval) {
-            mDue.push({ ...cust, daysSince, isNew: false, intervalDays: mInterval });
-          }
-        }
+        // The shared due check (utils/dueStatus) — same answer as every other screen.
+        const d = serviceDue(cust, custVisits, { division: 'mowing', season, mowIds: mowingServiceIds });
+        const dueStatus = d.status === 'new' ? 'firstCut' : ['overdue', 'dueToday', 'firstCut'].includes(d.status) ? d.status : null;
+        if (dueStatus) mDue.push({ ...cust, daysSince: d.daysSince, isNew: d.lastTs == null, dueStatus, intervalDays: d.intervalDays });
       }
 
       // Fertilizer
@@ -366,8 +362,9 @@ export default function Dashboard() {
     mDue.sort((a, b) => (b.daysSince - b.intervalDays) - (a.daysSince - a.intervalDays));
     fDue.sort((a, b) => (b.daysSince - b.intervalDays) - (a.daysSince - a.intervalDays));
 
-    return { mowingDue: mDue, fertilizerDue: fDue };
-  }, [allCustomers, allVisits]);
+    return { mowingDue: mDue, fertilizerDue: fDue, season };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- seasonTick re-reads the season settings
+  }, [allCustomers, allVisits, seasonTick]);
 
   // Program-based treatments needing attention now (drives fertilizer-mode Dashboard)
   const treatmentAttention = useMemo(() => {
@@ -494,22 +491,66 @@ export default function Dashboard() {
   // Dropped and overdue used to be two lists with mostly the same people.
   const needsList = useMemo(() => {
     const map = new Map();
+    if (activeMode === 'mowing' && !season.inSeason) return [];
     droppedStops.forEach(c => map.set(c.id, { cust: c, droppedDaysAgo: c.droppedDaysAgo }));
     if (activeMode === 'mowing') {
       mowingDue.forEach(c => {
         const row = map.get(c.id) || { cust: c };
         row.isNew = c.isNew;
+        row.dueStatus = c.dueStatus;
         row.daysSince = c.isNew ? null : c.daysSince;
         row.intervalDays = c.intervalDays;
         map.set(c.id, row);
       });
     }
-    const rank = (r) => (r.droppedDaysAgo != null ? 0 : r.isNew ? 2 : 1);
+    // Dropped, then overdue, due today, first cut of the season, new clients.
+    const rank = (r) => (r.droppedDaysAgo != null ? 0 : r.dueStatus === 'overdue' ? 1 : r.dueStatus === 'dueToday' ? 2 : r.isNew ? 4 : 3);
     return [...map.values()].sort((a, b) =>
       rank(a) - rank(b) ||
       (b.droppedDaysAgo ?? 0) - (a.droppedDaysAgo ?? 0) ||
       ((b.daysSince ?? 0) - (b.intervalDays ?? 0)) - ((a.daysSince ?? 0) - (a.intervalDays ?? 0)));
-  }, [droppedStops, mowingDue, activeMode]);
+  }, [droppedStops, mowingDue, activeMode, season]);
+
+  const dueCounts = {
+    overdue: needsList.filter(r => r.droppedDaysAgo != null || r.dueStatus === 'overdue').length,
+    today: needsList.filter(r => r.droppedDaysAgo == null && r.dueStatus === 'dueToday').length,
+    first: needsList.filter(r => r.droppedDaysAgo == null && r.dueStatus === 'firstCut').length,
+  };
+  const seasonDay = (t) => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
+
+  // Morning summary: the first time Home opens each day, one card says how the
+  // day stands. Shown once per day (marked seen as soon as it shows), and only
+  // once the lawns and visits have loaded so it never shows empty numbers.
+  const [morning, setMorning] = useState(null);
+  const dataReady = allCustomers.length > 0 && allVisits.length > 0;
+  useEffect(() => {
+    if (!dataReady || morning || activeMode !== 'mowing' || !season.inSeason) return;
+    const day = new Date().toDateString();
+    let seen = null;
+    try { seen = localStorage.getItem('lawnpro_morning_summary_day'); } catch { /* private mode */ }
+    if (seen === day) return;
+    try { localStorage.setItem('lawnpro_morning_summary_day', day); } catch { /* private mode */ }
+    setMorning({
+      overdue: needsList.filter(r => r.droppedDaysAgo == null && r.dueStatus === 'overdue').length,
+      today: needsList.filter(r => r.droppedDaysAgo == null && r.dueStatus === 'dueToday').length,
+      first: needsList.filter(r => r.droppedDaysAgo == null && r.dueStatus === 'firstCut').length,
+      droppedYesterday: needsList.filter(r => r.droppedDaysAgo === 1).length,
+      droppedEarlier: needsList.filter(r => r.droppedDaysAgo != null && r.droppedDaysAgo > 1).length,
+      ids: needsList.map(r => r.cust.id),
+    });
+  }, [dataReady, morning, activeMode, season.inSeason, needsList]);
+  // End the season today / start it today (Settings holds the dates).
+  const endSeasonNow = () => setDialog({
+    type: 'warning', title: 'End the mowing season?',
+    message: 'Nothing will show as due or overdue until the season starts again. You can change the dates any time in Settings.',
+    confirmLabel: 'End season',
+    // The old end date is kept so an early end can be undone without
+    // restarting the season (which would reset every lawn to a first cut).
+    onConfirm: () => { saveSettings({ mowSeasonEndBefore: getSettings().mowSeasonEnd, mowSeasonEndedAt: Date.now(), mowSeasonEnd: toMD(Date.now() - 86400000) }); setSeasonTick(t => t + 1); },
+  });
+  const startSeasonNow = () => { saveSettings({ mowSeasonStart: toMD(Date.now()), mowSeasonEndBefore: null, mowSeasonEndedAt: null }); setSeasonTick(t => t + 1); };
+  const endedRecently = (() => { const st = getSettings(); return !!st.mowSeasonEndBefore && st.mowSeasonEndedAt > Date.now() - 30 * 86400000; })();
+  const undoEndSeason = () => { const st = getSettings(); saveSettings({ mowSeasonEnd: st.mowSeasonEndBefore, mowSeasonEndBefore: null, mowSeasonEndedAt: null }); setSeasonTick(t => t + 1); };
 
   const [picked, setPicked] = useState([]);           // lawns ticked for a route
   const [showAllNeeds, setShowAllNeeds] = useState(false);
@@ -635,6 +676,44 @@ export default function Dashboard() {
         </Link>
       </div>
 
+      {/* Morning summary — first open of the day */}
+      {morning && !morning.dismissed && (() => {
+        const tiles = [
+          ['Overdue', morning.overdue, '#b91c1c'],
+          ['Due today', morning.today, '#b45309'],
+          ['Dropped yesterday', morning.droppedYesterday, '#b45309'],
+          ...(morning.first ? [['First cut', morning.first, 'var(--color-primary)']] : []),
+          ...(morning.droppedEarlier ? [['Dropped earlier', morning.droppedEarlier, 'var(--color-text-muted)']] : []),
+        ];
+        const total = morning.ids.length;
+        return (
+          <div className="glass-card" style={{ marginBottom: '1.5rem', padding: '1.1rem 1.2rem', border: '2px solid var(--color-primary)', background: 'var(--color-bg-card)' }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '1rem', marginBottom: '0.8rem' }}>
+              <div>
+                <div style={{ fontSize: '0.85rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--color-primary)' }}>Today</div>
+                <div style={{ fontSize: '1.35rem', fontWeight: 800, color: 'var(--color-text-main)' }}>
+                  {total > 0 ? `${total} lawn${total === 1 ? '' : 's'} need mowing` : 'Everyone is mowed up'}
+                </div>
+              </div>
+              <button className="btn btn-secondary" onClick={() => setMorning(m => ({ ...m, dismissed: true }))} style={{ padding: '0.6rem 1rem', minHeight: '48px', fontSize: '1rem' }}>Got it</button>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '0.6rem' }}>
+              {tiles.map(([label, n, color]) => (
+                <div key={label} style={{ background: 'var(--color-bg-main)', borderRadius: 'var(--radius-sm)', padding: '0.6rem 0.8rem' }}>
+                  <div style={{ fontSize: '0.8rem', textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--color-text-muted)', fontWeight: 700 }}>{label}</div>
+                  <div style={{ fontSize: '1.6rem', fontWeight: 800, color: n > 0 ? color : 'var(--color-text-muted)' }}>{n}</div>
+                </div>
+              ))}
+            </div>
+            {total > 0 && !activeRoute && (
+              <button className="btn btn-primary" onClick={() => planRoute(morning.ids)} style={{ marginTop: '0.8rem', padding: '0.7rem 1.2rem', minHeight: '48px', fontSize: '1rem' }}>
+                Plan route with all {total}
+              </button>
+            )}
+          </div>
+        );
+      })()}
+
       {/* Top card — changes with the moment: route running, finished for the
           day, or nothing planned yet */}
       <div className="glass-card" style={{ marginBottom: '1.5rem', padding: '1.1rem 1.2rem', border: activeRoute ? '2px solid var(--color-primary)' : '1px solid var(--color-border)', background: activeRoute ? 'rgba(16,185,129,0.05)' : 'var(--color-bg-card)' }}>
@@ -686,9 +765,16 @@ export default function Dashboard() {
               <div style={{ fontSize: '0.85rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--color-text-muted)' }}>No route planned</div>
               <div style={{ fontSize: '1.35rem', fontWeight: 800, color: 'var(--color-text-main)' }}>
                 {activeMode === 'mowing'
-                  ? (needsList.length > 0 ? `${needsList.length} lawn${needsList.length === 1 ? '' : 's'} need mowing` : 'Everyone is mowed up')
+                  ? (!season.inSeason ? 'Mowing season is over' : needsList.length > 0 ? `${needsList.length} lawn${needsList.length === 1 ? '' : 's'} need mowing` : 'Everyone is mowed up')
                   : (treatmentAttention.length > 0 ? `${treatmentAttention.length} treatment${treatmentAttention.length === 1 ? '' : 's'} due` : 'No treatments due')}
               </div>
+              {activeMode === 'mowing' && (
+                <div style={{ fontSize: '1rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>
+                  {!season.inSeason
+                    ? `Starts again ${seasonDay(season.nextStart)}`
+                    : [dueCounts.overdue && `${dueCounts.overdue} overdue`, dueCounts.today && `${dueCounts.today} due today`, dueCounts.first && `${dueCounts.first} waiting on a first cut`].filter(Boolean).join(' · ')}
+                </div>
+              )}
             </div>
             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
               {needsList.length > 0 && (
@@ -817,7 +903,18 @@ export default function Dashboard() {
               </button>
             )}
           </div>
-          {needsList.length === 0 ? (
+          {activeMode === 'mowing' && !season.inSeason ? (
+            <div style={{ padding: '1.5rem', textAlign: 'center', color: 'var(--color-text-muted)', background: 'var(--color-bg-card)', borderRadius: 'var(--radius-md)', border: '1px dashed var(--color-border)', fontSize: '1rem' }}>
+              Mowing season is over — nothing shows as due until it starts again on {seasonDay(season.nextStart)}.
+              <div style={{ marginTop: '0.8rem' }}>
+                {endedRecently ? (
+                  <button className="btn btn-secondary" style={bigBtn} onClick={undoEndSeason}>Undo — I&apos;m still mowing</button>
+                ) : (
+                  <button className="btn btn-secondary" style={bigBtn} onClick={startSeasonNow}>Start the season today</button>
+                )}
+              </div>
+            </div>
+          ) : needsList.length === 0 ? (
             <div style={{ padding: '1.5rem', textAlign: 'center', color: 'var(--color-text-muted)', background: 'var(--color-bg-card)', borderRadius: 'var(--radius-md)', border: '1px dashed var(--color-border)', fontSize: '1rem' }}>
               No one needs mowing right now.
             </div>
@@ -828,7 +925,9 @@ export default function Dashboard() {
                 const late = r.daysSince != null && r.intervalDays != null && r.daysSince > r.intervalDays + 2;
                 const tags = [];
                 if (r.droppedDaysAgo != null) tags.push({ text: `dropped ${r.droppedDaysAgo === 0 ? 'today' : `${r.droppedDaysAgo}d ago`}`, color: '#b45309' });
-                if (r.daysSince != null) tags.push({ text: `${r.daysSince} days since last cut`, color: late ? '#b91c1c' : '#b45309' });
+                if (r.dueStatus === 'overdue') tags.push({ text: `${r.daysSince - r.intervalDays} day${r.daysSince - r.intervalDays === 1 ? '' : 's'} overdue · cut ${r.daysSince}d ago`, color: late ? '#b91c1c' : '#b45309' });
+                if (r.dueStatus === 'dueToday') tags.push({ text: `due today · cut ${r.daysSince}d ago`, color: '#b45309' });
+                if (r.dueStatus === 'firstCut' && !r.isNew) tags.push({ text: 'first cut of the season', color: 'var(--color-primary)' });
                 if (r.isNew) tags.push({ text: 'new client', color: 'var(--color-primary)' });
                 return (
                   <div key={r.cust.id} style={rowStyle}>
@@ -859,6 +958,12 @@ export default function Dashboard() {
           )}
           {needsList.length > 0 && (
             <p style={helpText}>Tick lawns and tap Plan route to open Route Builder with them in drive order, or Add to put one straight on {activeRoute ? 'the current' : "today's"} route.</p>
+          )}
+          {activeMode === 'mowing' && season.inSeason && (
+            <p style={helpText}>
+              Mowing season ends {seasonDay(season.seasonEnd)}.{' '}
+              <button onClick={endSeasonNow} style={{ background: 'none', border: 'none', padding: '0.4rem 0', cursor: 'pointer', color: 'var(--color-primary)', fontWeight: 700, fontSize: 'inherit' }}>Done for the year? End it now</button>
+            </p>
           )}
         </div>
       )}

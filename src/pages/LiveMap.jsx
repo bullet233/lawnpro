@@ -16,7 +16,7 @@ import { db } from '../db/db';
 import { GeofenceEngine, DIVISION_PROFILES } from '../engine/GeofenceEngine';
 import { GoogleMap, Marker, Polygon } from '@react-google-maps/api';
 import { useMapStatus } from '../components/MapProvider';
-import { Navigation, MapPin, CloudRain, ChevronUp, ChevronDown, SkipForward, Sun, CloudSun, Cloud, CloudDrizzle, CloudSnow, CloudLightning, X, Play, Pause, FileText, Map as MapIcon, ClipboardList, AlertTriangle } from 'lucide-react';
+import { Navigation, MapPin, CloudRain, ChevronUp, ChevronDown, SkipForward, Leaf, Info, Sun, CloudSun, Cloud, CloudDrizzle, CloudSnow, CloudLightning, X, Play, Pause, FileText, Map as MapIcon, ClipboardList, AlertTriangle } from 'lucide-react';
 import { parseLawnSizeToSqFt } from '../utils/parseLawnSize';
 import ComplianceLogModal from '../components/ComplianceLogModal';
 
@@ -28,11 +28,14 @@ import TimeSplitModal from '../components/TimeSplitModal';
 import EditJobModal from '../components/EditJobModal';
 import QuickAddModal from '../components/QuickAddModal';
 import { getSettings } from '../db/settings';
+import { routeSecondsLeft } from '../utils/routeEta';
+import { serviceDue } from '../utils/dueStatus';
+import { seasonFromSettings } from '../utils/mowSeason';
 import { syncLeafBilling, setLeafCharge, leafHourlyRate } from '../utils/leafBilling';
 import { trackApiCall } from '../utils/apiTracker';
 import { useServiceMode } from '../components/ServiceProvider';
 import { calculatePowerModel, predictTrendMins } from '../utils/matrix';
-import { defaultServicesForMode, eligibleForMode, isScheduleAnchor } from '../utils/scheduler';
+import { defaultServicesForMode, eligibleForMode } from '../utils/scheduler';
 import { LEAF_CONDITION, isLeafVisit, isMowVisit, isCleanupVisit, mowingServiceIds, comparableVisits, loadLeafJobs, saveLeafJobs, leafToolsVisible } from '../utils/leaves';
 import { autoCompleteStepFromVisit, syncTreatmentLogFromVisit, classifyTreatment } from '../db/treatments';
 import TodaysMixModal from '../components/livemap/TodaysMixModal';
@@ -122,7 +125,12 @@ export default function LiveMap() {
   
   const [activeGeofence, setActiveGeofence] = useState(null);
   const [drivebyPrompt, setDrivebyPrompt] = useState(null);
-  const [isRouteListOpen, setIsRouteListOpen] = useState(false);
+  const [isRouteListOpen, setIsRouteListOpenRaw] = useState(false);
+  const [jobDetailsOpen, setJobDetailsOpen] = useState(false);
+  // The job details and the route list share the screen with the map, so only
+  // one is open at a time.
+  const setIsRouteListOpen = (open) => { setIsRouteListOpenRaw(open); if (open) setJobDetailsOpen(false); };
+  const toggleJobDetails = () => setJobDetailsOpen(prev => { if (!prev) setIsRouteListOpenRaw(false); return !prev; });
                       const potentialEnterRef = useRef(null);
   const potentialExitRef = useRef(null);
   const [completionPanel, setCompletionPanel] = useState(null);
@@ -356,10 +364,10 @@ export default function LiveMap() {
   };
 
   const getStatusColors = (status) => {
-    if (status === 'completed') return { fill: '#10b981', stroke: '#059669' }; // Emerald Green
+    if (status === 'completed') return { fill: '#A7D7C5', stroke: '#6B9E8A' }; // pale green — done
     if (status === 'skipped') return { fill: '#9ca3af', stroke: '#6b7280' }; // Gray
     if (status === 'active') return { fill: '#f59e0b', stroke: '#d97706' }; // Amber Orange
-    return { fill: '#ef4444', stroke: '#b91c1c' }; // Red for pending
+    return { fill: '#047857', stroke: '#065f46' }; // green — still to do (same as Up next)
   };
 
   const globalPace = useMemo(() => {
@@ -380,53 +388,46 @@ export default function LiveMap() {
     return totalSecs === 0 ? 250 : Math.max(10, Math.round(totalSqFt / (totalSecs / 60)));
   }, [allVisits, allCustomers]);
 
+  // Re-work the finish time every minute, so it keeps moving while you sit on
+  // a slow lawn or in traffic (it used to freeze until a job started or ended).
+  const [etaTick, setEtaTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setEtaTick(n => n + 1), 60000);
+    return () => clearInterval(t);
+  }, []);
+  const jobElapsedMin = Math.floor((liveDuration || 0) / 60);
+  const drivingMin = Math.floor((drivingDuration || 0) / 60);
+
   const progressInfo = useMemo(() => {
     if (!activeRoute || !activeRoute.expandedStops || activeRoute.expandedStops.length === 0) return null;
     const completedStops = activeRoute.expandedStops.filter(s => getStopStatus(s.id) === 'completed' || getStopStatus(s.id) === 'skipped').length;
     const totalStops = activeRoute.expandedStops.length;
-    
-    let totalSecondsLeft = 0;
-    
-    activeRoute.expandedStops.forEach(s => {
-       if (getStopStatus(s.id) === 'pending') {
-          const normalizedStop = activeRoute.normalizedStops?.find(n => n.customerId === s.id);
-          const plannedIds = normalizedStop?.plannedServiceIds || [];
-          
-          const settings = getSettings();
-          const defaultServices = settings.defaultServices || [];
-          const isPlannedMow = plannedIds.length === 0 || plannedIds.some(id => defaultServices.find(ds => ds.id === id)?.category === 'Mowing' || id === 's1');
 
-          // Find historical visits for this customer to calculate average time.
-          // A stop marked as a leaf job is timed from its leaf visits; for
-          // everything else leaf visits stay out of the mow estimate.
-          const histVisits = comparableVisits(allVisits.filter(v => {
-            if (v.customerId !== s.id || v.status !== 'completed' || !v.durationSecs) return false;
-            const isHistMow = !v.appliedServices || v.appliedServices.length === 0 || v.appliedServices.some(id => defaultServices.find(ds => ds.id === id)?.category === 'Mowing' || id === 's1');
-            return isPlannedMow === isHistMow;
-          }), isPlannedMow && leafJobIds.includes(s.id));
-
-          let avgDuration = 900; // Default 15 mins
-          if (histVisits.length > 0) {
-             const sum = histVisits.reduce((acc, v) => acc + v.durationSecs, 0);
-             avgDuration = sum / histVisits.length;
-          } else {
-             const cust = allCustomers.find(c => c.id === s.id);
-             if (cust && cust.lawnSize) {
-                const sqft = parseLawnSizeToSqFt(cust.lawnSize);
-                if (sqft) avgDuration = Math.max(isPlannedMow ? 600 : 300, Math.round((sqft / globalPace) * 60));
-             }
-          }
-          
-          // Use planned Google Maps drive time if available, otherwise default to 5 minutes (300s)
-          // Look up this stop in activeRoute.normalizedStops to find plannedDriveTimeSecs
-          const driveTime = (normalizedStop && normalizedStop.plannedDriveTimeSecs !== undefined && normalizedStop.plannedDriveTimeSecs !== null) ? normalizedStop.plannedDriveTimeSecs : 300;
-          
-          totalSecondsLeft += avgDuration + driveTime; 
-       }
+    // The job in progress counts for what's left of it, every stop not
+    // started for its job + drive, and the stop being driven to only for the
+    // part of the drive still ahead (see utils/routeEta).
+    const stops = activeRoute.expandedStops.map(s => {
+      const normalizedStop = activeRoute.normalizedStops?.find(n => n.customerId === s.id);
+      return {
+        customer: s,
+        status: getStopStatus(s.id),
+        plannedIds: normalizedStop?.plannedServiceIds || [],
+        plannedDriveSecs: normalizedStop?.plannedDriveTimeSecs ?? null,
+        isLeafJob: leafJobIds.includes(s.id),
+      };
+    });
+    const drivingTo = !activeGeofence && !isDrivingPaused ? stops.find(st => st.status === 'pending')?.customer.id ?? null : null;
+    const totalSecondsLeft = routeSecondsLeft(stops, {
+      allVisits,
+      defaultServices: getSettings().defaultServices || [],
+      globalPace,
+      jobElapsedSecs: jobElapsedMin * 60,
+      drivingSecs: drivingMin * 60,
+      drivingToId: drivingTo,
     });
 
     const minutesLeft = Math.round(totalSecondsLeft / 60);
-    
+
     let etaString = '';
     let finishString = '';
     if (minutesLeft > 0) {
@@ -441,8 +442,10 @@ export default function LiveMap() {
       etaString = 'Finished';
     }
 
-    return { completedStops, totalStops, etaString, finishString };
-  }, [activeRoute, routeVisits, activeGeofence?.id, allVisits, allCustomers, globalPace, leafJobIds]);
+    const doneStops = activeRoute.expandedStops.filter(s => getStopStatus(s.id) === 'completed').length;
+    return { completedStops, doneStops, skippedStops: completedStops - doneStops, totalStops, etaString, finishString };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- etaTick / the minute counters re-run it on purpose
+  }, [activeRoute, routeVisits, activeGeofence?.id, allVisits, allCustomers, globalPace, leafJobIds, etaTick, jobElapsedMin, drivingMin, isDrivingPaused]);
 
   // Reuse the top-level getDistance (Haversine) — alias for clarity
   const getDistanceFromLatLonInMeters = getDistance;
@@ -490,6 +493,11 @@ export default function LiveMap() {
 
     return plannedNext;
   }, [activeRoute, routeVisits, activeGeofence?.id, currentPosition, allCustomers]);
+
+  // Job details close when the card moves on to a different lawn (they stay
+  // open from Next Job into the running job at the same lawn).
+  const shownCustomerId = activeGeofence?.id ?? nextStop?.id ?? null;
+  useEffect(() => { setJobDetailsOpen(false); }, [shownCustomerId]);
 
   // 1. Dynamic Map Navigation & Snap Back
   const onMapLoad = (map) => {
@@ -1156,10 +1164,10 @@ export default function LiveMap() {
             // Last schedule anchor before today (completed service OR a
             // deliberate cycle-skip) — keeps the badge honest for clients
             // skipped on purpose, matching Dashboard/scheduler due math.
-            const past = allDbVisits.filter(v =>
-              v.customerId === c.id && isScheduleAnchor(v) && v.exitTime < startOfToday.getTime()
-            );
-            const lastServicedTs = past.length > 0 ? Math.max(...past.map(v => v.exitTime)) : null;
+            // The shared due check, ignoring today (the job just finished
+            // must not make its neighbour look freshly done).
+            const dueInfo = serviceDue(c, allDbVisits, { division: mode, season: seasonFromSettings(getSettings()), beforeTs: startOfToday.getTime() });
+            const lastServicedTs = dueInfo.lastTs;
 
             // Due status so the prompt says whether the neighbor is actually
             // worth walking over to, not just that they're close. Program-
@@ -1168,7 +1176,7 @@ export default function LiveMap() {
             const intervalDays = mode === 'fertilizer'
               ? (c.fertilizerInterval || 30)
               : (c.mowingInterval || c.serviceInterval || 7);
-            const daysSince = lastServicedTs ? Math.floor((Date.now() - lastServicedTs) / 86400000) : null;
+            const daysSince = dueInfo.daysSince;
             let dueStatus;
             if (mode === 'fertilizer' && c.treatmentProgramId) {
               const states = allTreatments
@@ -1178,9 +1186,9 @@ export default function LiveMap() {
                 : states.includes('due') ? 'due'
                 : null;
             } else {
-              dueStatus = daysSince === null ? 'new'
-                : daysSince > intervalDays + 2 ? 'overdue'
-                : daysSince >= intervalDays ? 'due'
+              dueStatus = dueInfo.status === 'new' ? 'new'
+                : dueInfo.status === 'overdue' && dueInfo.overdueDays > 2 ? 'overdue'
+                : ['overdue', 'dueToday', 'firstCut'].includes(dueInfo.status) ? 'due'
                 : null;
             }
 
@@ -1908,24 +1916,29 @@ export default function LiveMap() {
         )}
         {/* GPS health. These used to be wired to a flag nothing ever set, so a
             dead location feed — and with it all auto-tracking — was silent. */}
-        {gpsStatus === 'denied' && (
-          <div style={{ background: '#ef4444', color: 'white', fontSize: '0.85rem', fontWeight: 600, textAlign: 'center', padding: '10px', borderRadius: 'var(--radius-md)', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', boxShadow: '0 4px 12px rgba(239,68,68,0.4)', marginBottom: '0.8rem' }}>
-            <AlertTriangle size={18} /> Location is off for this app — jobs won't auto-track. Turn it on in the tablet's settings.
-          </div>
-        )}
-        {gpsStatus === 'silent' && (activeRoute || activeGeofence) && (
-          <div style={{ background: '#ef4444', color: 'white', fontSize: '0.85rem', fontWeight: 600, textAlign: 'center', padding: '10px', borderRadius: 'var(--radius-md)', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', boxShadow: '0 4px 12px rgba(239,68,68,0.4)', marginBottom: '0.8rem' }}>
-            <AlertTriangle size={18} /> No GPS updates for 30+ seconds — auto-tracking is on hold until the signal returns.
-          </div>
-        )}
+        {/* GPS health chips. Tap a chip for what it means. */}
+        {(() => {
+          const chips = [];
+          if (gpsStatus === 'denied') chips.push({ key: 'denied', text: 'Location is off', title: 'Location is off', message: "Location is off for this app, so jobs won't start or finish on their own. Turn it on in the tablet's settings — you can still start and finish jobs by hand." });
+          if (gpsStatus === 'silent' && (activeRoute || activeGeofence)) chips.push({ key: 'silent', text: 'No GPS signal', title: 'No GPS updates', message: 'No GPS updates for 30+ seconds — auto-tracking is on hold until the signal returns.' });
+          if (poorGps && gpsStatus === 'ok') chips.push({ key: 'poor', text: 'Weak GPS', title: 'Weak GPS signal', message: 'The GPS signal is weak, so arriving and leaving lawns is paused until it improves.' });
+          if (chips.length === 0) return null;
+          return (
+            <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '0.6rem', marginBottom: '0.6rem', padding: '0 0.2rem' }}>
+              <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                {chips.map(c => (
+                  <button key={c.key} onClick={() => setDialog({ type: 'warning', title: c.title, message: c.message })}
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', minHeight: '38px', padding: '0.35rem 0.8rem', borderRadius: '999px', cursor: 'pointer', fontSize: '0.88rem', fontWeight: 700, background: '#FAEEDA', color: '#854F0B', border: '1px solid #EF9F27', boxShadow: '0 2px 6px rgba(0,0,0,0.08)' }}>
+                    <AlertTriangle size={15} /> {c.text} ›
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
         {pausedAway && activeGeofence && (
           <div style={{ background: '#fffbeb', color: '#b45309', border: '1px solid rgba(245,158,11,0.6)', fontSize: '0.85rem', fontWeight: 700, textAlign: 'center', padding: '10px', borderRadius: 'var(--radius-md)', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', boxShadow: '0 2px 8px rgba(0,0,0,0.08)', marginBottom: '0.8rem' }}>
             <Pause size={18} /> Still paused at {activeGeofence.name} — you've left the lawn. Tap Resume, or Done to log it.
-          </div>
-        )}
-        {poorGps && gpsStatus === 'ok' && (
-          <div style={{ background: '#ef4444', color: 'white', fontSize: '0.85rem', fontWeight: 600, textAlign: 'center', padding: '10px', borderRadius: 'var(--radius-md)', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', boxShadow: '0 4px 12px rgba(239,68,68,0.4)', marginBottom: '0.8rem' }}>
-            <AlertTriangle size={18} /> Poor GPS Signal — Auto-routing paused
           </div>
         )}
         {activeGeofence ? (
@@ -1943,6 +1956,8 @@ export default function LiveMap() {
             globalPace={globalPace}
             isLeafJob={leafJobIds.includes(activeGeofence.id)}
             onToggleLeafJob={showLeafTools || leafJobIds.includes(activeGeofence.id) ? () => toggleLeafJob(activeGeofence.id) : undefined}
+            detailsOpen={jobDetailsOpen}
+            onToggleDetails={toggleJobDetails}
             onCancelJob={() => {
               activeGeofenceIdRef.current = null;
               setActiveGeofence(null);
@@ -1967,20 +1982,24 @@ export default function LiveMap() {
           activeRoute ? (() => {
             if (activeRoute.status === 'pending') {
               return (
-                <div className="card animate-fade-in" style={{ padding: '1.3rem 1rem 1.1rem', borderRadius: '1.5rem', boxShadow: '0 4px 16px rgba(0,0,0,0.1)' }}>
-                  <div style={{ textAlign: 'center', marginBottom: '1.1rem' }}>
-                    <div style={{ fontSize: '0.72rem', color: 'var(--color-primary)', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '1.2px' }}>Pending route</div>
-                    <strong style={{ fontSize: '1.5rem', display: 'block', color: 'var(--color-text-main)', marginTop: '0.3rem' }}>{activeRoute.name || 'Unnamed Route'}</strong>
-                    <div style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', marginTop: '0.2rem' }}>{activeRoute.expandedStops.length} stops</div>
-                  </div>
-                  <button style={{ width: '100%', height: '56px', border: 'none', borderRadius: '16px', background: 'var(--color-primary)', color: '#fff', fontSize: '1.1rem', fontWeight: 700, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }} onClick={async () => {
-                     await db.routes.update(activeRoute.id, { status: 'active' });
+                <div className="animate-fade-in" style={{ padding: '1rem 1rem 0.9rem', borderRadius: '1.25rem', background: '#ffffff', border: '1px solid var(--color-border)', boxShadow: '0 6px 24px rgba(0,0,0,0.12)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+                    <div style={{ minWidth: 0 }}>
+                      <span style={{ fontSize: '0.72rem', letterSpacing: '1px', fontWeight: 800, textTransform: 'uppercase', color: '#065f46', background: '#E1F5EE', padding: '0.2rem 0.6rem', borderRadius: '999px' }}>Route ready</span>
+                      <strong style={{ fontSize: '1.6rem', display: 'block', color: 'var(--color-text-main)', marginTop: '0.3rem', lineHeight: 1.1 }}>{activeRoute.name || 'Unnamed Route'}</strong>
+                      <div style={{ fontSize: '0.95rem', color: 'var(--color-text-muted)', marginTop: '0.2rem', fontWeight: 600 }}>
+                        {activeRoute.expandedStops.length} stop{activeRoute.expandedStops.length === 1 ? '' : 's'}{progressInfo?.etaString ? ` · about ${progressInfo.etaString.replace(' left', '')}` : ''}
+                      </div>
+                    </div>
+                    <button style={{ minWidth: '220px', flex: '0 1 320px', height: '58px', border: 'none', borderRadius: '29px', background: '#047857', color: '#fff', fontSize: '1.1rem', fontWeight: 700, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }} onClick={async () => {
+                       await db.routes.update(activeRoute.id, { status: 'active' });
 
-                     // Tie the driving timer explicitly to this Start Route action!
-                     resetDriveTimer(true);
-                  }}>
-                    <Play fill="currentColor" size={20} /> Start route
-                  </button>
+                       // Tie the driving timer explicitly to this Start Route action!
+                       resetDriveTimer(true);
+                    }}>
+                      <Play fill="currentColor" size={20} /> Start route
+                    </button>
+                  </div>
                 </div>
               );
             }
@@ -1996,81 +2015,91 @@ export default function LiveMap() {
               else if (wcode <= 99) WIcon = CloudLightning;
               const driveColor = isDrivingPaused ? 'var(--color-warning)' : 'var(--color-primary)';
               return (
-                <div className="card animate-fade-in" style={{ padding: '0.9rem 1rem 1rem', borderRadius: '1.5rem', boxShadow: '0 4px 16px rgba(0,0,0,0.1)' }}>
+                <div className="animate-fade-in" style={{ padding: '1rem 1rem 0.9rem', borderRadius: '1.25rem', background: '#ffffff', border: '1px solid var(--color-border)', boxShadow: '0 6px 24px rgba(0,0,0,0.12)' }}>
                   {pendingArrival && (
-                    <div style={{ marginBottom: '0.7rem', padding: '0.5rem 0.8rem', borderRadius: 'var(--radius-sm)', background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.35)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: '0.82rem', fontWeight: 700, color: 'var(--color-primary)' }}>Arriving at {pendingArrival.name}…</span>
-                      <span style={{ fontSize: '0.85rem', fontWeight: 800, fontFamily: 'monospace', color: 'var(--color-primary)' }}>{pendingArrival.secondsLeft}s</span>
+                    <div style={{ marginBottom: '0.7rem', padding: '0.5rem 0.8rem', borderRadius: '10px', background: '#E1F5EE', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '0.92rem', fontWeight: 700, color: '#065f46' }}>Arriving at {pendingArrival.name}…</span>
+                      <span style={{ fontSize: '0.95rem', fontWeight: 800, fontFamily: 'monospace', color: '#065f46' }}>{pendingArrival.secondsLeft}s</span>
                     </div>
                   )}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.8rem' }}>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: '0.7rem', color: 'var(--color-primary)', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '1.2px' }}>Next job</div>
-                      <strong style={{ fontSize: '1.4rem', display: 'block', color: 'var(--color-text-main)', lineHeight: 1.1 }}>{nextStop.name}</strong>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>{nextStop.address}</div>
+                      <span style={{ fontSize: '0.72rem', letterSpacing: '1px', fontWeight: 800, textTransform: 'uppercase', color: '#065f46', background: '#E1F5EE', padding: '0.2rem 0.6rem', borderRadius: '999px' }}>Next job</span>
+                      <button onClick={toggleJobDetails} aria-expanded={jobDetailsOpen} aria-label={`${nextStop.name} — ${jobDetailsOpen ? 'hide' : 'show'} job details`}
+                        style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', background: 'none', border: 'none', padding: 0, marginTop: '0.3rem', cursor: 'pointer', color: 'var(--color-text-main)', textAlign: 'left' }}>
+                        <strong style={{ fontSize: '1.6rem', lineHeight: 1.1 }}>{nextStop.name}</strong>
+                        {jobDetailsOpen ? <ChevronUp size={20} color="var(--color-text-muted)" /> : <ChevronDown size={20} color="var(--color-text-muted)" />}
+                      </button>
+                      <div style={{ fontSize: '0.88rem', color: 'var(--color-text-muted)' }}>{nextStop.address}</div>
                       {weather && (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', marginTop: '0.4rem', color: 'var(--color-text-muted)', fontSize: '0.8rem', fontWeight: 600 }}>
-                          <WIcon size={14} color="var(--color-primary)" />
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', marginTop: '0.2rem', color: 'var(--color-text-muted)', fontSize: '0.82rem', fontWeight: 600 }}>
+                          <WIcon size={14} />
                           <span>{weather.temp}°F · {weather.wind} mph</span>
                         </div>
                       )}
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexShrink: 0 }}>
                       {isDrivingPaused && drivingDuration === 0 ? (
                         <button
-                          style={{ padding: '0.4rem 0.8rem', fontSize: '0.75rem', fontWeight: 700, borderRadius: '12px', background: 'var(--color-primary)', color: '#fff', border: 'none', display: 'flex', alignItems: 'center', gap: '0.3rem', cursor: 'pointer' }}
+                          style={{ minHeight: '44px', padding: '0.5rem 1rem', fontSize: '0.9rem', fontWeight: 700, borderRadius: '22px', background: '#047857', color: '#fff', border: 'none', display: 'flex', alignItems: 'center', gap: '0.35rem', cursor: 'pointer' }}
                           onClick={(e) => { e.stopPropagation(); resetDriveTimer(true); }}
                         >
-                          <Play size={12} fill="currentColor" /> START DRIVING
+                          <Play size={14} fill="currentColor" /> Start driving
                         </button>
                       ) : (
                         <>
+                          <div style={{ textAlign: 'right', lineHeight: 1.15 }}>
+                            <div style={{ fontSize: '0.72rem', letterSpacing: '1px', fontWeight: 800, color: 'var(--color-text-muted)' }}>{isDrivingPaused ? 'DRIVE PAUSED' : 'DRIVING'}</div>
+                            <div style={{ fontSize: '1.6rem', fontWeight: 800, fontFamily: 'monospace', fontVariantNumeric: 'tabular-nums', color: driveColor }}>{formatLiveTimer(drivingDuration)}</div>
+                          </div>
                           <button
                             aria-label={isDrivingPaused ? 'Resume driving' : 'Pause driving'}
-                            style={{ width: '34px', height: '34px', borderRadius: '50%', background: 'var(--color-bg-main)', color: driveColor, border: '1px solid var(--color-border)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}
+                            style={{ width: '48px', height: '48px', borderRadius: '50%', background: 'var(--color-bg-main)', color: driveColor, border: '1px solid var(--color-border)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}
                             onClick={(e) => { e.stopPropagation(); toggleDrivePause(); }}
                           >
-                            {isDrivingPaused ? <Play size={16} fill="currentColor" /> : <Pause size={16} fill="currentColor" />}
+                            {isDrivingPaused ? <Play size={20} fill="currentColor" /> : <Pause size={20} fill="currentColor" />}
                           </button>
-                          <div style={{ background: 'var(--color-bg-main)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-full)', padding: '0.25rem 0.7rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                            <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: driveColor }} />
-                            <span style={{ fontSize: '1.05rem', fontWeight: 800, fontFamily: 'monospace', color: driveColor, fontVariantNumeric: 'tabular-nums' }}>
-                              {formatLiveTimer(drivingDuration)}
-                            </span>
-                          </div>
                         </>
                       )}
                     </div>
                   </div>
 
                   <div style={{ display: 'flex', gap: '0.6rem', marginTop: '0.9rem' }}>
-                    <button style={{ flex: 2, height: '54px', border: 'none', borderRadius: '16px', background: 'var(--color-primary)', color: '#fff', fontSize: '1rem', fontWeight: 700, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }} onClick={() => {
+                    <button style={{ flex: 2, height: '56px', border: 'none', borderRadius: '28px', background: '#047857', color: '#fff', fontSize: '1.05rem', fontWeight: 700, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }} onClick={() => {
                       dismissedOpportunitiesRef.current.clear();
                       startJobManually(nextStop);
                     }}>
                       <Play fill="currentColor" size={18} /> Start job
                     </button>
-                    <button style={{ flex: 1, height: '54px', borderRadius: '16px', background: 'var(--color-bg-main)', color: 'var(--color-text-main)', border: '1px solid var(--color-border)', fontSize: '0.9rem', fontWeight: 600, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }} onClick={() => handleSkipStop(nextStop)}>
-                      <SkipForward size={16} /> Skip
+                    <button style={{ flex: 1, height: '56px', borderRadius: '28px', background: 'var(--color-bg-main)', color: 'var(--color-text-main)', border: '1px solid var(--color-border)', fontSize: '1rem', fontWeight: 700, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }} onClick={() => handleSkipStop(nextStop)}>
+                      <SkipForward size={18} /> Skip
                     </button>
                   </div>
 
-                  {/* Leaf job toggle — mark it before you start, from the truck */}
+                  {/* Leaf job — mark it before you start, from the truck */}
                   {(showLeafTools || leafJobIds.includes(nextStop.id)) && (() => {
                     const on = leafJobIds.includes(nextStop.id);
                     return (
                       <button
                         aria-pressed={on}
                         onClick={() => toggleLeafJob(nextStop.id)}
-                        style={{ width: '100%', minHeight: '46px', marginTop: '0.6rem', padding: '0.5rem 0.8rem', borderRadius: '14px', cursor: 'pointer', fontSize: '0.9rem', fontWeight: 700, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.4rem', border: on ? '2px solid #b45309' : '1px dashed var(--color-border)', background: on ? 'rgba(180,83,9,0.12)' : 'var(--color-bg-main)', color: on ? '#b45309' : 'var(--color-text-muted)' }}
+                        style={{ width: '100%', minHeight: '46px', marginTop: '0.6rem', padding: '0.5rem 0.8rem', borderRadius: '12px', cursor: 'pointer', fontSize: '0.95rem', fontWeight: 700, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.4rem', border: on ? '2px solid #b45309' : '1px solid var(--color-border)', background: on ? 'rgba(180,83,9,0.12)' : 'var(--color-bg-main)', color: on ? '#b45309' : 'var(--color-text-main)' }}
                       >
-                        {on ? '🍂 Leaf job — tap to undo' : '🍂 Picking up leaves here? Tap to mark as a leaf job'}
+                        <Leaf size={17} color={on ? '#b45309' : '#3B6D11'} /> {on ? 'Leaf job ✓ — tap to undo' : 'Picking up leaves here? Mark as a leaf job'}
                       </button>
                     );
                   })()}
 
-                  <div style={{ marginTop: '0.5rem' }}>
-                    <CustomerDetailsDropdown customer={nextStop} allVisits={allVisits} globalPace={globalPace} darkTheme={true} isLeafJob={leafJobIds.includes(nextStop.id)} />
+                  {jobDetailsOpen && (
+                    <div style={{ marginTop: '0.6rem' }}>
+                      <CustomerDetailsDropdown customer={nextStop} allVisits={allVisits} globalPace={globalPace} open onToggle={toggleJobDetails} showToggle={false} />
+                    </div>
+                  )}
+                  <div style={{ borderTop: '1px solid var(--color-border)', marginTop: '0.6rem' }}>
+                    <button onClick={toggleJobDetails} aria-expanded={jobDetailsOpen}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.5rem 0.2rem', minHeight: '44px', fontSize: '0.88rem', fontWeight: 700, color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                      <Info size={16} /> {jobDetailsOpen ? 'Hide details' : 'Details'}
+                    </button>
                   </div>
                 </div>
               );
@@ -2085,6 +2114,22 @@ export default function LiveMap() {
             <div className="card" style={{ color: 'var(--color-text-muted)', textAlign: 'center', padding: '1rem' }}>No Active Route. Select one from Routes tab.</div>
           )
         )}
+
+        {/* Map buttons — in the flow under the cards, so a taller card never covers them */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '0.6rem', pointerEvents: 'none' }}>
+          {!autoCenter && (
+            <button className="btn-icon animate-fade-in" aria-label="Recenter map"
+              onClick={() => { setAutoCenter(true); autoCenterRef.current = true; }}
+              style={{ pointerEvents: 'auto', width: '48px', height: '48px', background: 'var(--color-bg-card)', boxShadow: 'var(--shadow-md)', border: '1px solid var(--color-border)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Navigation size={22} color="var(--color-primary)" />
+            </button>
+          )}
+          <button className="btn-icon animate-fade-in" aria-label={mapTypeId === 'roadmap' ? 'Show satellite' : 'Show map'}
+            onClick={() => setMapTypeId(prev => prev === 'roadmap' ? 'satellite' : 'roadmap')}
+            style={{ pointerEvents: 'auto', width: '48px', height: '48px', background: 'var(--color-bg-card)', boxShadow: 'var(--shadow-md)', border: '1px solid var(--color-border)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: '0.8rem', color: 'var(--color-text-main)' }}>
+            {mapTypeId === 'roadmap' ? 'SAT' : 'MAP'}
+          </button>
+        </div>
 
         {/* Nearby Opportunity Banner */}
         {nearbyOpportunity && !activeGeofence && (
@@ -2223,24 +2268,6 @@ export default function LiveMap() {
         leafJobIds={leafJobIds}
         onToggleLeafJob={showLeafTools ? toggleLeafJob : undefined}
       />
-
-      {/* Recenter Button if autoCenter is disabled */}
-      {!autoCenter && (
-        <button 
-          className="btn-icon animate-fade-in" 
-          onClick={() => { setAutoCenter(true); autoCenterRef.current = true; }}
-          style={{ position: 'absolute', top: '19.5rem', right: '1rem', zIndex: 10, background: 'var(--color-bg-card)', boxShadow: 'var(--shadow-md)', border: 'none', cursor: 'pointer' }}>
-          <Navigation size={24} color="var(--color-primary)" />
-        </button>
-      )}
-
-      {/* Map Type Toggle */}
-      <button 
-        className="btn-icon animate-fade-in" 
-        onClick={() => setMapTypeId(prev => prev === 'roadmap' ? 'satellite' : 'roadmap')}
-        style={{ position: 'absolute', top: '16rem', right: '1rem', zIndex: 10, background: 'var(--color-bg-card)', boxShadow: 'var(--shadow-md)', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '40px', height: '40px', fontWeight: 600, fontSize: '0.75rem', color: 'var(--color-text-main)' }}>
-        {mapTypeId === 'roadmap' ? 'SAT' : 'MAP'}
-      </button>
 
       {showQuickAdd && (
         <QuickAddModal 

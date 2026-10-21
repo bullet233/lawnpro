@@ -7,6 +7,8 @@ const DEFAULT_SETTINGS = {
   drivebyThresholdSecs: 45,
   leafHourlyRate: 0,   // $/hr billed for leaf time on a leaf job (0 = not priced)
   leafButtons: 'auto', // 'auto' (Oct 1 – Dec 1) | 'show' | 'hide' — see utils/leaves
+  mowSeasonStart: '04-15', // mowing season, 'MM-DD' — nothing is overdue outside it (utils/mowSeason)
+  mowSeasonEnd: '11-15',
   costOfGas: 3.50,
   truckMpg: 7,
   mowerGph: 1.0,
